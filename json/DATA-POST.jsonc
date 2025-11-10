@@ -1,0 +1,10 @@
+// Data post request
+{
+    //Array de datos Densidad Espectral de Potencia en dBm/Hz (float32)
+    "Pxx": [-0.54, -0.43, -1.56],
+    //En hz (int)
+    "start_freq_hz": 1000,
+    "end_freq_hz": 2000,
+    // Marca de tiempo del momento en que se realizó la adquisición (unix ms)
+    "timestamp": 1758435092721
+}

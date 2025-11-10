@@ -1,0 +1,75 @@
+// GET jobs
+{
+  // List of active or scheduled campaigns.
+  // Can be empty ([]) but is always sent. Each element represents an independent campaign.
+  "campaigns": [
+    {
+      // Unique campaign identifier (links to Campaign.id in the database).
+      "campaign_id": 123,
+
+      // Current campaign status:
+      // 'scheduled' = scheduled for a future start
+      // 'active' = running
+      // 'finished' = completed successfully
+      // 'canceled' = manually stopped
+      // 'error' = finished due to failure
+      "status": "scheduled",
+
+      // Initial spectral analysis frequency (Hz).
+      "start_freq_hz": 88000000,
+
+      // Final spectral analysis frequency (Hz).
+      "end_freq_hz": 108000000,
+
+      // Spectral resolution or RBW (Resolution Bandwidth) in Hz.
+      "resolution_hz": 10000,
+
+      // Connected physical antenna port.
+      "antenna_port": 1,
+
+      // Interval between consecutive measurements, in seconds.
+      "acquisition_period_s": 300, // 5 min
+
+      // Scheduled time window for the campaign.
+      "timeframe": {
+        // Unix timestamp (ms) of the scheduled start.
+        "start": 1758435092721,
+
+        // Unix timestamp (ms) of the scheduled end.
+        "end": 1758442292721
+      }
+    }
+
+    // ...there can be multiple campaigns or the list can be empty []
+  ],
+
+  // Immediate measurement (real-time) configuration.
+  // If no operation is in progress, this field is sent as `null`.
+  "real_time": {
+    // Initial frequency for immediate operation (Hz).
+    "start_freq_hz": 88000000,
+
+    // Final frequency for immediate operation (Hz).
+    "end_freq_hz": 108000000,
+
+    // Spectral resolution (Hz).
+    "resolution_hz": 10000,
+
+    // Active physical antenna port during the operation.
+    "antenna_port": 1,
+
+    // Optional demodulation block.
+    // If no demodulation is active, this block is sent as `null`.
+    "demodulation": {
+      // Type of demodulation.
+      // 'AM' = Amplitude Modulation, 'FM' = Frequency Modulation.
+      "type": "FM",
+
+      // Bandwidth of the demodulated channel (Hz).
+      "bandwidth_hz": 12500,
+
+      // Center frequency of the demodulated channel (Hz).
+      "center_freq_hz": 95500000
+    }
+  }
+}

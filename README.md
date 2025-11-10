@@ -1,2 +1,11 @@
-# SDR-SpectrumMonitoring-Sensor
-This repository contains software solutions to handle a spectrum sensing seonsr, with sdr (HackRF).
+# Install Project:
+
+Run in a Raspberry Pi 5 in this path this command:
+```bash
+chmod +x install.sh
+./install.sh
+
+#Then run this script:
+sudo ./build/init_system 
+
+```

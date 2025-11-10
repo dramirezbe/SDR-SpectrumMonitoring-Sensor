@@ -1,0 +1,23 @@
+{
+  // Lista de campañas activas o programadas.
+  // Vacía porque no hay campañas en ejecución ni programadas.
+  "campaigns": [],
+
+  // Configuración de medición en tiempo real.
+  // Indica una operación inmediata sobre una banda específica, sin demodulación activa.
+  "real_time": {
+    // Rango de frecuencias medido en tiempo real: 1.8–1.81 GHz.
+    "start_freq_hz": 1800000000,
+    "end_freq_hz": 1810000000,
+
+    // Resolución espectral (RBW) de 20 kHz.
+    "resolution_hz": 20000,
+
+    // Puerto físico de antena utilizado durante la medición.
+    "antenna_port": 2,
+
+    // Bloque de demodulación.
+    // En este caso es null, lo que indica que no se está decodificando ninguna señal (solo análisis espectral).
+    "demodulation": null
+  }
+}

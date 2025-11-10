@@ -1,0 +1,9 @@
+{
+  // Lista de campañas activas o programadas.
+  // En este estado está vacía, lo que indica que no hay campañas en curso ni pendientes.
+  "campaigns": [],
+
+  // Configuración de medición en tiempo real.
+  // Se envía como null para indicar que no hay operación inmediata ni demodulación activa.
+  "real_time": null
+}

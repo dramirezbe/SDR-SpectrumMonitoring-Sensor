@@ -1,0 +1,86 @@
+{
+  // Lista de campañas activas o programadas.
+  // En este ejemplo, hay una campaña en curso y otra programada.
+  "campaigns": [
+    {
+      // Campaña 101: actualmente en ejecución.
+      "campaign_id": 101,
+      "status": "active",
+
+      // Frecuencia de análisis: 88 a 108 MHz (banda FM comercial).
+      "start_freq_hz": 88000000,
+      "end_freq_hz": 108000000,
+
+      // Resolución espectral: 20 kHz.
+      "resolution_hz": 20000,
+
+      // Usa el puerto de antena 1.
+      "antenna_port": 1,
+
+      // Mide cada 30 segundos.
+      "acquisition_period_s": 30,
+
+      // Ventana de tiempo programada para esta campaña.
+      "timeframe": {
+        // Inicio de la campaña (Unix timestamp en ms).
+        "start": 1758371790300,
+
+        // Fin programado.
+        "end": 1761523517599
+      }
+    },
+    {
+      // Campaña 102: programada para futuro inicio.
+      "campaign_id": 102,
+      "status": "scheduled",
+
+      // Escaneo entre 2.4 y 2.5 GHz.
+      "start_freq_hz": 2400000000,
+      "end_freq_hz": 2500000000,
+
+      // Resolución más gruesa: 50 kHz.
+      "resolution_hz": 50000,
+
+      // Captura IQ habilitada con decimación (1 de cada 4 muestras).
+      "iq": 4,
+
+      // Usa el puerto de antena 2.
+      "antenna_port": 2,
+
+      // Medición cada 60 segundos.
+      "acquisition_period_s": 60,
+
+      // Periodo programado similar al anterior.
+      "timeframe": {
+        "start": 1758371790300,
+        "end": 1761523517599
+      }
+    }
+  ],
+
+  // Configuración de operación en tiempo real.
+  // Aquí hay una operación activa con demodulación FM.
+  "real_time": {
+    // Rango de frecuencias analizado inmediatamente (100–101 MHz).
+    "start_freq_hz": 100000000,
+    "end_freq_hz": 101000000,
+
+    // Resolución de 10 kHz.
+    "resolution_hz": 10000,
+
+    // Antena activa: puerto 1.
+    "antenna_port": 1,
+
+    // Bloque de demodulación: presente porque hay audio demodulado en tiempo real.
+    "demodulation": {
+      // Tipo de demodulación: Frecuencia Modulada.
+      "type": "FM",
+
+      // Ancho de banda de canal: 200 kHz (típico de FM comercial).
+      "bandwidth_hz": 200000,
+
+      // Frecuencia central de demodulación: 100.7 MHz.
+      "center_freq_hz": 100700000
+    }
+  }
+}
