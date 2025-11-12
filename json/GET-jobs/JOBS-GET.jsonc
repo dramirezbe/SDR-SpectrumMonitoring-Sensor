@@ -64,9 +64,11 @@
       // Type of demodulation.
       // 'AM' = Amplitude Modulation, 'FM' = Frequency Modulation.
       "type": "FM",
+      //Calculate excursion, and depth
+      "with_metrics": true,
 
       // Bandwidth of the demodulated channel (Hz).
-      "bandwidth_hz": 12500,
+      "bandwidth_hz": 250000,
 
       // Center frequency of the demodulated channel (Hz).
       "center_freq_hz": 95500000
