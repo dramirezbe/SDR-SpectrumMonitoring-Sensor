@@ -64,6 +64,8 @@ class DemodSystem:
             process.wait()
 
     def am_to_audio(self):
+        if cfg.VERBOSE:
+            log.info("AM demod not implemented yet")
         pass
 
 
@@ -76,8 +78,8 @@ class DemodSystem:
                 self.am_to_audio()
 
 def main():
-    sys = DemodSystem(105.7e6)
-    sys.fm_to_audio()
+    sys = DemodSystem(105.7e6, 250e3, "fm")
+    sys.run_demod()
 
 if __name__ == "__main__":
     rc = run_and_capture(main, log, cfg.LOGS_DIR / "demod", cfg.get_time_ms(), cfg.LOG_FILES_NUM)
