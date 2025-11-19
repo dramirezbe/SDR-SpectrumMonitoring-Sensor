@@ -1,24 +1,11 @@
 """
 @file utils/request_util.py
 @brief Simple reusable HTTP client helper with rc codes and print-based logging.
-       No cfg, no retries, no logger.
-"""
-
-import gzip
-import json
-import requests
-from typing import Optional, Tuple, Dict, Any
-
-"""
-@file utils/request_util.py
-@brief Simple reusable HTTP client helper with rc codes and logger-based diagnostics.
-       No retries, no gzip, no cfg dependency.
 """
 
 import json
 import requests
 from typing import Optional, Tuple, Dict, Any
-
 
 class RequestClient:
     """

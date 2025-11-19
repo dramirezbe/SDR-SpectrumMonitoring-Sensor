@@ -3,11 +3,11 @@
 @brief Expose main SDR utilities at package level.
 """
 
-from .sdr_util import AcquireFrame
-from .io_util import atomic_write_bytes, run_and_capture, get_tmp_var, modify_tmp, CronHandler
+from .io_util import atomic_write_bytes, get_tmp_var, modify_tmp, CronHandler
 from .request_util import RequestClient
+from .welch_util import WelchEstimator, CampaignHackRF
 
-__all__ = ["AcquireFrame", "atomic_write_bytes", "RequestClient", "run_and_capture", "get_tmp_var", "modify_tmp", "CronHandler"]
+__all__ = ["atomic_write_bytes", "RequestClient", "get_tmp_var", "modify_tmp", "CronHandler", "WelchEstimator", "CampaignHackRF"]
 
 
 """

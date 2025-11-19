@@ -11,10 +11,10 @@ from typing import Any, Dict, Optional
 
 import cfg
 from cfg import OrchestratorState
-from utils import run_and_capture, RequestClient, CronHandler
+from utils import RequestClient, CronHandler
 
-log = cfg.get_logger()
-RUNNER_PATH = (cfg.PROJECT_ROOT / "build" / "acquire_runner").resolve()
+log = cfg.set_logger()
+RUNNER_PATH = (cfg.APP_DIR / "acquire_runner.py").resolve() #for testing
 
 
 @dataclass
@@ -98,7 +98,6 @@ class Campaign:
 @dataclass
 class JobsOrchestrator:
     client: RequestClient
-    verbose: bool = cfg.VERBOSE
     _log: Any = log
     jobs_ep: str = cfg.JOBS_URL
     last_state_get: str = ""
@@ -114,8 +113,7 @@ class JobsOrchestrator:
         try:
             self.payload = resp.json()
             resp_str = str(self.payload)
-            if self.verbose:
-                self._log.info("Received jobs: %s", self.payload)
+            self._log.info("Received jobs: %s", self.payload)
         except Exception:
             self._log.exception("Failed to parse JSON response")
             return 2, None
@@ -150,8 +148,7 @@ class JobsOrchestrator:
 
         match state:
             case OrchestratorState.ORCH_IDLE:
-                if self.verbose:
-                    self._log.info("No jobs to sync")
+                self._log.info("No jobs to sync")
                 return 0
             case OrchestratorState.ORCH_REALTIME:
                 return self.run_realtime()
@@ -218,7 +215,7 @@ class JobsOrchestrator:
         # Instantiate the new handler, passing in the required dependencies.
         cron = CronHandler(
             logger=self._log,
-            verbose=self.verbose,
+            verbose=cfg.VERBOSE,
             get_time_ms=cfg.get_time_ms
         )
         
@@ -238,13 +235,11 @@ class JobsOrchestrator:
 
         # 2. DECIDE if a new job should be added.
         if not is_terminal_status and is_active_now:
-            if self.verbose:
-                self._log.info(f"[CRON] Syncing active camp_id {id}")
+            self._log.info(f"[CRON] Syncing active camp_id {id}")
             if cron.add(command=cmd, comment=id, minutes=minutes) != 0:
                 return 1
         else:
-            if self.verbose:
-                self._log.info(f"[CRON] Erased or ignored camp_id {id} (Terminal: {is_terminal_status}, Active: {is_active_now})")
+            self._log.info(f"[CRON] Erased or ignored camp_id {id} (Terminal: {is_terminal_status}, Active: {is_active_now})")
 
         # 3. SAVE any changes made to the crontab.
         return cron.save()
@@ -257,7 +252,7 @@ def main():
         verbose=cfg.VERBOSE,
         logger=log,
     )
-    orch_obj = JobsOrchestrator(client=client, verbose=cfg.VERBOSE, _log=log, jobs_ep=cfg.JOBS_URL)
+    orch_obj = JobsOrchestrator(client=client, _log=log, jobs_ep=cfg.JOBS_URL)
 
     rc = orch_obj.orchestrate()
     if rc != 0:
@@ -266,5 +261,5 @@ def main():
 
 
 if __name__ == "__main__":
-    rc = run_and_capture(main, log, cfg.LOGS_DIR / "orchestrator", cfg.get_time_ms(), cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

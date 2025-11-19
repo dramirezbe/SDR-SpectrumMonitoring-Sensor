@@ -1,0 +1,46 @@
+//GET realtime endpoint (defalult always capture spectrum)
+{
+    // Initial frequency for immediate operation (Hz).
+    "start_freq_hz": 88000000,
+
+    // Final frequency for immediate operation (Hz).
+    "end_freq_hz": 108000000,
+
+    // Spectral resolution (Hz).
+    "resolution_hz": 10000,
+
+    // Active physical antenna port during the operation.
+    "antenna_port": 1,
+
+    //-----default stats--------
+    "window": "hamming",
+    //float
+    "overlap": 0.5,
+    //int
+    "sample_rate_hz": 20000000,
+    //int
+    "lna_gain": 0,
+    //int
+    "vga_gain": 0,
+    //bool
+    "antenna_amp": false,
+
+    //Can be null if no demodulation is required
+    "demodulation": {
+
+        // Type of demodulation (AM/FM). (str)
+        "type": "FM",
+
+        //Calculate excursion, and depth (bool)
+        "with_metrics": true,
+
+        // Bandwidth of the demodulated channel (Hz).
+        "bandwidth_hz": 250000,
+
+        // Center frequency of the dem
+        // odulated channel (Hz).
+        "center_freq_hz": 95500000,
+
+        "port_socket": "/1234"
+    }
+}

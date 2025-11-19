@@ -1,4 +1,4 @@
-// GET jobs
+// GET campaigns
 {
   // List of active or scheduled campaigns.
   // Can be empty ([]) but is always sent. Each element represents an independent campaign.
@@ -30,6 +30,17 @@
       // Interval between consecutive measurements, in seconds.
       "acquisition_period_s": 300, // 5 min
 
+      //-----default stats--------
+      "window": "hamming",
+      //float
+      "overlap": 0.5,
+      //int
+      "sample_rate_hz": 20000000,
+      "lna_gain": 0,
+      "vga_gain": 0,
+      //bool
+      "antenna_amp": false,
+
       // Scheduled time window for the campaign.
       "timeframe": {
         // Unix timestamp (ms) of the scheduled start.
@@ -41,37 +52,5 @@
     }
 
     // ...there can be multiple campaigns or the list can be empty []
-  ],
-
-  // Immediate measurement (real-time) configuration.
-  // If no operation is in progress, this field is sent as `null`.
-  "real_time": {
-    // Initial frequency for immediate operation (Hz).
-    "start_freq_hz": 88000000,
-
-    // Final frequency for immediate operation (Hz).
-    "end_freq_hz": 108000000,
-
-    // Spectral resolution (Hz).
-    "resolution_hz": 10000,
-
-    // Active physical antenna port during the operation.
-    "antenna_port": 1,
-
-    // Optional demodulation block.
-    // If no demodulation is active, this block is sent as `null`.
-    "demodulation": {
-      // Type of demodulation.
-      // 'AM' = Amplitude Modulation, 'FM' = Frequency Modulation.
-      "type": "FM",
-      //Calculate excursion, and depth
-      "with_metrics": true,
-
-      // Bandwidth of the demodulated channel (Hz).
-      "bandwidth_hz": 250000,
-
-      // Center frequency of the demodulated channel (Hz).
-      "center_freq_hz": 95500000
-    }
-  }
+  ]
 }

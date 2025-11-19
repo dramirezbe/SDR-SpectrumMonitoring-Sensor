@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Optional
 
 import cfg
-from utils import run_and_capture, RequestClient
+from utils import RequestClient
 
-log = cfg.get_logger()
+log = cfg.set_logger()
 
 # Retry behaviour (tunable)
 RETRY_SECONDS = 5
@@ -79,12 +79,11 @@ def attempt_send(client: RequestClient, payload: dict, url: str) -> int:
         return RC_UNEXPECTED
 
     if 200 <= status_int < 300:
-        if cfg.VERBOSE:
-            try:
-                preview = resp.text[:200] + ("..." if len(resp.text) > 200 else "")
-                log.info("POST success code=%s preview=%s", status_int, preview)
-            except Exception:
-                pass
+        try:
+            preview = resp.text[:200] + ("..." if len(resp.text) > 200 else "")
+            log.info("POST success code=%s preview=%s", status_int, preview)
+        except Exception:
+            pass
         return RC_OK
 
     # map non-2xx -> 4xx permanent-ish, 5xx transient
@@ -208,11 +207,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    rc = run_and_capture(
-        main,
-        log=log,
-        log_dir=cfg.LOGS_DIR / "retry_queue",
-        timestamp=cfg.get_time_ms(),
-        num_files=cfg.LOG_FILES_NUM,
-    )
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

@@ -9,8 +9,7 @@ from pathlib import Path
 import subprocess
 
 import cfg
-log = cfg.get_logger()
-from utils import run_and_capture, CronHandler
+log = cfg.set_logger()
 
 CREATE_SERVICE = False #DUMMY
 
@@ -114,5 +113,5 @@ def main() -> int:
     return 0
 
 if __name__ == "__main__":
-    rc = run_and_capture(main, log, cfg.LOGS_DIR / "init_system", cfg.get_time_ms(), cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

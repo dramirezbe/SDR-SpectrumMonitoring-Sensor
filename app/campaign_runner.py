@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-@file acquire_runner.py
+@file campaign_runner.py
 @brief Main acquisition and posting routine for RF data. Handles LTE init, PSD acquisition,
        HTTP posting via RequestClient, and local persistence of unsent or historic data.
 """
@@ -9,11 +9,11 @@ import sys
 import json
 from pathlib import Path
 
-from utils import AcquireFrame, atomic_write_bytes, RequestClient, run_and_capture
+from utils import atomic_write_bytes, RequestClient, CampaignHackRF
 from status_device import StatusDevice
 from libs import init_lte, LTELibError
 
-log = cfg.get_logger()
+log = cfg.set_logger()
 HISTORIC_DIR = cfg.PROJECT_ROOT / "Historic"
 
 status_obj = StatusDevice()
@@ -43,7 +43,7 @@ def post_data(json_dict) -> int:
 
     rc, resp = client.post_json(cfg.DATA_URL, json_dict)
 
-    if resp is not None and cfg.VERBOSE:
+    if resp is not None:
         try:
             preview = resp.text[:200] + ("..." if len(resp.text) > 200 else "")
             log.info(f"POST response code={resp.status_code} preview={preview}")
@@ -66,8 +66,7 @@ def save_json(current_dict: dict, target_dir: Path, timestamp) -> int:
         target_path = target_dir / f"{timestamp}.json"
         atomic_write_bytes(target_path, json_bytes)
 
-        if cfg.VERBOSE:
-            log.info(f"Saved JSON to {target_path}")
+        log.info(f"Saved JSON to {target_path}")
         return 0
     except Exception as e:
         log.error(f"Error saving to {target_dir}: {e}")
@@ -103,8 +102,7 @@ def _delete_oldest_files(dir_path: Path, to_delete: int) -> int:
         try:
             f.unlink()
             deleted += 1
-            if cfg.VERBOSE:
-                log.info(f"Deleted historic file {f} to free space.")
+            log.info(f"Deleted historic file {f} to free space.")
         except Exception as e:
             log.error(f"Failed to delete historic file {f}: {e}")
             # continue attempting to delete other files
@@ -116,42 +114,47 @@ def main() -> int:
     Main acquisition and posting routine.
     """
     if len(sys.argv) != 5:
-        log.error("Usage: acquire_runner <start_freq_hz> <end_freq_hz> <resolution_hz> <antenna_port> <method_runner(now, programmed)>")
+        log.error("Usage: acquire_runner <start_freq_hz> <end_freq_hz> <resolution_hz> <antenna_port>")
         return 2
 
-    start_freq_hz = sys.argv[1]
-    end_freq_hz = sys.argv[2]
-    resolution_hz = sys.argv[3]
-    antenna_port = sys.argv[4]
+    start_freq_hz = int(sys.argv[1])
+    end_freq_hz = int(sys.argv[2])
+    resolution_hz = int(sys.argv[3])
+    antenna_port = int(sys.argv[4])
 
-    if cfg.VERBOSE:
-        log.info(f"Acquiring data from {start_freq_hz} to {end_freq_hz} with resolution {resolution_hz}")
+    log.info(f"Acquiring data from {start_freq_hz} to {end_freq_hz} with resolution {resolution_hz}")
 
-    if cfg.VERBOSE:
-        log.info(f"Saving samples to {cfg.SAMPLES_DIR}")
+    log.info(f"Saving samples to {cfg.SAMPLES_DIR}")
 
+
+    #switch antenna
     try:
         with init_lte(cfg.LIB_LTE, cfg.VERBOSE) as lte:
             lte.switch_antenna(int(antenna_port))
     except LTELibError as e:
         log.error(f"LTE error: {e}")
         return 2
+    
+    hack_rf = CampaignHackRF(start_freq_hz=start_freq_hz, end_freq_hz=end_freq_hz,
+                sample_rate_hz=20_000_000, resolution_hz=resolution_hz, 
+                scale='dBm', with_shift=False)
+    
+    result = hack_rf.get_psd()   # puede ser: Pxx or (f, Pxx) or None or (None, None)
 
-    acq = AcquireFrame(int(start_freq_hz), int(end_freq_hz), int(resolution_hz))
-
-    try:
-        acq.create_IQ(cfg.SAMPLES_DIR)
-        Pxx = acq.get_psd(cfg.SAMPLES_DIR)
-    except Exception as e:
-        log.error(f"Error acquiring IQ/PSD: {e}")
-        return 2
+    # Desestructura según el tipo
+    if isinstance(result, tuple):
+        freqs, Pxx = result
+    else:
+        freqs = None
+        Pxx = result
+    
 
     timestamp = cfg.get_time_ms()
 
     post_dict = {
-        "Pxx": Pxx.tolist(),
-        "start_freq_hz": int(start_freq_hz),
-        "end_freq_hz": int(end_freq_hz),
+        "Pxx": Pxx.tolist() if Pxx is not None else None,
+        "start_freq_hz": start_freq_hz,
+        "end_freq_hz": end_freq_hz,
         "timestamp": timestamp,
     }
 
@@ -195,8 +198,7 @@ def main() -> int:
 
                 try:
                     oldest.unlink()
-                    if cfg.VERBOSE:
-                        log.info(f"Deleted oldest queued file {oldest} to make room (queue capped at 50).")
+                    log.info(f"Deleted oldest queued file {oldest} to make room (queue capped at 50).")
                 except Exception as e:
                     log.error(f"Failed to delete oldest queued file {oldest}: {e}")
                     return 1
@@ -219,17 +221,15 @@ def main() -> int:
         hist_rc = save_json(post_dict, HISTORIC_DIR, timestamp)
         if hist_rc != 0:
             log.error("Failed to save to historic directory (non-fatal).")
-        elif cfg.VERBOSE:
+        else:
             log.info("Saved copy to historic directory.")
     else:
         # Disk usage high: attempt to delete up to 10 oldest historic files.
-        if cfg.VERBOSE:
-            log.warning(f"Disk usage high ({get_disk_usage():.3f}). Attempting to delete up to 10 oldest historic files.")
+        log.warning(f"Disk usage high ({get_disk_usage():.3f}). Attempting to delete up to 10 oldest historic files.")
 
         deleted = _delete_oldest_files(HISTORIC_DIR, 10)
         if deleted > 0:
-            if cfg.VERBOSE:
-                log.info(f"Deleted {deleted} historic files; re-checking disk usage.")
+            log.info(f"Deleted {deleted} historic files; re-checking disk usage.")
         else:
             log.warning("No historic files deleted (none found or deletion errors).")
 
@@ -238,7 +238,7 @@ def main() -> int:
             hist_rc = save_json(post_dict, HISTORIC_DIR, timestamp)
             if hist_rc != 0:
                 log.error("Failed to save to historic directory after cleaning (non-fatal).")
-            elif cfg.VERBOSE:
+            else:
                 log.info("Saved copy to historic directory after cleaning old files.")
         else:
             log.warning(f"Disk usage still too high ({get_disk_usage():.3f}); skipping historic save.")
@@ -251,5 +251,5 @@ def main() -> int:
 # Entry point
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
-    rc = run_and_capture(main, log, cfg.LOGS_DIR / "acquire_runner", cfg.get_time_ms(), cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

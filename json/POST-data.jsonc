@@ -1,0 +1,26 @@
+// Data post request
+{
+    // Array of Power Spectral Density data in dBm/Hz (float32)
+    "Pxx": [-0.54, -0.43, -1.56],
+    // In Hz (int)
+    "start_freq_hz": 1000,
+    "end_freq_hz": 2000,
+    // Timestamp of the moment the acquisition was performed (unix ms)
+    "timestamp": 1758435092721,
+
+
+    //Can be null if not available
+    "excursion": {
+        "unit": "hz",
+        "peak_to_peak_hz": 123.4,
+        "peak_deviation_hz": 235123.4,
+        "rms_deviation_hz": 123.4
+    },
+    //Can be null if not available
+    "depth": {
+        "unit": "percent",
+        "peak_to_peak": 15.23,
+        "peak_deviation": 100.0,
+        "rms_deviation":21.32
+    }
+}

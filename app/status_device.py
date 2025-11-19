@@ -16,9 +16,9 @@ import subprocess
 import cfg
 
 from libs import LteHandler
-from utils import run_and_capture, RequestClient, modify_tmp, get_tmp_var
+from utils import RequestClient, modify_tmp, get_tmp_var
 
-log = cfg.get_logger()
+log = cfg.set_logger()
 
 
 class StatusDevice:
@@ -27,8 +27,7 @@ class StatusDevice:
     """
     def __init__(self, disk_path:Path=Path('/'), 
                  logs_dir:Path=cfg.LOGS_DIR, 
-                 lte_handler:LteHandler=LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE), 
-                 verbose:bool=False, logger=log):
+                 lte_handler:LteHandler=LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE), logger=log):
         """
         Initializes StatusDevice
 
@@ -36,14 +35,12 @@ class StatusDevice:
             disk_path (Path): Path to disk root
             logs_dir (Path): Path to logs directory
             lte_handler (LteHandler): LteHandler object
-            verbose (bool): Verbose output
         """
         self._log = logger
         self.disk_path = disk_path
         self.disk_path_str = str(disk_path)
         self.lte = lte_handler
         self.logs_dir = logs_dir
-        self._verbose = verbose
 
     def get_cpu_percent(self) -> Dict[str, List[float]]:
         """
@@ -404,8 +401,8 @@ class StatusDevice:
             "last_ntp_ms": last_ntp_ms,
             "logs": logs_str,
         }
-        if self._verbose:
-            log.info(f"Final dict status: {final_dict}")
+        
+        log.info(f"Final dict status: {final_dict}")
 
         return final_dict
                     
@@ -420,8 +417,7 @@ def main() -> int:
     rc, resp = client.post_json(cfg.STATUS_URL, status_obj.get_final_dict())
     delta = cfg.get_time_ms() - start_delta
 
-    if cfg.VERBOSE:
-        log.info(f"POST request rc={rc} time={delta}ms")
+    log.info(f"POST request rc={rc} time={delta}ms")
 
     rc_json = modify_tmp("last_delta_ms", int(delta), cfg.TMP_FILE)
     if rc_json != 0:
@@ -429,9 +425,9 @@ def main() -> int:
         return rc_json
 
     if resp is not None and rc == 0:
-        if cfg.VERBOSE:
-            preview = resp.text[:200] + ("..." if len(resp.text) > 200 else "")
-            log.info(f"POST response code={resp.status_code} preview={preview}")
+        
+        preview = resp.text[:200] + ("..." if len(resp.text) > 200 else "")
+        log.info(f"POST response code={resp.status_code} preview={preview}")
         
     else:
         log.error("No response received or error in POST request.")
@@ -441,5 +437,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    rc = run_and_capture(main, log, cfg.LOGS_DIR / "status_device", cfg.get_time_ms(), cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

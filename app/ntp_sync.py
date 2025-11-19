@@ -11,8 +11,7 @@ import sys
 from typing import Optional
 
 import cfg
-log = cfg.get_logger()
-from utils import run_and_capture
+log = cfg.set_logger()
 
 
 def get_system_time_utc() -> datetime:
@@ -32,15 +31,13 @@ def to_colombia(dt_utc: datetime) -> datetime:
 def disable_auto_sync():
     if shutil.which("timedatectl"):
         subprocess.run(["timedatectl", "set-ntp", "false"], capture_output=True)
-        if cfg.VERBOSE:
-            log.info("Disabled automatic time sync.")
+        log.info("Disabled automatic time sync.")
 
 
 def enable_auto_sync():
     if shutil.which("timedatectl"):
         subprocess.run(["timedatectl", "set-ntp", "true"], capture_output=True)
-        if cfg.VERBOSE:
-            log.info("Re-enabled automatic time sync.")
+        log.info("Re-enabled automatic time sync.")
 
 
 def set_system_time(
@@ -58,12 +55,10 @@ def set_system_time(
         if shutil.which("timedatectl")
         else ["date", "-u", "-s", formatted_time]
     )
-    if cfg.VERBOSE:
-        log.info(f"Running: {' '.join(cmd)}")
+    log.info(f"Running: {' '.join(cmd)}")
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode == 0:
-        if cfg.VERBOSE:
-            log.info("System time updated successfully.")
+        log.info("System time updated successfully.")
     else:
         log.error(
             f"Failed to set system time rc={proc.returncode} "
@@ -84,8 +79,7 @@ def main() -> int:
 
     try:
         sys_time = get_system_time_utc()
-        if cfg.VERBOSE:
-            log.info(f"System time (UTC): {sys_time.isoformat()}")
+        log.info(f"System time (UTC): {sys_time.isoformat()}")
     except Exception as e:
         log.error(f"System time error: {e} " + error_log(sys_time, ntp_time, colombia_time))
         return 1
@@ -102,9 +96,8 @@ def main() -> int:
         log.error(f"Colombia time conversion error: {e} " + error_log(sys_time, ntp_time, colombia_time))
         colombia_time = None
 
-    if cfg.VERBOSE:
-        log.info(f"NTP time (UTC): {ntp_time.isoformat()}")
-        log.info(f"Colombia time (UTC-5): {(colombia_time.isoformat() if colombia_time else 'None')}")
+    log.info(f"NTP time (UTC): {ntp_time.isoformat()}")
+    log.info(f"Colombia time (UTC-5): {(colombia_time.isoformat() if colombia_time else 'None')}")
 
     try:
         disable_auto_sync()
@@ -118,5 +111,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    rc = run_and_capture(main, log, cfg.LOGS_DIR / "ntp", cfg.get_time_ms(), cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

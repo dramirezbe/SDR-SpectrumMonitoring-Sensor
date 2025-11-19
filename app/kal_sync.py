@@ -5,18 +5,18 @@
 """
 import cfg
 from cfg import KalState
-from utils import run_and_capture
 
 import subprocess
 import traceback
 import sys
 import pandas as pd
 import re
+import argparse # Added for better argument parsing
 from typing import Tuple, Optional
 
 from utils import modify_tmp
 
-log = cfg.get_logger()
+log = cfg.set_logger()
 
 KAL_LOGS_DIR = cfg.LOGS_DIR / "kal"
 CSV_FILE = KAL_LOGS_DIR / "last_scan.csv"
@@ -107,8 +107,7 @@ def call_scan() -> int:
                 "power": power,
             })
 
-        if cfg.VERBOSE:
-            log.info(f"Completed {' '.join(cmd)} OK.")
+        log.info(f"Completed {' '.join(cmd)} OK.")
 
     # If any failure occurred, do not touch CSV and return failure
     if any_failure:
@@ -117,8 +116,7 @@ def call_scan() -> int:
 
     # If no channels parsed, do not modify existing CSV
     if not out_rows:
-        if cfg.VERBOSE:
-            log.info("No channels found; leaving last_scan.csv unchanged.")
+        log.info("No channels found; leaving last_scan.csv unchanged.")
         return 0
 
     # Write dataframe (overwrite). Note: we do NOT write an offset comment into CSV.
@@ -128,8 +126,7 @@ def call_scan() -> int:
         with CSV_FILE.open('w') as f:
             df.to_csv(f, index=False)
 
-        if cfg.VERBOSE:
-            log.info(f"Wrote {len(df)} rows to {CSV_FILE}")
+        log.info(f"Wrote {len(df)} rows to {CSV_FILE}")
 
     except Exception:
         log.error(f"Failed writing CSV {CSV_FILE}:\n{traceback.format_exc()}")
@@ -170,8 +167,7 @@ def calibrate() -> Tuple[int, Optional[float]]:
     freq_hz = float(best["freq_hz"])  # used if kal prints ppm
     scan_name = str(best.get("scan", ""))
 
-    if cfg.VERBOSE:
-        log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']}")
+    log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']}")
 
     # run kal calibration
     try:
@@ -250,33 +246,46 @@ def calibrate() -> Tuple[int, Optional[float]]:
 
     if offset_hz is None:
         log.error("Could not parse offset from kal output.")
-        if cfg.VERBOSE:
-            log.debug("kal stdout/stderr:\n" + out)
+        log.debug("kal stdout/stderr:\n" + out)
         return 1, None
 
-    if cfg.VERBOSE:
-        ppm_equiv = offset_hz * 1e6 / freq_hz
-        if cfg.VERBOSE:
-            log.info(f"Parsed offset: {offset_hz:.3f} Hz ({offset_hz/1e3:.3f} kHz, {ppm_equiv:.3f} ppm)")
+    ppm_equiv = offset_hz * 1e6 / freq_hz
+    log.info(f"Parsed offset: {offset_hz:.3f} Hz ({offset_hz/1e3:.3f} kHz, {ppm_equiv:.3f} ppm)")
 
     return 0, float(offset_hz)
 
 
 def main() -> int:
-    args = sys.argv
-    if len(args) < 2:
-        log.error("Usage: kal_sync.py <state>")
+    # --- Start of new argparse logic ---
+    parser = argparse.ArgumentParser(
+        description="Calibrates SDR clock offset using kalibrate-hackrf.",
+        formatter_class=argparse.RawTextHelpFormatter # Keeps help formatting for multi-line strings
+    )
+
+    parser.add_argument(
+        "action",
+        choices=["scan", "calibrate"],
+        help="""Action to perform:
+- scan: Run kalibrate scans across GSM bands, parse results, and save them to last_scan.csv.
+- calibrate: Read the strongest channel from last_scan.csv, run the frequency calibration, and save the resulting frequency offset (in Hz) to the temporary config file."""
+    )
+
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
         return 1
 
-    arg = str(args[1]).lower()
+    args = parser.parse_args()
 
-    if arg == "scan":
+    # Map the parsed action to the internal KalState enum
+    if args.action == "scan":
         state = KalState.KAL_SCANNING
-    elif arg == "calibrate":
+    elif args.action == "calibrate":
         state = KalState.KAL_CALIBRATING
     else:
-        log.error(f"Unknown state: {arg}, Usage: kal_sync.py <scan|calibrate>")
+        # Should be unreachable due to 'choices'
+        log.error(f"Internal error: Invalid action {args.action}")
         return 1
+    # --- End of new argparse logic ---
 
     rc = 1  # Default to failure
     match state:
@@ -300,8 +309,7 @@ def main() -> int:
                         log.error("Failed saving offset into vars.json (modify_tmp returned non-zero).")
                         return rc_json
 
-                    if cfg.VERBOSE:
-                        log.info(f"Calibration successful. Offset {offset_hz:.3f} Hz saved to {cfg.TMP_FILE}")
+                    log.info(f"Calibration successful. Offset {offset_hz:.3f} Hz saved to {cfg.TMP_FILE}")
                     return 0
 
                 except Exception:
@@ -319,5 +327,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    rc = run_and_capture(main, log, KAL_LOGS_DIR, cfg.get_time_ms(), cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)
