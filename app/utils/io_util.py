@@ -46,7 +46,7 @@ def atomic_write_bytes(target_path: Path, data: bytes) -> None:
                 log.warning("Failed to clean up temporary file %s after error: %s", tmp_name, e)
         raise
 
-def get_tmp_var(key: str, path: Path) -> Optional[Any]:
+def get_persist_var(key: str, path: Path) -> Optional[Any]:
     """
     Read a variable from the JSON variables file at `path`.
     Returns the stored value or None if file/key not present or on error.
@@ -64,18 +64,18 @@ def get_tmp_var(key: str, path: Path) -> Optional[Any]:
 
         if not isinstance(data, dict):
             # Log non-dict content and treat as "no value found"
-            log.debug("get_tmp_var: file %s exists but is not a JSON object (got %s)", path, type(data).__name__)
+            log.debug("get_persist_var: file %s exists but is not a JSON object (got %s)", path, type(data).__name__)
             return None
 
         return data.get(key)
 
     except Exception:
         # Be conservative: don't raise; return None to signal "no value"
-        log.debug("get_tmp_var: exception reading %s", path, exc_info=True)
+        log.debug("get_persist_var: exception reading %s", path, exc_info=True)
         return None
 
 
-def modify_tmp(key: str, value: Any, path: Path) -> int:
+def modify_persist(key: str, value: Any, path: Path) -> int:
     """
     Atomically set `key` to `value` inside JSON file at `path`.
     - Ensures parent directories exist.
@@ -93,11 +93,11 @@ def modify_tmp(key: str, value: Any, path: Path) -> int:
                     data = json.load(f) or {}
                 if not isinstance(data, dict):
                     # If file exists but isn't a JSON object, start fresh
-                    log.warning("modify_tmp: existing file %s is not a JSON object, starting fresh.", path)
+                    log.warning("modify_persist: existing file %s is not a JSON object, starting fresh.", path)
                     data = {}
             except Exception:
                 # If reading/parsing fails, log and start fresh (we will overwrite file)
-                log.warning("modify_tmp: failed to read/parse existing JSON at %s, overwriting.", path, exc_info=True)
+                log.warning("modify_persist: failed to read/parse existing JSON at %s, overwriting.", path, exc_info=True)
                 data = {}
 
         # Set/replace key
@@ -112,7 +112,7 @@ def modify_tmp(key: str, value: Any, path: Path) -> int:
 
     except Exception:
         # Log the exception but do not propagate error to caller
-        log.exception("modify_tmp: unexpected error writing %s", path)
+        log.exception("modify_persist: unexpected error writing %s", path)
         return 0
 
 

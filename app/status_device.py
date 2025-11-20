@@ -16,7 +16,7 @@ import subprocess
 import cfg
 
 from libs import LteHandler
-from utils import RequestClient, modify_tmp, get_tmp_var
+from utils import RequestClient, modify_persist, get_persist_var
 
 log = cfg.set_logger()
 
@@ -388,7 +388,7 @@ class StatusDevice:
         last_kal_ms, last_ntp_ms, logs_str = self.get_logs()
 
         #dummy
-        delta_t_ms = get_tmp_var("last_delta_ms", cfg.TMP_FILE)
+        delta_t_ms = get_persist_var("last_delta_ms", cfg.PERSIST_FILE)
 
         final_dict: Dict[str, object] = {
             "metrics": metrics,
@@ -419,7 +419,7 @@ def main() -> int:
 
     log.info(f"POST request rc={rc} time={delta}ms")
 
-    rc_json = modify_tmp("last_delta_ms", int(delta), cfg.TMP_FILE)
+    rc_json = modify_persist("last_delta_ms", int(delta), cfg.PERSIST_FILE)
     if rc_json != 0:
         log.error(f"Error writing last_delta_ms to tmp file: {rc_json}")
         return rc_json

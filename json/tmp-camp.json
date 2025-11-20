@@ -1,0 +1,19 @@
+{
+    "campaigns": [
+        {
+            "campaign_id": 4,
+            "status": "scheduled",
+            "start_freq_hz": 88000000,
+            "end_freq_hz": 108000000,
+            "resolution_hz": 10000,
+            "antenna_port": 1,
+            "acquisition_period_s": 300,
+            "timeframe": {
+                "start": 1763594447372,
+                "end": 1763594449372
+            },
+            "iq": null
+        }
+    ],
+    "real_time": null
+}

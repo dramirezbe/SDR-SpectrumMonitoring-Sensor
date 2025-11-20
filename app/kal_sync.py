@@ -14,7 +14,7 @@ import re
 import argparse # Added for better argument parsing
 from typing import Tuple, Optional
 
-from utils import modify_tmp
+from utils import modify_persist
 
 log = cfg.set_logger()
 
@@ -299,17 +299,17 @@ def main() -> int:
             if rc_cal == 0 and offset_hz is not None:
                
                 try:
-                    if cfg.TMP_FILE is None:
-                        log.error("cfg.TMP_FILE is not defined; cannot persist offset to vars.json.")
+                    if cfg.PERSIST_FILE is None:
+                        log.error("cfg.PERSIST_FILE is not defined; cannot persist offset to vars.json.")
                         return 1
 
-                    # modify_tmp returns 0 on success, 1 on failure per your util's contract
-                    rc_json = modify_tmp("last_offset_hz", float(offset_hz), cfg.TMP_FILE)
+                    # modify_persist returns 0 on success, 1 on failure per your util's contract
+                    rc_json = modify_persist("last_offset_hz", float(offset_hz), cfg.PERSIST_FILE)
                     if rc_json != 0:
-                        log.error("Failed saving offset into vars.json (modify_tmp returned non-zero).")
+                        log.error("Failed saving offset into vars.json (modify_persist returned non-zero).")
                         return rc_json
 
-                    log.info(f"Calibration successful. Offset {offset_hz:.3f} Hz saved to {cfg.TMP_FILE}")
+                    log.info(f"Calibration successful. Offset {offset_hz:.3f} Hz saved to {cfg.PERSIST_FILE}")
                     return 0
 
                 except Exception:

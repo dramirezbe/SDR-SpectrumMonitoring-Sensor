@@ -67,10 +67,7 @@ def main() -> int:
         log.error("This script must be run with root privileges. Please use 'sudo'.")
         return 1
 
-    TMP_DIR = (cfg.PROJECT_ROOT / "tmp").resolve()
-
     if cfg.VERBOSE:
-        log.info(f"TMP_DIR: {TMP_DIR}")
         log.info(f"SAMPLES_DIR: {cfg.SAMPLES_DIR}")
         log.info(f"LOGS_DIR: {cfg.LOGS_DIR}")
         log.info(f"QUEUE_DIR: {cfg.QUEUE_DIR}")
@@ -83,7 +80,6 @@ def main() -> int:
     cfg.LOGS_DIR.mkdir(parents=True, exist_ok=True)
     cfg.QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     cfg.HISTORIC_DIR.mkdir(parents=True, exist_ok=True)
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
 
     if CREATE_SERVICE:
 

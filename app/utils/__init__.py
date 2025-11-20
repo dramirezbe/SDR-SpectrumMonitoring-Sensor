@@ -3,11 +3,11 @@
 @brief Expose main SDR utilities at package level.
 """
 
-from .io_util import atomic_write_bytes, get_tmp_var, modify_tmp, CronHandler
+from .io_util import atomic_write_bytes, get_persist_var, modify_persist, CronHandler
 from .request_util import RequestClient
 from .welch_util import WelchEstimator, CampaignHackRF
 
-__all__ = ["atomic_write_bytes", "RequestClient", "get_tmp_var", "modify_tmp", "CronHandler", "WelchEstimator", "CampaignHackRF"]
+__all__ = ["atomic_write_bytes", "RequestClient", "get_persist_var", "modify_persist", "CronHandler", "WelchEstimator", "CampaignHackRF"]
 
 
 """

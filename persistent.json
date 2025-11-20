@@ -1,4 +1,9 @@
 {
+  "device_id": "10",
+  "api_key": "10",
+  
+  "current_camp": 1234,
+  "current_mode": "campaign",
   "last_delta_ms": 111,
   "last_kal_ms": 12422,
   "last_ntp_ms": 23524563,

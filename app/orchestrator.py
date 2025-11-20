@@ -14,7 +14,7 @@ from cfg import OrchestratorState
 from utils import RequestClient, CronHandler
 
 log = cfg.set_logger()
-RUNNER_PATH = (cfg.APP_DIR / "acquire_runner.py").resolve() #for testing
+RUNNER_PATH = (cfg.APP_DIR / "acquire_runner.py").resolve()
 
 
 @dataclass
@@ -100,8 +100,8 @@ class JobsOrchestrator:
     client: RequestClient
     _log: Any = log
     jobs_ep: str = cfg.JOBS_URL
-    last_state_get: str = ""
     payload: Optional[Dict[str, Any]] = None
+    # Removed last_state_get as requested (stateless execution)
 
     def fetch_jobs(self):
         """Fetches jobs from the API endpoint and returns orchestrator state."""
@@ -112,7 +112,6 @@ class JobsOrchestrator:
 
         try:
             self.payload = resp.json()
-            resp_str = str(self.payload)
             self._log.info("Received jobs: %s", self.payload)
         except Exception:
             self._log.exception("Failed to parse JSON response")
@@ -124,19 +123,14 @@ class JobsOrchestrator:
         campaigns = self.payload.get("campaigns", [])
         real_time = self.payload.get("real_time", None)
 
-        if self.last_state_get == resp_str:
-            return 0, OrchestratorState.ORCH_IDLE
-
+        # Priority logic: Realtime > Campaigns > Idle
         if real_time:
-            self.last_state_get = resp_str
             if isinstance(real_time, dict):
                 real_time.pop("demodulation", None)
             return 0, OrchestratorState.ORCH_REALTIME
         elif len(campaigns) > 0:
-            self.last_state_get = resp_str
             return 0, OrchestratorState.ORCH_CAMPAIGN_SYNC
         else:
-            self.last_state_get = resp_str
             return 0, OrchestratorState.ORCH_IDLE
 
     def orchestrate(self):
@@ -149,6 +143,7 @@ class JobsOrchestrator:
         match state:
             case OrchestratorState.ORCH_IDLE:
                 self._log.info("No jobs to sync")
+                # Optional: clear cron here if IDLE implies 'stop everything'
                 return 0
             case OrchestratorState.ORCH_REALTIME:
                 return self.run_realtime()
@@ -158,61 +153,60 @@ class JobsOrchestrator:
 
     def run_realtime(self) -> int:
         """Executes acquire_runner in a loop, checking the API for a stop signal."""
+        self._log.info("Starting Real-Time Loop...")
         while True:
+            # 1. Execute one run
+            if self.payload and self.payload.get("real_time"):
+                resp = self.payload["real_time"]
+                start_freq_hz = resp.get("start_freq_hz", 98000000)
+                end_freq_hz = resp.get("end_freq_hz", 108000000)
+                resolution_hz = resp.get("resolution_hz", 4096)
+                antenna_port = resp.get("antenna_port", 0)
+
+                cmd = [
+                    str(RUNNER_PATH),
+                    str(start_freq_hz),
+                    str(end_freq_hz),
+                    str(resolution_hz),
+                    str(antenna_port)
+                ]
+
+                try:
+                    # check=True raises exception if runner returns non-zero
+                    subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    self._log.error(f"Failed to run acquire_runner: {e}")
+                    # We don't return 1 here to keep the loop alive, 
+                    # but you might want a retry delay.
+            
+            # 2. Refresh State (Check if we should stop)
             rc, state = self.fetch_jobs()
             if rc != 0:
-                return rc
+                # If API fails, we log and retry the loop (or you could exit)
+                self._log.warning("API check failed, retrying loop...")
+                continue
+
             if state != OrchestratorState.ORCH_REALTIME:
                 self._log.info("Real-time mode ended by API.")
                 return 0
 
-            if self.payload is None or self.payload.get("real_time") is None:
-                return 1
-
-            resp = self.payload["real_time"]
-            start_freq_hz = resp.get("start_freq_hz", 98000000)
-            end_freq_hz = resp.get("end_freq_hz", 108000000)
-            resolution_hz = resp.get("resolution_hz", 4096)
-            antenna_port = resp.get("antenna_port", 0)
-
-            cmd = [str(RUNNER_PATH), str(start_freq_hz), str(end_freq_hz), str(resolution_hz), str(antenna_port)]
-
-            try:
-                subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                self._log.error(f"Failed to run acquire_runner with error: {e}")
-                return 1
-
     def validate_campaigns(self) -> int:
-        """Validates the campaigns in the payload, and then sync them with cron."""
+        """Validates the campaigns and syncs them with cron efficiently."""
         if self.payload is None:
-            self._log.error("No payload found, error in orchestrate logic")
+            self._log.error("No payload found")
             return 1
-        campaigns = self.payload.get("campaigns", [])
-        if not campaigns:
-            self._log.error("No campaigns found, error in orchestrate logic")
-            return 1
+            
+        campaigns_data = self.payload.get("campaigns", [])
+        if not campaigns_data:
+            self._log.info("No campaigns in list to sync.")
+            return 0
 
-        for camp in campaigns:
-            try:
-                campaign = Campaign.from_dict(camp)
-            except ValueError as e:
-                self._log.error(str(e))
-                return 1
-
-            if self.campaign_sync(campaign) != 0:
-                return 1
-        return 0
-
-    def campaign_sync(self, campaign: Campaign) -> int:
-        """Synchronizes a campaign with the crontab using the CronHandler module."""
-        
-        # Instantiate the new handler, passing in the required dependencies.
+        # 1. Instantiate CronHandler ONCE outside the loop
         cron = CronHandler(
             logger=self._log,
             verbose=cfg.VERBOSE,
@@ -220,29 +214,49 @@ class JobsOrchestrator:
         )
         
         if cron.cron is None:
+            self._log.error("Failed to load Crontab")
             return 1
 
-        id = str(campaign.campaign_id)
+        error_count = 0
+
+        # 2. Process all campaigns in memory
+        for camp_dict in campaigns_data:
+            try:
+                campaign = Campaign.from_dict(camp_dict)
+                # Pass the cron instance, do NOT save inside campaign_sync
+                self.campaign_sync(campaign, cron)
+            except ValueError as e:
+                self._log.error(f"Skipping invalid campaign: {e}")
+                error_count += 1
+                continue  # Continue to the next campaign even if this one fails
+
+        # 3. Save changes to disk ONCE at the end
+        if error_count < len(campaigns_data):
+            return cron.save()
+        
+        return 1 if error_count == len(campaigns_data) else 0
+
+    def campaign_sync(self, campaign: Campaign, cron: CronHandler) -> None:
+        """
+        Modifies the cron object in memory. 
+        Does NOT call cron.save().
+        """
+        id_str = str(campaign.campaign_id)
         cmd = f"{RUNNER_PATH} {campaign.start_freq_hz} {campaign.end_freq_hz} {campaign.resolution_hz} {campaign.antenna_port}"
         minutes = int(campaign.acquisition_period_s / 60)
 
         is_active_now = cron.is_in_activate_time(start=campaign.start, end=campaign.end)
         is_terminal_status = campaign.status in ["canceled", "finished", "error"]
 
-        # 1. ALWAYS erase any job with this ID to ensure a clean slate.
-        if cron.erase(comment=id) != 0:
-            return 1
+        # 1. Erase existing job for this ID (clean slate)
+        cron.erase(comment=id_str)
 
-        # 2. DECIDE if a new job should be added.
+        # 2. Add new job if conditions met
         if not is_terminal_status and is_active_now:
-            self._log.info(f"[CRON] Syncing active camp_id {id}")
-            if cron.add(command=cmd, comment=id, minutes=minutes) != 0:
-                return 1
+            self._log.info(f"[CRON] Queueing active camp_id {id_str}")
+            cron.add(command=cmd, comment=id_str, minutes=minutes)
         else:
-            self._log.info(f"[CRON] Erased or ignored camp_id {id} (Terminal: {is_terminal_status}, Active: {is_active_now})")
-
-        # 3. SAVE any changes made to the crontab.
-        return cron.save()
+            self._log.info(f"[CRON] Skipping camp_id {id_str} (Terminal: {is_terminal_status}, Active: {is_active_now})")
 
 
 def main():

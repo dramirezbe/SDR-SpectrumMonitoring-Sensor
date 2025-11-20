@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 # Imports work due to the setup in conftest.py
 from app.utils.io_util import (
     atomic_write_bytes, 
-    get_tmp_var, 
-    modify_tmp, 
+    get_persist_var, 
+    modify_persist, 
     CronHandler, 
     CronTab  # Import CronTab here to use it for MagicMock spec
 )
@@ -27,27 +27,27 @@ def test_atomic_write_bytes_success(tmp_path: Path):
     assert target_path.read_bytes() == data
     assert len(list(tmp_path.iterdir())) == 1
 
-def test_modify_tmp_create_new_file(tmp_path: Path):
+def test_modify_persist_create_new_file(tmp_path: Path):
     """Test creating a new JSON file with the key."""
     path = tmp_path / "vars.json"
     
-    modify_tmp("key_a", "value_a", path)
+    modify_persist("key_a", "value_a", path)
 
     assert path.exists()
     data = json.loads(path.read_text())
     assert data == {"key_a": "value_a"}
 
-def test_get_tmp_var_read_existing(tmp_path: Path):
+def test_get_persist_var_read_existing(tmp_path: Path):
     """Test reading a variable from an existing JSON file."""
     path = tmp_path / "vars.json"
     
     initial_data = {"key_a": 100, "key_b": "value"}
     path.write_text(json.dumps(initial_data))
 
-    result = get_tmp_var("key_a", path)
+    result = get_persist_var("key_a", path)
     assert result == 100
     
-    result_missing = get_tmp_var("key_c", path)
+    result_missing = get_persist_var("key_c", path)
     assert result_missing is None
 
 
