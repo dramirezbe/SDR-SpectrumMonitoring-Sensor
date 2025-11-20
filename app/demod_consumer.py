@@ -19,6 +19,9 @@ import time
 from typing import Optional, Union
 import numpy as np
 
+import cfg
+
+log = cfg.set_logger()
 
 def float_to_plain(value: Union[str, float, int]) -> str:
     try:
@@ -113,8 +116,8 @@ class Demodulator:
     def run(self, verbose: bool = False, metrics: bool = False, metrics_interval: float = 10.0) -> int:
         """
         If metrics=True, compute:
-         - FM: instantaneous-frequency metrics (peak-to-peak, peak, RMS) — excursion.
-         - AM: envelope metrics (peak-to-peak amplitude, modulation depth, RMS).
+         - FM: instantaneous-frequency metrics (peak-to-peak, peak deviation, rms AC).
+         - AM: envelope metrics (peak-to-peak amplitude, modulation depth, rms AC).
         and print them every `metrics_interval` seconds to stderr. Audio pipeline runs unchanged.
         """
         pipeline_cmd = self.build_pipeline()
@@ -125,7 +128,7 @@ class Demodulator:
         proc = subprocess.Popen(pipeline_cmd, shell=True, stdin=subprocess.PIPE)
 
         # streaming parameters
-        bytes_per_sample = 2  # int8 I + Q
+        bytes_per_sample = 2  # int8 I + Q (one byte each)
         # chunk duration chosen small to avoid big memory; ~50ms per chunk
         chunk_dur = 0.05
         chunk_samples = max(1024, int(self.input_rate * chunk_dur))
@@ -144,8 +147,9 @@ class Demodulator:
         run_max = -float("inf")
         run_min = float("inf")
         run_sumsq = 0.0
+        run_sum = 0.0            # sum for mean calculation
         run_count = 0
-        run_peak = 0.0
+        run_raw_abs_peak = 0.0
 
         try:
             while True:
@@ -197,8 +201,9 @@ class Demodulator:
                                         run_max = max(run_max, cmax)
                                         run_min = min(run_min, cmin)
                                         run_sumsq += float(np.sum(inst_freq * inst_freq))
+                                        run_sum += float(np.sum(inst_freq))
                                         run_count += int(inst_freq.size)
-                                        run_peak = max(run_peak, float(np.max(np.abs(inst_freq))))
+                                        run_raw_abs_peak = max(run_raw_abs_peak, float(np.max(np.abs(inst_freq))))
                                 last_complex = iq[-1] if iq.size > 0 else last_complex
 
                             elif self.demod_type == "am":
@@ -213,8 +218,9 @@ class Demodulator:
                                     run_max = max(run_max, cmax)
                                     run_min = min(run_min, cmin)
                                     run_sumsq += float(np.sum(envelope * envelope))
+                                    run_sum += float(np.sum(envelope))
                                     run_count += int(envelope.size)
-                                    run_peak = max(run_peak, float(np.max(envelope)))
+                                    run_raw_abs_peak = max(run_raw_abs_peak, float(np.max(envelope)))
                                 last_amp = envelope[-1] if envelope.size > 0 else last_amp
 
                 # periodic report
@@ -222,18 +228,22 @@ class Demodulator:
                 if metrics and (now - last_report_time) >= metrics_interval:
                     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
                     if run_count > 0:
+                        mean_val = run_sum / run_count
+                        mean_sq = run_sumsq / run_count
+                        # rms AC (subtract DC/mean). Guard for small negative due to float noise.
+                        rms_ac = (mean_sq - mean_val * mean_val) ** 0.5 if mean_sq > mean_val * mean_val else 0.0
+
                         if self.demod_type == "fm":
                             p2p = run_max - run_min
-                            rms = (run_sumsq / run_count) ** 0.5
-                            peak = run_peak
-                            # excursion units: Hz
+                            # peak deviation about the mean (carrier-centered)
+                            peak_dev = max(abs(run_max - mean_val), abs(run_min - mean_val))
+                            # rms_ac in Hz
                             print(
-                                f"{ts}  FM excursion p2p: {p2p:.1f} Hz  peak: {peak:.1f} Hz  rms: {rms:.1f} Hz",
+                                f"{ts}  FM excursion p2p: {p2p:.1f} Hz  peak_dev: {peak_dev:.1f} Hz  rms_ac: {rms_ac:.1f} Hz",
                                 file=sys.stderr,
                                 flush=True,
                             )
                         else:  # AM
-                            # compute modulation depth m = (A_max - A_min) / (A_max + A_min)
                             Amax = run_max
                             Amin = run_min
                             denom = (Amax + Amin)
@@ -242,10 +252,9 @@ class Demodulator:
                             else:
                                 m = 0.0
                             depth_pct = m * 100.0
-                            rms = (run_sumsq / run_count) ** 0.5
-                            # report envelope p2p, depth percent, rms (envelope units)
+                            # rms_ac in envelope units
                             print(
-                                f"{ts}  AM envelope p2p: {Amax - Amin:.3f}  depth: {depth_pct:.1f}%  rms: {rms:.3f}",
+                                f"{ts}  AM envelope p2p: {Amax - Amin:.3f}  depth: {depth_pct:.1f}%  rms_ac: {rms_ac:.3f}",
                                 file=sys.stderr,
                                 flush=True,
                             )
@@ -256,8 +265,9 @@ class Demodulator:
                     run_max = -float("inf")
                     run_min = float("inf")
                     run_sumsq = 0.0
+                    run_sum = 0.0
                     run_count = 0
-                    run_peak = 0.0
+                    run_raw_abs_peak = 0.0
                     last_report_time = now
 
             # close stdin properly and wait
@@ -354,7 +364,6 @@ def main() -> int:
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s: %(message)s")
-    logger = logging.getLogger("demod_consumer")
 
     demodulator = Demodulator(
         input_rate=args.rate,
@@ -362,23 +371,23 @@ def main() -> int:
         demod_type=args.type,
         decimate_to=args.dec,
         audio_rate=args.aud_rate,
-        logger=logger,
+        logger=log,
     )
 
     if args.verbose:
         decimation = demodulator._calc_decimation_to_target() if demodulator.decimate_to is not None else demodulator._calc_decimation_from_bw()
         decimated_rate = int(args.rate / max(1, decimation))
-        logger.debug("--- Demodulator Configuration ---")
-        logger.debug("Input Rate: %s Hz", float_to_plain(args.rate))
-        logger.debug("Target IF Rate: %s Hz (Decimation: %d)", float_to_plain(decimated_rate), decimation)
-        logger.debug("RF Bandwidth: %s Hz", float_to_plain(args.bw))
-        logger.debug("Type: %s", args.type)
-        logger.debug("Audio Rate: %s Hz", args.aud_rate)
-        logger.debug("---------------------------------")
-        logger.debug("Pipeline: %s", demodulator.build_pipeline())
+        log.debug("--- Demodulator Configuration ---")
+        log.debug("Input Rate: %s Hz", float_to_plain(args.rate))
+        log.debug("Target IF Rate: %s Hz (Decimation: %d)", float_to_plain(decimated_rate), decimation)
+        log.debug("RF Bandwidth: %s Hz", float_to_plain(args.bw))
+        log.debug("Type: %s", args.type)
+        log.debug("Audio Rate: %s Hz", args.aud_rate)
+        log.debug("---------------------------------")
+        log.debug("Pipeline: %s", demodulator.build_pipeline())
 
     def _signal_handler(signum, frame):
-        logger.info("Signal %d received, exiting", signum)
+        log.info("Signal %d received, exiting", signum)
         raise SystemExit(0)
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -390,4 +399,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
+    sys.exit(rc)
