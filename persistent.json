@@ -1,10 +1,12 @@
 {
   "api_key": "10",
+  "campaign_id": 5,
   "current_camp": 1234,
-  "current_mode": "campaign",
+  "current_mode": "realtime",
   "device_id": "10",
-  "last_delta_ms": 111,
+  "last_delta_ms": 153,
   "last_kal_ms": 1763653778905,
+  "last_npt_ms": 1763675087002,
   "last_ntp_ms": 23524563,
   "last_offset_hz": -36854.0
 }

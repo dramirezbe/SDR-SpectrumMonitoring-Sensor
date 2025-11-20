@@ -9,9 +9,14 @@ import sys
 import json
 from pathlib import Path
 
-from utils import atomic_write_bytes, RequestClient, CampaignHackRF
+from utils import atomic_write_bytes, RequestClient, CampaignHackRF, get_persist_var
 from status_device import StatusDevice
 from libs import init_lte, LTELibError
+
+# --- START OF PLOTTING ADDITIONS ---
+import numpy as np
+import matplotlib.pyplot as plt
+# --- END OF PLOTTING ADDITIONS ---
 
 log = cfg.set_logger()
 HISTORIC_DIR = cfg.PROJECT_ROOT / "Historic"
@@ -104,6 +109,51 @@ def _delete_oldest_files(dir_path: Path, to_delete: int) -> int:
     return deleted
 
 
+# --- START OF PLOTTING ADDITIONS (MODIFIED) ---
+def save_psd_plot(freqs, Pxx, timestamp, log):
+    """
+    Generate and save a plot of the Power Spectral Density (Pxx) vs. Frequency or Sample Index.
+    """
+    if Pxx is None:
+        log.warning("Cannot plot: Pxx data is missing.")
+        return 2
+
+    try:
+        Pxx = np.array(Pxx)
+        
+        if freqs is not None:
+            # Use actual frequency vector
+            freqs = np.array(freqs)
+            freqs_mhz = freqs / 1e6
+            x_axis = freqs_mhz
+            x_label = 'Frequency (MHz)'
+        else:
+            # Fallback: Use sample index if frequency vector is missing
+            x_axis = np.arange(len(Pxx))
+            x_label = 'Sample Index (Frequency Data Unavailable)'
+            log.warning("Frequency vector 'freqs' is None. Plotting against sample index.")
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(x_axis, Pxx)
+        plt.title(f'Power Spectral Density (PSD) Acquisition - {timestamp}')
+        plt.xlabel(x_label)
+        plt.ylabel('Power (dBm)')
+        plt.grid(True)
+        plt.tight_layout()
+        
+        # Save the plot with the timestamp in the filename in the current directory
+        plot_path = Path(f"{timestamp}_psd.png")
+        plt.savefig(plot_path)
+        plt.close() # Close the figure to free memory
+        
+        log.info(f"Saved PSD plot to {plot_path}")
+        return 0
+    except Exception as e:
+        log.error(f"Error saving PSD plot: {e}")
+        return 2
+# --- END OF PLOTTING ADDITIONS (MODIFIED) ---
+
+
 def main() -> int:
     """
     Main acquisition and posting routine.
@@ -132,7 +182,7 @@ def main() -> int:
     
     hack_rf = CampaignHackRF(start_freq_hz=start_freq_hz, end_freq_hz=end_freq_hz,
                 sample_rate_hz=20_000_000, resolution_hz=resolution_hz, 
-                scale='dBm', with_shift=False)
+                scale='dBm', with_shift=True)
     
     result = hack_rf.get_psd()   # puede ser: Pxx or (f, Pxx) or None or (None, None)
 
@@ -142,15 +192,27 @@ def main() -> int:
     else:
         freqs = None
         Pxx = result
-    
 
-    timestamp = cfg.get_time_ms()
+    
+    # --- START OF MODIFICATION: Plotting Code Integration ---
+    timestamp = cfg.get_time_ms() # Move timestamp assignment up to use for plotting filename
+    
+    # Plot the PSD if Pxx data exists
+    if Pxx is not None:
+        save_psd_plot(freqs, Pxx, timestamp, log)
+    else:
+        log.warning("Pxx is None. Skipping plot generation.")
+    # --- END OF MODIFICATION: Plotting Code Integration ---
+
 
     post_dict = {
         "Pxx": Pxx.tolist() if Pxx is not None else None,
         "start_freq_hz": start_freq_hz,
         "end_freq_hz": end_freq_hz,
-        "timestamp": timestamp,
+        "timestamp": timestamp, # Uses the timestamp defined above
+        "lat": 0,
+        "lng":0,
+        "campaign_id": get_persist_var("campaign_id",cfg.PERSIST_FILE)
     }
 
     rc_post = post_data(post_dict)

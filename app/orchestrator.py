@@ -14,7 +14,7 @@ from cfg import OrchestratorState
 from utils import RequestClient, CronHandler
 
 log = cfg.set_logger()
-RUNNER_PATH = (cfg.APP_DIR / "acquire_runner.py").resolve()
+RUNNER_PATH = (cfg.APP_DIR / "campaign_runner.py").resolve()
 
 
 @dataclass

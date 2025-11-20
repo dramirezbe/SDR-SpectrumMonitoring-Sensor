@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-realtime_processor.py
+realtime_runner.py
 
 HackRF realtime processor.
 Required: frequency, sample rate, RBW.
 Optional: demod, demod bandwidth, metrics.
-
-Examples:
-  realtime_processor.py -f 98000000 -s 20000000 -w 10000
-  realtime_processor.py -f 98000000 -s 20000000 -w 10000 -d FM -b 200000
-  realtime_processor.py -f 98000000 -s 20000000 -w 10000 -d AM -b 10000 -m
 """
 from __future__ import annotations
 
@@ -21,6 +16,10 @@ import subprocess
 import sys
 import time
 from typing import List, Optional, Tuple, Union
+from utils import get_persist_var
+import cfg
+
+log = cfg.set_logger()
 
 
 def float_to_plain(value: Union[str, float, int]) -> str:
@@ -38,8 +37,7 @@ def float_to_plain(value: Union[str, float, int]) -> str:
 LNA = 24
 VGA = 40
 ANTENNA_GAIN = 0
-DEMUX_DEMOD_TARGET = 200000.0  # default decimate-to target if not otherwise provided
-TYPE_DEMOD = "FM"
+DEMUX_DEMOD_TARGET = 200000.0
 AUDIO_RATE = 48000
 BW_DEMOD_DEFAULT = 200e3
 
@@ -78,21 +76,14 @@ def build_cmds(
     bw: Optional[int],
     metrics: bool,
 ) -> Tuple[str, Optional[str], str]:
-    """Return (hackrf_cmd, demod_cmd_or_None, psd_cmd). Uses short flags for consumers."""
     hackrf_cmd = f"hackrf_transfer -r - -f {freq_hz} -s {sample_rate_hz} -a {ANTENNA_GAIN} -l {LNA} -g {VGA}"
-
-    # PSD command: required flags -f -s -w; DO NOT append -m (psd_consumer doesn't accept -m)
     psd_cmd = f"python3 app/psd_consumer.py -f {freq_plain} -s {sample_rate_plain} -w {float_to_plain(rbw)} --scale dbm"
-
-    # Demod command: build only if demod requested
     demod_cmd = None
     if demod:
         demod_bw = bw if bw is not None else int(BW_DEMOD_DEFAULT)
-        # required flags -f -s -t -b; optional -d -a -m
         demod_cmd = (
             f"python3 app/demod_consumer.py -f {freq_plain} -s {sample_rate_plain} -t {demod} -b {float_to_plain(demod_bw)}"
         )
-        # decimation target (use DEMUX_DEMOD_TARGET)
         demod_cmd += f" -d {float_to_plain(DEMUX_DEMOD_TARGET)}"
         demod_cmd += f" -a {AUDIO_RATE}"
         if metrics:
@@ -106,18 +97,11 @@ def build_cmds(
 
 
 def start_consumer_with_fifo(cmd: str, fifo_path: str, verbose: bool = False) -> subprocess.Popen:
-    """
-    Start a consumer that reads from fifo_path.
-    If verbose is True, the consumer's stdout/stderr are inherited so its prints appear in the realtime runner.
-    If verbose is False, stdout/stderr are captured (PIPE) as before.
-    """
     full = f"{cmd} < {shlex.quote(fifo_path)}"
     print(f"[proc] Starting consumer: {full} (verbose={verbose})")
     if verbose:
-        # inherit parent's stdout/stderr so prints appear directly here
         p = subprocess.Popen(full, shell=True, preexec_fn=os.setsid)
     else:
-        # capture output (existing behavior)
         p = subprocess.Popen(full, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
     return p
 
@@ -125,69 +109,114 @@ def start_consumer_with_fifo(cmd: str, fifo_path: str, verbose: bool = False) ->
 def start_hackrf(cmd: str) -> subprocess.Popen:
     parts = shlex.split(cmd)
     print(f"[proc] Starting hackrf_transfer: {' '.join(parts)}")
-    # Use a modest pipe buffer to smooth IO bursts
     p = subprocess.Popen(parts, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid, bufsize=65536)
     return p
 
 
-def tee_stream(src, writers: List[object], chunk_size: int = 256 * 1024):
+def tee_stream(src, fifo_paths: List[str], chunk_size: int = 256 * 1024):
     """
-    Read from src (binary file-like) and write to all writers.
-    Use large chunk_size and buffered writers to reduce syscall overhead
-    and allow transient consumer slowness without immediate stalls.
+    Read from src and write to all fifo_paths. If a FIFO's reader disappears (BrokenPipe),
+    try to re-open that FIFO periodically instead of removing it forever.
+    Also check persistent 'current_mode' each loop; exit if not 'realtime'.
     """
+    # mapping path -> open file object or None
+    writers = {p: None for p in fifo_paths}
+    last_open_try = {p: 0.0 for p in fifo_paths}
+    OPEN_RETRY_INTERVAL = 0.5  # seconds
+
     try:
         while True:
+            # Check persistent mode
+            try:
+                key = get_persist_var("current_mode", cfg.PERSIST_FILE)
+            except Exception as e:
+                print(f"[tee] Warning reading current_mode: {e}")
+                key = None
+            if str(key) != "realtime":
+                print(f"[tee] current_mode != 'realtime' ({key!r}) -> exiting tee_stream loop")
+                break
+
+            # Ensure writer fds are open (or try to open them periodically)
+            now = time.time()
+            for p in fifo_paths:
+                if writers[p] is None and (now - last_open_try[p]) >= OPEN_RETRY_INTERVAL:
+                    last_open_try[p] = now
+                    try:
+                        # open for writing in binary buffered mode
+                        f = open(p, "wb", buffering=256 * 1024)
+                        writers[p] = f
+                        print(f"[fifo] Opened write-end {p}")
+                    except FileNotFoundError:
+                        # FIFO might have been removed externally; warn and continue
+                        print(f"[tee] FIFO not found when opening {p}")
+                    except OSError as e:
+                        # No reader yet or other OS error; keep trying
+                        # errno=ENXIO when no reader for O_WRONLY open in non-blocking; but here open() blocks until reader,
+                        # so we just catch and retry gracefully
+                        print(f"[tee] Could not open {p} for writing yet: {e}")
+
+            # read chunk from source
             data = src.read(chunk_size)
             if not data:
                 print("[tee] Source EOF")
                 break
-            remove = []
-            for w in writers:
+
+            # write to all writers; on BrokenPipe/OSError close and mark None (will be reopened later)
+            for p, f in list(writers.items()):
+                if f is None:
+                    continue
                 try:
-                    w.write(data)
-                    # don't call flush every single write; rely on buffered writer,
-                    # but flush occasionally in case of long inactivity
+                    f.write(data)
                 except BrokenPipeError:
-                    print("[tee] BrokenPipe: removing writer")
-                    remove.append(w)
-                except BlockingIOError:
-                    # writer full: mark for removal (reader side may have closed)
-                    print("[tee] BlockingIOError: removing writer")
-                    remove.append(w)
+                    print(f"[tee] BrokenPipe writing to {p}; will try to reopen later")
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    writers[p] = None
+                except OSError as e:
+                    # other write error (e.g., errno=EINVAL if FIFO gone)
+                    print(f"[tee] OSError writing to {p}: {e}; closing and will reopen")
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    writers[p] = None
                 except Exception as e:
-                    print(f"[tee] Writer exception: {e} (removing)")
-                    remove.append(w)
-            for r in remove:
+                    print(f"[tee] Unexpected write error to {p}: {e}; closing and will reopen")
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    writers[p] = None
+
+            # flush remaining alive writers
+            for p, f in list(writers.items()):
+                if f is None:
+                    continue
                 try:
-                    r.close()
+                    f.flush()
                 except Exception:
-                    pass
-                if r in writers:
-                    writers.remove(r)
-            # If there are still writers, flush once per data block (keeps consumer moving)
-            if writers:
-                try:
-                    for w in writers:
-                        try:
-                            w.flush()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            else:
-                # No active writers: back off for a short while to avoid tight loop
-                print("[tee] No active writers remaining; sleeping briefly before retry")
+                    # on flush error, close and mark None
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    writers[p] = None
+
+            # If no writers are currently open, back off briefly to avoid tight-loop
+            if all(f is None for f in writers.values()):
                 time.sleep(0.05)
-                # After sleep, continue — if still no writers then loop will end when EOF
+
     except KeyboardInterrupt:
         print("[tee] Interrupted by user")
     except Exception as e:
         print(f"[tee] Exception in tee: {e}")
     finally:
-        for w in list(writers):
+        for f in list(writers.values()):
             try:
-                w.close()
+                if f:
+                    f.close()
             except Exception:
                 pass
 
@@ -225,7 +254,6 @@ def run_pipeline(freq: float, rate: float, rbw: float, demod: Optional[str], bw:
 
     hackrf_cmd, demod_cmd, psd_cmd = build_cmds(FREQ_HACK, SAMPLE_RATE_HACK, FREQ_PLAIN, SAMPLE_RATE_PLAIN, rbw, demod, bw, metrics)
 
-    # pass verbose flag to consumers so they can forward prints when requested
     psd_proc = start_consumer_with_fifo(psd_cmd, FIFO_PSD, verbose)
     demod_proc = None
     if demod and demod_cmd:
@@ -235,17 +263,8 @@ def run_pipeline(freq: float, rate: float, rbw: float, demod: Optional[str], bw:
 
     hackrf_proc = start_hackrf(hackrf_cmd)
 
-    fifo_writers = []
     try:
-                
-        FIFO_USER_BUFFER = 256 * 1024
-        for p in fifo_list:
-            # 'wb' open with a substantial buffering value (instead of unbuffered)
-            f = open(p, "wb", buffering=FIFO_USER_BUFFER)
-            fifo_writers.append(f)
-            print(f"[fifo] Opened buffered write-end {p} (buffer={FIFO_USER_BUFFER})")
-
-
+        # trap signals and convert to KeyboardInterrupt
         def _handler(sig, frame):
             print(f"[main] Received signal {sig}, exiting")
             raise KeyboardInterrupt()
@@ -256,7 +275,8 @@ def run_pipeline(freq: float, rate: float, rbw: float, demod: Optional[str], bw:
         if hackrf_proc.stdout is None:
             print("[main] hackrf stdout not available; exiting")
         else:
-            tee_stream(hackrf_proc.stdout, fifo_writers)
+            # pass list of fifo paths to tee_stream which manages open/reopen logic
+            tee_stream(hackrf_proc.stdout, fifo_list)
 
     except KeyboardInterrupt:
         print("[main] Interrupted by user, shutting down")
@@ -293,12 +313,6 @@ def run_pipeline(freq: float, rate: float, rbw: float, demod: Optional[str], bw:
                 except Exception as e:
                     print(f"[{label}] communicate error: {e}")
 
-        for w in fifo_writers:
-            try:
-                w.close()
-            except Exception:
-                pass
-
         fm.unlink()
 
     print("[main] Done.")
@@ -315,42 +329,38 @@ def numeric_type(x):
 def parse_args() -> argparse.Namespace:
     epilog = (
         "Examples:\n"
-        "  realtime_processor.py -f 98000000 -s 20000000 -w 10000\n"
-        "  realtime_processor.py -f 98000000 -s 20000000 -w 10000 -d FM -b 200000\n"
-        "  realtime_processor.py -f 98000000 -s 20000000 -w 10000 -d AM -b 10000 -m\n"
+        "  realtime_runner.py -f 98000000 -s 20000000 -w 10000\n"
+        "  realtime_runner.py -f 98000000 -s 20000000 -w 10000 -d FM -b 200000\n"
     )
     parser = argparse.ArgumentParser(
-        prog="realtime_processor.py",
+        prog="realtime_runner.py",
         description="HackRF realtime processor.\nRequired: frequency, sample rate, RBW.",
         epilog=epilog,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument("-f", "--freq", required=True, type=numeric_type, help="Center frequency in Hz (range: 1 MHz to 6 GHz). Example: 98000000")
-    parser.add_argument("-s", "--rate", required=True, type=numeric_type, help="Sample rate in Hz (range: 1 MHz to 6 GHz). Example: 20000000")
-    parser.add_argument("-w", "--rbw", required=True, type=numeric_type, help="RBW resolution bandwidth in Hz (>1). Example: 10000")
-    parser.add_argument("-d", "--demod", choices=["FM", "AM"], type=str.upper, help="Demodulation type. Example: FM")
-    parser.add_argument("-b", "--bw", type=numeric_type, help="Demod bandwidth in Hz (must not exceed freq or samp-rate). Example: 200000")
-    parser.add_argument("-m", "--metrics", action="store_true", help="Enable metrics (boolean flag). Example: -m")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose: forward psd/demod prints to realtime runner")
+    parser.add_argument("-f", "--freq", required=True, type=numeric_type, help="Center frequency in Hz")
+    parser.add_argument("-s", "--rate", required=True, type=numeric_type, help="Sample rate in Hz")
+    parser.add_argument("-w", "--rbw", required=True, type=numeric_type, help="RBW resolution bandwidth in Hz")
+    parser.add_argument("-d", "--demod", choices=["FM", "AM"], type=str.upper, help="Demodulation type")
+    parser.add_argument("-b", "--bw", type=numeric_type, help="Demod bandwidth in Hz")
+    parser.add_argument("-m", "--metrics", action="store_true", help="Enable metrics")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose")
 
-    # Rename optional group header to "options"
     for g in parser._action_groups:
         if g.title == "optional arguments":
             g.title = "options"
 
-    # If no args provided print help and exit 0
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(0)
 
     args = parser.parse_args()
 
-    # Validation
     if not (1e6 <= args.freq <= 6e9):
-        parser.error("frequency must be between 1e6 and 6e9 Hz (1 MHz - 6 GHz)")
+        parser.error("frequency must be between 1e6 and 6e9 Hz")
     if not (1e6 <= args.rate <= 6e9):
-        parser.error("sample rate must be between 1e6 and 6e9 Hz (1 MHz - 6 GHz)")
+        parser.error("sample rate must be between 1e6 and 6e9 Hz")
     if not (args.rbw > 1):
         parser.error("rbw must be greater than 1 Hz")
     if args.bw is not None:
@@ -366,7 +376,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    # cast to proper types
     freq = float(args.freq)
     rate = float(args.rate)
     rbw = float(args.rbw)

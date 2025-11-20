@@ -9,13 +9,15 @@ BUILD_SCRIPT="$SCRIPT_DIR/build.sh"
 
 MODULES=(
     orchestrator
-    acquire_runner
+    demod_consumer
+    campaign_runner
     kal_sync
     ntp_sync
+    psd_consumer
+    realtime_runner
     status_device
     init_system
     retry_queue
-    init_system
 )
 
 # sanity: ensure build script exists
