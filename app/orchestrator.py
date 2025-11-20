@@ -260,12 +260,7 @@ class JobsOrchestrator:
 
 
 def main():
-    client = RequestClient(
-        base_url=cfg.API_URL,
-        timeout=(5, 15),
-        verbose=cfg.VERBOSE,
-        logger=log,
-    )
+    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
     orch_obj = JobsOrchestrator(client=client, _log=log, jobs_ep=cfg.JOBS_URL)
 
     rc = orch_obj.orchestrate()

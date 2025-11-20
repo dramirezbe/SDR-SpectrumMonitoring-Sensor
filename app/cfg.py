@@ -153,6 +153,7 @@ COMPILED_PATH = (PROJECT_ROOT / "build").resolve()
 API_URL = f"http://{API_IP}:{API_PORT}/api/v1/devices/{str(get_persist_var('device_id', PERSIST_FILE))}"
 
 API_KEY = get_persist_var("api_key", PERSIST_FILE)
+API_KEY = API_KEY if API_KEY else ""
 
 
 # =============================
@@ -281,34 +282,39 @@ class SimpleFormatter(logging.Formatter):
 
 def set_logger() -> logging.Logger:
     """
-    Configures and returns a root logger for the application.
-
-    Usage in other scripts:
-    import cfg
-    log = cfg.set_logger()
-    log.info("This is a test")
+    Configures and returns a root logger for the application, using the name
+    of the calling script as the logger name and tag.
     """
     
-    # Use a named logger to avoid conflicts with other libraries
-    logger = logging.getLogger("SENSOR")
+    # 1. Determinar el nombre del script que llama (e.g., 'dummy')
+    # Usamos sys._getframe(1) para obtener el marco de la pila del llamador.
+    try:
+        # stack frame del llamador (ej: el módulo que importó cfg y llamó a set_logger)
+        caller_frame = sys._getframe(1) 
+        # path completo del archivo que llamó a la función
+        caller_file = pathlib.Path(caller_frame.f_code.co_filename) 
+        # nombre del script sin extensión (ej: 'dummy')
+        log_name = caller_file.stem.upper() 
+    except Exception:
+        log_name = "SENSOR_UNKNOWN" # Fallback si falla la detección
 
-    # Prevent duplicate handlers if this function is called multiple times
+    # 2. Usar un logger con nombre único basado en el script
+    logger = logging.getLogger(log_name)
+
+    # 3. Evitar duplicación de handlers
     if logger.hasHandlers():
         return logger
 
-    # Set the overall minimum level to log
+    # 4. Configurar el formato
     logger.setLevel(logging.DEBUG)
-
-    # Define log format and date format
-    log_format = "%(asctime)s[SENSOR]%(levelname)s %(message)s"
+    
+    # El formato ahora utiliza el nombre del logger: %(name)s
+    log_format = f"%(asctime)s[{log_name}]%(levelname)s %(message)s"
     date_format = "%d-%b-%y(%H:%M:%S)"
     
-    # Create one simple formatter
     formatter = SimpleFormatter(log_format, datefmt=date_format)
 
-    # --- Console Handler (StreamHandler) ---
-    
-    # Fix: Use the proxy object that always finds the *current* sys.stdout.
+    # 5. Configurar Handler de Consola
     stdout_proxy = _CurrentStreamProxy('stdout')
     console_handler = logging.StreamHandler(stdout_proxy)
     
@@ -316,7 +322,7 @@ def set_logger() -> logging.Logger:
     console_level = logging.INFO if VERBOSE else logging.WARNING
     
     console_handler.setLevel(console_level)
-    console_handler.setFormatter(formatter) # Use simple formatter
+    console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
     return logger

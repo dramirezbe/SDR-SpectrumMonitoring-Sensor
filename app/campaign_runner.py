@@ -34,12 +34,7 @@ def post_data(json_dict) -> int:
     """
     Send JSON data to remote API endpoint using RequestClient.
     """
-    client = RequestClient(
-        base_url=cfg.API_URL,
-        timeout=(5, 15),
-        verbose=cfg.VERBOSE,
-        logger=log,
-    )
+    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
 
     rc, resp = client.post_json(cfg.DATA_URL, json_dict)
 

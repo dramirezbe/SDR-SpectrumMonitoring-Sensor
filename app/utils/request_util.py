@@ -23,11 +23,13 @@ class RequestClient:
         timeout: Tuple[float, float] = (5, 15),
         verbose: bool = False,
         logger=None,
+        api_key: str = "",
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.verbose = verbose
         self._log = logger
+        self.api_key = api_key # Stored API key
 
     # -------------------------------------------------------------------------
     # Public methods
@@ -38,6 +40,7 @@ class RequestClient:
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, Optional[requests.Response]]:
+        # Add default Accept header for GET
         hdrs = {"Accept": "application/json"}
         if headers:
             hdrs.update(headers)
@@ -56,6 +59,7 @@ class RequestClient:
                 self._log.error(f"[HTTP] JSON serialization error: {e}")
             return 2, None
 
+        # Add default Content-Type header for POST_JSON
         hdrs = {"Content-Type": "application/json"}
         if headers:
             hdrs.update(headers)
@@ -74,15 +78,28 @@ class RequestClient:
     ) -> Tuple[int, Optional[requests.Response]]:
 
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        
+        # --- NEW LOGIC: Add API Key Authorization Header ---
+        final_headers = headers if headers is not None else {}
+        if self.api_key and "Authorization" not in final_headers:
+            # Ensure the Authorization header is set if an API key exists
+            final_headers["Authorization"] = f"ApiKey {self.api_key}"
+            
+        if self.verbose and self._log:
+            self._log.info(f"[HTTP] Authorization header set: {'Authorization' in final_headers}")
+        # --------------------------------------------------
 
         try:
             if self.verbose and self._log:
+                # Log URL and method
                 self._log.info(f"[HTTP] {method} → {url}")
+                # Optional: Log headers to confirm API key is present (use with caution)
+                # self._log.info(f"[HTTP] Headers: {final_headers}")
 
             resp = requests.request(
                 method,
                 url,
-                headers=headers,
+                headers=final_headers, # Use final_headers with API key
                 data=data,
                 params=params,
                 timeout=self.timeout,
@@ -95,6 +112,7 @@ class RequestClient:
                 return 0, resp
 
             # Known HTTP errors
+            # ... (Existing error handling logic remains the same)
             if 300 <= resp.status_code < 400:
                 msg = f"[HTTP] redirect rc={resp.status_code}"
             elif 400 <= resp.status_code < 500:

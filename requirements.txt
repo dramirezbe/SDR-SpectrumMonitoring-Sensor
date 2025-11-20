@@ -12,6 +12,7 @@ numpy==2.3.4
 packaging==25.0
 pandas==2.3.3
 pillow==12.0.0
+pyhackrf2==1.0.3
 pyinstaller==6.16.0
 pyinstaller-hooks-contrib==2025.9
 pyparsing==3.2.5

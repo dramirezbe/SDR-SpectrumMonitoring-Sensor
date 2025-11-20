@@ -1,4 +1,4 @@
-#status_device.py
+# status_device.py
 """
 Status_module
 
@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, List, Union
 import os
-import time
 import sys
 import subprocess
 
@@ -25,9 +24,10 @@ class StatusDevice:
     """
     A collection of methods to consult various device
     """
-    def __init__(self, disk_path:Path=Path('/'), 
-                 logs_dir:Path=cfg.LOGS_DIR, 
-                 lte_handler:LteHandler=LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE), logger=log):
+    def __init__(self, disk_path:Path=Path('/'),
+                 logs_dir:Path=cfg.LOGS_DIR,
+                 lte_handler:LteHandler=LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE),
+                 logger=log):
         """
         Initializes StatusDevice
 
@@ -43,12 +43,6 @@ class StatusDevice:
         self.logs_dir = logs_dir
 
     def get_cpu_percent(self) -> Dict[str, List[float]]:
-        """
-        Consults in /proc/stat for CPU usage
-
-        Returns:
-            Dict[str, List[float]]: CPU usage in percent
-        """
         def read_cpu_lines():
             with open("/proc/stat", "r") as f:
                 lines = [l for l in f.readlines() if l.startswith("cpu")]
@@ -76,14 +70,8 @@ class StatusDevice:
             usage.append(round(pct, 2))
 
         return {"cpu": usage}
-    
+
     def get_ram_swap_mb(self) -> Dict[str, Optional[int]]:
-        """
-        Return used RAM and SWAP in MB as: {"ram": <used_mb>, "swap": <used_mb>}
-        Computed as:
-        RAM  = MemTotal - MemAvailable
-        SWAP = SwapTotal - SwapFree
-        """
         mem_total = mem_available = swap_total = swap_free = None
 
         with open("/proc/meminfo", "r") as f:
@@ -96,7 +84,6 @@ class StatusDevice:
                     swap_total = int(line.split()[1])
                 elif line.startswith("SwapFree:"):
                     swap_free = int(line.split()[1])
-                # Stop early if everything is found
                 if (
                     mem_total is not None
                     and mem_available is not None
@@ -116,11 +103,8 @@ class StatusDevice:
             swap_mb = (swap_total - swap_free) // 1024
 
         return {"ram_mb": ram_mb, "swap_mb": swap_mb}
-    
+
     def get_total_ram_swap_mb(self) -> Dict[str, Optional[int]]:
-        """
-        Return total RAM and SWAP in MB as: {"ram": <total_mb>, "swap": <total_mb>}
-        """
         mem_total = swap_total = None
 
         with open("/proc/meminfo", "r") as f:
@@ -138,69 +122,48 @@ class StatusDevice:
         }
 
     def get_disk(self) -> dict:
-        """
-        Return used disk space (in MB) for the given mount point.
-        Example: get_disk(Path("/")) -> {"disk": 12456}
-        """
         st = os.statvfs(self.disk_path_str)
         used_bytes = (st.f_blocks - st.f_bfree) * st.f_frsize
         used_mb = used_bytes // (1024 * 1024)
         return {"disk_mb": used_mb}
 
-
     def get_total_disk(self) -> dict:
-        """
-        Return total disk space (in MB) for the given mount point.
-        Example: get_total_disk(Path("/")) -> {"disk": 298745}
-        """
         st = os.statvfs(self.disk_path_str)
         total_bytes = st.f_blocks * st.f_frsize
         total_mb = total_bytes // (1024 * 1024)
         return {"disk_mb": total_mb}
-    
+
     def get_temp_c(self) -> Dict[str, float]:
-        """Return Raspberry Pi CPU temperature in Celsius as {'temp_c': float}."""
         try:
             with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
                 temp_c = int(f.read().strip()) / 1000.0
             return {"temp_c": temp_c}
         except Exception:
-            # fallback if file missing or permission error
             return {"temp_c": -1.0}
-    
+
     def get_metrics_dict(self) -> dict:
-        """
-        Return all metrics as a single dictionary.
-        """
         metrics: Dict = {}
         metrics.update(self.get_cpu_percent())
         metrics.update(self.get_ram_swap_mb())
         metrics.update(self.get_disk())
         metrics.update(self.get_temp_c())
         return metrics
-    
+
     def get_total_metrics_dict(self) -> dict:
-        """
-        Return all total metrics as a single dictionary.
-        """
         tot_metrics: Dict = {}
         tot_metrics.update(self.get_total_ram_swap_mb())
         tot_metrics.update(self.get_total_disk())
         return tot_metrics
-    
+
     def parse_lte_gps(self):
-        """
-        Return LTE GPS coordinates as {'latitude': float, 'longitude': float}
-        If GPS not available, values will be None.
-        """
         err_dict = {'lat': None, 'lng': None, 'alt': None}
         if self.lte is None:
             return err_dict
-        
+
         raw = self.lte.get_gps()
         if raw is None:
             return err_dict
-        
+
         if isinstance(raw, (bytes, bytearray)):
             try:
                 raw = raw.decode("utf-8", errors="ignore")
@@ -210,7 +173,6 @@ class StatusDevice:
 
         raw = str(raw).strip()
 
-        # 3) find the first GGA sentence ($GPGGA or $GNGGA)
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
         gga = None
         for ln in lines:
@@ -226,51 +188,42 @@ class StatusDevice:
                 gga = ln[start:]
                 break
         if gga is None:
-            # maybe raw is a single sentence without newline
             if raw.startswith("$GPGGA") or raw.startswith("$GNGGA"):
                 gga = raw
             else:
                 self._log.error(f"LTE GPS: No GGA sentence found in: {raw!r}")
                 return err_dict
 
-        # 4) strip checksum (part after '*') if present
         if "*" in gga:
             gga = gga.split("*", 1)[0]
 
         parts = gga.split(",")
-        # Minimum expected GGA fields (time, lat, N/S, lon, E/W, fix, sats, hdop, alt)
         if len(parts) < 10:
             self._log.error(f"LTE GPS: Incomplete GGA sentence: {gga!r}")
             return err_dict
 
-        # Extract the fields we need
         lat_str = parts[2]
         lat_hemi = parts[3]
         lon_str = parts[4]
         lon_hemi = parts[5]
         alt_str = parts[9]
 
-        # 5) helper: convert NMEA ddmm.mmmm or dddmm.mmmm to decimal degrees
         def nmea_to_decimal(nmea_coord: str, hemi: str) -> Optional[float]:
             if not nmea_coord or not hemi:
                 self._log.error(f"LTE GPS: Missing NMEA coordinate or hemisphere: coord={nmea_coord!r}, hemi={hemi!r}")
                 return None
 
-            # ensure ascii digits and dot only
             coord = nmea_coord.strip()
             if "." not in coord:
                 self._log.error(f"LTE GPS: Invalid NMEA coordinate format (no dot): {coord!r}")
                 return None
 
-            # integer part before dot tells us where degrees end:
-            intpart = coord.split(".", 1)[0]  # e.g. "0433" or "07402"
-            # if intpart length == 4 -> lat (ddmm), if 5 -> lon (dddmm)
+            intpart = coord.split(".", 1)[0]
             if len(intpart) == 4:
                 deg_len = 2
             elif len(intpart) == 5:
                 deg_len = 3
             else:
-                # fallback: use hemisphere (N/S => lat with 2 deg digits; E/W => lon with 3)
                 deg_len = 2 if hemi in ("N", "S") else 3
 
             try:
@@ -289,15 +242,12 @@ class StatusDevice:
         if lat is None:
             self._log.error(f"LTE GPS: Failed to parse latitude from {lat_str!r} {lat_hemi!r}")
             return err_dict
-    
+
         lng = nmea_to_decimal(lon_str, lon_hemi)
         if lng is None:
             self._log.error(f"LTE GPS: Failed to parse longitude from {lon_str!r} {lon_hemi!r}")
             return err_dict
-        
 
-        # altitude parsing (may be empty)
-        alt: Union[float, None]
         try:
             alt = float(alt_str) if alt_str != "" else None
         except Exception:
@@ -305,70 +255,65 @@ class StatusDevice:
             alt = None
 
         return {"lat": lat, "lng": lng, "alt": alt}
-    
+
     def get_ping_latency(self, ip: str):
-        """
-        Ping an IP once and return the latency in milliseconds.
-        Returns None if unreachable or parsing fails.
-        """
-        cmd = ["ping", "-c", "1", "-W", "1", ip]  # -c 1: one packet, -W 1: 1 second timeout
+        cmd = ["ping", "-c", "1", "-W", "1", ip]
         err_dict = {"ping_ms": None}
         try:
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
         except subprocess.CalledProcessError:
             return err_dict
-        
+
         for line in output.splitlines():
             if "time=" in line:
                 try:
                     time_part = line.split("time=")[1]
-                    time_str = time_part.split()[0]  # get the number before 'ms'
+                    time_str = time_part.split()[0]
                     latency_ms = float(time_str)
                     return {"ping_ms": latency_ms}
                 except Exception:
                     return err_dict
         return err_dict
-    
+
     def get_logs(self):
-        check_dirs = ["ntp", "kal"]
-        result = {"last_kal_ms": None, "last_ntp_ms": None, "logs": ""}
+        """
+        Read ALL .log files directly in logs_dir (no subfolders).
+        Filenames format is expected: <timestamp_ms>_<modulename>.log
+        Files containing [[OK]] are ignored for log aggregation (but not read).
+        Returns tuple: (None, None, logs_str) — timestamps are taken from persistence elsewhere.
+        """
+        result_logs = ""
         max_lines = 10
-        logs_lines = []
+        logs_lines: List[str] = []
 
-        for d in check_dirs:
-            current_dir = self.logs_dir / d
-            if not current_dir.exists():
+        if not self.logs_dir.exists() or not self.logs_dir.is_dir():
+            return None, None, result_logs
+
+        for p in self.logs_dir.iterdir():
+            if not p.is_file() or p.suffix != ".log":
                 continue
-            
-            ok_timestamp = []
-            for p in current_dir.iterdir():
-                if not p.is_file() or p.suffix != ".log":
-                    continue
 
-                text = p.read_text(encoding="utf-8")
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception as e:
+                self._log.error(f"Error reading log file {p}: {e}")
+                continue
 
-                if "[[OK]]" in text:
-                    filename_str = p.stem
-                    last_ms = int(filename_str)
-                    ok_timestamp.append(last_ms)
-                else:
-                    str_err_lines = text.splitlines()
-                    for str_err in str_err_lines:
-                        logs_lines.append(str_err)
+            # If file contains [[OK]] skip it (we don't use it to build logs text)
+            if "[[OK]]" in text:
+                continue
 
-            if ok_timestamp:
-                last_ms = max(ok_timestamp)
-                if d == "kal":
-                    result["last_kal_ms"] = last_ms
-                elif d == "ntp":
-                    result["last_ntp_ms"] = last_ms
+            # include file's lines for aggregation
+            file_lines = text.splitlines()
+            logs_lines.extend(file_lines)
 
         if logs_lines:
-            logs_lines = logs_lines[-max_lines:] 
-            result["logs"] = "\n".join(logs_lines)
+            logs_lines = logs_lines[-max_lines:]
+            result_logs = "\n".join(logs_lines)
 
-        return result.get("last_kal_ms"), result.get("last_ntp_ms"), result.get("logs")
-    
+        # We no longer compute last_kal_ms/last_ntp_ms here.
+        return None, None, result_logs
+
     def get_final_dict(self):
 
         # Metrics (live)
@@ -384,10 +329,14 @@ class StatusDevice:
         ping_dict = self.get_ping_latency(cfg.API_IP) or {}
         ping_ms = ping_dict.get("ping_ms")
 
-        # Logs & last timestamps (get_logs returns tuple: (last_kal_ms, last_ntp_ms, logs_str))
-        last_kal_ms, last_ntp_ms, logs_str = self.get_logs()
+        # Logs (we only aggregate last lines here)
+        _, _, logs_str = self.get_logs()
 
-        #dummy
+        # IMPORTANT: last_kal_ms and last_ntp_ms are read from persistent storage
+        last_kal_ms = get_persist_var("last_kal_ms", cfg.PERSIST_FILE)
+        last_ntp_ms = get_persist_var("last_ntp_ms", cfg.PERSIST_FILE)
+
+        # dummy
         delta_t_ms = get_persist_var("last_delta_ms", cfg.PERSIST_FILE)
 
         final_dict: Dict[str, object] = {
@@ -401,18 +350,17 @@ class StatusDevice:
             "last_ntp_ms": last_ntp_ms,
             "logs": logs_str,
         }
-        
+
         log.info(f"Final dict status: {final_dict}")
 
         return final_dict
-                    
 
 
 def main() -> int:
     lte = LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE)
     status_obj = StatusDevice(disk_path=Path('/'), logs_dir=cfg.LOGS_DIR, lte_handler=lte, logger=log)
-    client = RequestClient(base_url=cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log)
-    
+    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
+
     start_delta = cfg.get_time_ms()
     rc, resp = client.post_json(cfg.STATUS_URL, status_obj.get_final_dict())
     delta = cfg.get_time_ms() - start_delta
@@ -425,15 +373,13 @@ def main() -> int:
         return rc_json
 
     if resp is not None and rc == 0:
-        
         preview = resp.text[:200] + ("..." if len(resp.text) > 200 else "")
         log.info(f"POST response code={resp.status_code} preview={preview}")
-        
     else:
         log.error("No response received or error in POST request.")
         return rc
 
-    return 0    
+    return 0
 
 
 if __name__ == "__main__":

@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-@file kal_sync.py
-@brief Uses kalibrate-hackrf to calibrate SDR clock offset.
-"""
-import cfg
-from cfg import KalState
+kal_sync.py
 
+Calibrate SDR clock offset using kalibrate-hackrf.
+"""
+
+from __future__ import annotations
 import subprocess
 import traceback
 import sys
-import pandas as pd
 import re
-import argparse # Added for better argument parsing
-from typing import Tuple, Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
+import pandas as pd
+import argparse
+
+import cfg
+from cfg import KalState
 from utils import modify_persist
 
 log = cfg.set_logger()
@@ -21,309 +25,244 @@ log = cfg.set_logger()
 KAL_LOGS_DIR = cfg.LOGS_DIR / "kal"
 CSV_FILE = KAL_LOGS_DIR / "last_scan.csv"
 
-if cfg.VERBOSE:
-    CMD_SCAN = [
-        ["kal", "-s", "GSM900", "-v"],
-        ["kal", "-s", "GSM850", "-v"],
-        ["kal", "-s", "GSM-R", "-v"],
-    ]
-else:
-    CMD_SCAN = [
-        ["kal", "-s", "GSM900"],
-        ["kal", "-s", "GSM850"],
-        ["kal", "-s", "GSM-R"],
-    ]
+
+@dataclass
+class CalResult:
+    rc: int
+    offset_hz: Optional[float] = None
 
 
-def call_scan() -> int:
-    """
-    Run kal scans for each band in CMD_SCAN, parse results and write last_scan.csv.
-
-    CSV columns: scan, chan (int), freq_hz (float), bw_hz (float), power (float)
-
-    Return:
-      0 -> success (CSV updated if channels found; or no channels but no failures)
-      1 -> failure (binary missing or at least one kal command failed); CSV NOT modified
-    """
-
-    unit_map = {"MHz": 1e6, "kHz": 1e3, "Hz": 1.0}
-    out_rows = []
-    any_failure = False
-
-    # Matches: chan:  123 (959.6MHz - 17.082kHz)    power:  222034.66
-    line_re = re.compile(
+class KalSync:
+    UNIT_MAP = {"MHz": 1e6, "kHz": 1e3, "Hz": 1.0}
+    # regex to capture lines like:
+    # chan:  123 (959.6MHz - 17.082kHz)    power:  222034.66
+    LINE_RE = re.compile(
         r"chan:\s*(\d+)\s*\(\s*([\d.]+)\s*(MHz|kHz|Hz)\s*[+-]\s*([\d.]+)\s*(MHz|kHz|Hz)?\s*\)\s*power:\s*([\d.]+)",
         re.IGNORECASE,
     )
+    NUM_UNIT_RE = re.compile(r"([+-]?\s*[\d.]+)\s*(kHz|Hz|MHz|ppm)\b", re.IGNORECASE)
 
-    for cmd in CMD_SCAN:
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-        except FileNotFoundError:
-            log.error("'kal' not found. Please install kalibrate-hackrf.")
-            return 1
-        except Exception:
-            log.error(f"Unexpected error running {' '.join(cmd)}:\n{traceback.format_exc()}")
-            any_failure = True
-            continue
+    def __init__(self):
+        self.cmds = self._build_cmds()
 
-        if result.returncode != 0:
-            output = (result.stdout or "") + (result.stderr or "")
-            log.error(f"Command {' '.join(cmd)} failed (rc={result.returncode}). Output: {output.strip()}")
-            any_failure = True
-            continue
+    @staticmethod
+    def _build_cmds() -> List[List[str]]:
+        if cfg.VERBOSE:
+            return [["kal", "-s", "GSM900", "-v"], ["kal", "-s", "GSM850", "-v"], ["kal", "-s", "GSM-R", "-v"]]
+        return [["kal", "-s", "GSM900"], ["kal", "-s", "GSM850"], ["kal", "-s", "GSM-R"]]
 
-        stdout_lines = (result.stdout or "").splitlines()
+    def _run(self, cmd: List[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, capture_output=True, text=True)
 
-        # Prefer header like: "kal: Scanning for GSM-900 base stations."
-        scan_name = None
-        for l in stdout_lines:
-            m_header = re.match(r"kal:\s*Scanning for\s+([^\n\r]+)\s+base stations\.?", l, re.IGNORECASE)
-            if m_header:
-                scan_name = m_header.group(1).strip()
-                break
-        if not scan_name:
-            scan_name = " ".join(cmd)
+    def scan(self) -> int:
+        out_rows = []
+        any_failure = False
 
-        for l in stdout_lines:
-            m = line_re.search(l)
-            if not m:
+        for cmd in self.cmds:
+            try:
+                proc = self._run(cmd)
+            except FileNotFoundError:
+                log.error("'kal' not found. Please install kalibrate-hackrf.")
+                return 1
+            except Exception:
+                log.error(f"Unexpected error running {' '.join(cmd)}:\n{traceback.format_exc()}")
+                any_failure = True
                 continue
-            chan = int(m.group(1))
-            freq_val = float(m.group(2))
-            freq_unit = m.group(3)
-            bw_val = float(m.group(4))
-            bw_unit = m.group(5) if m.group(5) else "kHz"
-            power = float(m.group(6))
 
-            freq_hz = freq_val * unit_map.get(freq_unit, 1e6)
-            bw_hz = bw_val * unit_map.get(bw_unit, 1e3)
+            if proc.returncode != 0:
+                output = (proc.stdout or "") + (proc.stderr or "")
+                log.error(f"Command {' '.join(cmd)} failed (rc={proc.returncode}). Output: {output.strip()}")
+                any_failure = True
+                continue
 
-            out_rows.append({
-                "scan": scan_name,
-                "chan": chan,
-                "freq_hz": freq_hz,
-                "bw_hz": bw_hz,
-                "power": power,
-            })
+            lines = (proc.stdout or "").splitlines()
+            # get scan header if present
+            scan_name = None
+            for l in lines:
+                m = re.match(r"kal:\s*Scanning for\s+([^\n\r]+)\s+base stations\.?", l, re.IGNORECASE)
+                if m:
+                    scan_name = m.group(1).strip()
+                    break
+            if not scan_name:
+                scan_name = " ".join(cmd)
 
-        log.info(f"Completed {' '.join(cmd)} OK.")
+            for l in lines:
+                m = self.LINE_RE.search(l)
+                if not m:
+                    continue
+                chan = int(m.group(1))
+                freq_val = float(m.group(2))
+                freq_unit = m.group(3)
+                bw_val = float(m.group(4))
+                bw_unit = m.group(5) if m.group(5) else "kHz"
+                power = float(m.group(6))
 
-    # If any failure occurred, do not touch CSV and return failure
-    if any_failure:
-        log.error("One or more kal commands failed — not modifying last_scan.csv.")
-        return 1
+                freq_hz = freq_val * self.UNIT_MAP.get(freq_unit, 1e6)
+                bw_hz = bw_val * (1e3 if bw_unit.lower() == "khz" else self.UNIT_MAP.get(bw_unit, 1.0))
 
-    # If no channels parsed, do not modify existing CSV
-    if not out_rows:
-        log.info("No channels found; leaving last_scan.csv unchanged.")
+                out_rows.append(
+                    {"scan": scan_name, "chan": chan, "freq_hz": freq_hz, "bw_hz": bw_hz, "power": power}
+                )
+
+            log.info(f"Completed {' '.join(cmd)} OK.")
+
+        if any_failure:
+            log.error("One or more kal commands failed — not modifying last_scan.csv.")
+            return 1
+
+        if not out_rows:
+            log.info("No channels found; leaving last_scan.csv unchanged.")
+            return 0
+
+        try:
+            CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
+            df = pd.DataFrame(out_rows, columns=["scan", "chan", "freq_hz", "bw_hz", "power"])
+            df.to_csv(CSV_FILE, index=False)
+            log.info(f"Wrote {len(df)} rows to {CSV_FILE}")
+        except Exception:
+            log.error(f"Failed writing CSV {CSV_FILE}:\n{traceback.format_exc()}")
+            return 1
+
         return 0
 
-    # Write dataframe (overwrite). Note: we do NOT write an offset comment into CSV.
-    try:
-        CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
-        df = pd.DataFrame(out_rows, columns=["scan", "chan", "freq_hz", "bw_hz", "power"])
-        with CSV_FILE.open('w') as f:
-            df.to_csv(f, index=False)
+    def _parse_offset_from_output(self, out: str, freq_hz: float) -> Optional[float]:
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        # search for lines containing "average" first, then fallback to first numeric match
+        for i, ln in enumerate(lines):
+            if "average" in ln.lower():
+                m = self.NUM_UNIT_RE.search(ln)
+                if not m:
+                    for j in range(i + 1, min(i + 4, len(lines))):
+                        m = self.NUM_UNIT_RE.search(lines[j])
+                        if m:
+                            break
+                if m:
+                    return self._convert_to_hz(m, freq_hz)
 
-        log.info(f"Wrote {len(df)} rows to {CSV_FILE}")
-
-    except Exception:
-        log.error(f"Failed writing CSV {CSV_FILE}:\n{traceback.format_exc()}")
-        return 1
-
-    return 0
-
-
-def calibrate() -> Tuple[int, Optional[float]]:
-    """
-    Read CSV_FILE, pick the strongest channel, run `kal -c <chan>`, parse the
-    measured offset and return (err, offset_hz).
-
-    Returns:
-      (0, offset_hz) on success
-      (1, None) on failure
-    """
-    # Ensure CSV exists
-    if not CSV_FILE.exists():
-        log.error(f"{CSV_FILE} does not exist; cannot calibrate.")
-        return 1, None
-
-    try:
-        # comment='#' is fine but we expect no offset line; still keep for robustness
-        df = pd.read_csv(CSV_FILE, comment='#')
-    except Exception:
-        log.error(f"Failed reading {CSV_FILE}:\n{traceback.format_exc()}")
-        return 1, None
-
-    if df.empty:
-        log.error(f"{CSV_FILE} is empty; cannot calibrate.")
-        return 1, None
-
-    # pick the row with max power
-    idx = df["power"].idxmax()
-    best = df.loc[idx]
-    chan = int(best["chan"])
-    freq_hz = float(best["freq_hz"])  # used if kal prints ppm
-    scan_name = str(best.get("scan", ""))
-
-    log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']}")
-
-    # run kal calibration
-    try:
-        result = subprocess.run(["kal", "-c", str(chan)], capture_output=True, text=True)
-    except FileNotFoundError:
-        log.error("'kal' not found. Please install kalibrate-hackrf.")
-        return 1, None
-    except Exception:
-        log.error(f"Unexpected error running kal for calibration:\n{traceback.format_exc()}")
-        return 1, None
-
-    if result.returncode != 0:
-        output = (result.stdout or "") + (result.stderr or "")
-        log.error(f"Calibration command failed (rc={result.returncode}). Output: {output.strip()}")
-        return 1, None
-
-    out = (result.stdout or "") + "\n" + (result.stderr or "")
-
-    # Try to find the main "average" offset reported by kal.
-    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    offset_hz: Optional[float] = None
-
-    # pattern captures optional sign, number and unit
-    num_unit_re = re.compile(r'([+-]?\s*[\d.]+)\s*(kHz|Hz|MHz|ppm)\b', re.IGNORECASE)
-
-    for i, ln in enumerate(lines):
-        if "average" in ln.lower():
-            # look on the same line first
-            m = num_unit_re.search(ln)
-            if not m:
-                # look at next 1-3 lines for the numeric value
-                for j in range(i+1, min(i+4, len(lines))):
-                    m = num_unit_re.search(lines[j])
-                    if m:
-                        break
-            if m:
-                val_str = m.group(1).replace(" ", "")
-                unit = m.group(2).lower()
-                try:
-                    val = float(val_str)
-                except Exception:
-                    log.error(f"Failed to parse numeric offset '{val_str}' from kal output.")
-                    return 1, None
-
-                if unit == "ppm":
-                    offset_hz = val * freq_hz / 1e6
-                elif unit == "khz":
-                    offset_hz = val * 1e3
-                elif unit == "mhz":
-                    offset_hz = val * 1e6
-                else:  # Hz
-                    offset_hz = val * 1.0
-
-                break
-
-    # Fallback: if we didn't find the 'average' block, try to pick the first matched numeric unit anywhere
-    if offset_hz is None:
+        # fallback
         for ln in lines:
-            m = num_unit_re.search(ln)
+            m = self.NUM_UNIT_RE.search(ln)
             if m:
-                val_str = m.group(1).replace(" ", "")
-                unit = m.group(2).lower()
-                try:
-                    val = float(val_str)
-                except Exception:
-                    continue
-                if unit == "ppm":
-                    offset_hz = val * freq_hz / 1e6
-                elif unit == "khz":
-                    offset_hz = val * 1e3
-                elif unit == "mhz":
-                    offset_hz = val * 1e6
-                else:
-                    offset_hz = val * 1.0
-                break
+                return self._convert_to_hz(m, freq_hz)
+        return None
 
-    if offset_hz is None:
-        log.error("Could not parse offset from kal output.")
-        log.debug("kal stdout/stderr:\n" + out)
-        return 1, None
+    def _convert_to_hz(self, m: re.Match, freq_hz: float) -> Optional[float]:
+        val_str = m.group(1).replace(" ", "")
+        unit = m.group(2).lower()
+        try:
+            val = float(val_str)
+        except Exception:
+            return None
+        if unit == "ppm":
+            return val * freq_hz / 1e6
+        if unit == "khz":
+            return val * 1e3
+        if unit == "mhz":
+            return val * 1e6
+        return val * 1.0  # Hz
 
-    ppm_equiv = offset_hz * 1e6 / freq_hz
-    log.info(f"Parsed offset: {offset_hz:.3f} Hz ({offset_hz/1e3:.3f} kHz, {ppm_equiv:.3f} ppm)")
+    def calibrate(self) -> CalResult:
+        if not CSV_FILE.exists():
+            log.error(f"{CSV_FILE} does not exist; cannot calibrate.")
+            return CalResult(1, None)
 
-    return 0, float(offset_hz)
+        try:
+            df = pd.read_csv(CSV_FILE, comment="#")
+        except Exception:
+            log.error(f"Failed reading {CSV_FILE}:\n{traceback.format_exc()}")
+            return CalResult(1, None)
+
+        if df.empty:
+            log.error(f"{CSV_FILE} is empty; cannot calibrate.")
+            return CalResult(1, None)
+
+        idx = df["power"].idxmax()
+        best = df.loc[idx]
+        chan = int(best["chan"])
+        freq_hz = float(best["freq_hz"])
+        scan_name = str(best.get("scan", ""))
+
+        log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']}")
+
+        try:
+            proc = self._run(["kal", "-c", str(chan)])
+        except FileNotFoundError:
+            log.error("'kal' not found. Please install kalibrate-hackrf.")
+            return CalResult(1, None)
+        except Exception:
+            log.error(f"Unexpected error running kal for calibration:\n{traceback.format_exc()}")
+            return CalResult(1, None)
+
+        if proc.returncode != 0:
+            output = (proc.stdout or "") + (proc.stderr or "")
+            log.error(f"Calibration command failed (rc={proc.returncode}). Output: {output.strip()}")
+            return CalResult(1, None)
+
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        offset_hz = self._parse_offset_from_output(out, freq_hz)
+
+        if offset_hz is None:
+            log.error("Could not parse offset from kal output.")
+            log.debug("kal stdout/stderr:\n" + out)
+            return CalResult(1, None)
+
+        ppm_equiv = offset_hz * 1e6 / freq_hz
+        log.info(f"Parsed offset: {offset_hz:.3f} Hz ({offset_hz/1e3:.3f} kHz, {ppm_equiv:.3f} ppm)")
+        return CalResult(0, float(offset_hz))
+
+    def run(self, action: KalState) -> int:
+        if action == KalState.KAL_SCANNING:
+            return self.scan()
+
+        if action == KalState.KAL_CALIBRATING:
+            res = self.calibrate()
+            if res.rc != 0 or res.offset_hz is None:
+                log.error("Calibration failed.")
+                return res.rc
+
+            # save offset to cfg.PERSIST_FILE (preserve previous behavior)
+            try:
+                if cfg.PERSIST_FILE is None:
+                    log.error("cfg.PERSIST_FILE is not defined; cannot persist offset to vars.json.")
+                    return 1
+                rc_json = modify_persist("last_offset_hz", float(res.offset_hz), cfg.PERSIST_FILE)
+                if rc_json != 0:
+                    log.error("Failed saving offset into vars.json (modify_persist returned non-zero).")
+                    return rc_json
+                log.info(f"Calibration successful. Offset {res.offset_hz:.3f} Hz saved to {cfg.PERSIST_FILE}")
+            except Exception:
+                log.error(f"Unexpected error saving offset to vars.json:\n{traceback.format_exc()}")
+                return 1
+
+            # On full success, write last_kal_ms timestamp (two-arg form per your request).
+            try:
+                rc_ts = modify_persist("last_kal_ms", cfg.get_time_ms(), cfg.PERSIST_FILE)
+                if rc_ts != 0:
+                    log.error(f"modify_persist('last_kal_ms', ...) returned non-zero rc={rc_ts}")
+                    return rc_ts
+                log.info("Persisted last_kal_ms successfully.")
+            except Exception:
+                log.error(f"Failed to persist last_kal_ms:\n{traceback.format_exc()}")
+                return 1
+
+            return 0
+
+        log.error(f"Unsupported action: {action}")
+        return 1
 
 
 def main() -> int:
-    # --- Start of new argparse logic ---
     parser = argparse.ArgumentParser(
-        description="Calibrates SDR clock offset using kalibrate-hackrf.",
-        formatter_class=argparse.RawTextHelpFormatter # Keeps help formatting for multi-line strings
+        description="Calibrates SDR clock offset using kalibrate-hackrf (scan|calibrate)."
     )
-
-    parser.add_argument(
-        "action",
-        choices=["scan", "calibrate"],
-        help="""Action to perform:
-- scan: Run kalibrate scans across GSM bands, parse results, and save them to last_scan.csv.
-- calibrate: Read the strongest channel from last_scan.csv, run the frequency calibration, and save the resulting frequency offset (in Hz) to the temporary config file."""
-    )
-
+    parser.add_argument("action", choices=["scan", "calibrate"])
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         return 1
-
     args = parser.parse_args()
 
-    # Map the parsed action to the internal KalState enum
-    if args.action == "scan":
-        state = KalState.KAL_SCANNING
-    elif args.action == "calibrate":
-        state = KalState.KAL_CALIBRATING
-    else:
-        # Should be unreachable due to 'choices'
-        log.error(f"Internal error: Invalid action {args.action}")
-        return 1
-    # --- End of new argparse logic ---
-
-    rc = 1  # Default to failure
-    match state:
-        case KalState.KAL_SCANNING:
-            rc = call_scan()
-
-        case KalState.KAL_CALIBRATING:
-            # Step 1: Run calibration to get the offset value
-            rc_cal, offset_hz = calibrate()
-
-            if rc_cal == 0 and offset_hz is not None:
-               
-                try:
-                    if cfg.PERSIST_FILE is None:
-                        log.error("cfg.PERSIST_FILE is not defined; cannot persist offset to vars.json.")
-                        return 1
-
-                    # modify_persist returns 0 on success, 1 on failure per your util's contract
-                    rc_json = modify_persist("last_offset_hz", float(offset_hz), cfg.PERSIST_FILE)
-                    if rc_json != 0:
-                        log.error("Failed saving offset into vars.json (modify_persist returned non-zero).")
-                        return rc_json
-
-                    log.info(f"Calibration successful. Offset {offset_hz:.3f} Hz saved to {cfg.PERSIST_FILE}")
-                    return 0
-
-                except Exception:
-                    log.error(f"Unexpected error saving offset to vars.json:\n{traceback.format_exc()}")
-                    return 1
-
-            elif rc_cal != 0:
-                log.error("Calibration failed.")
-                return rc_cal
-            else:
-                log.error("Calibration returned success but no offset.")
-                return 1
-
-    return rc
+    state = KalState.KAL_SCANNING if args.action == "scan" else KalState.KAL_CALIBRATING
+    return KalSync().run(state)
 
 
 if __name__ == "__main__":

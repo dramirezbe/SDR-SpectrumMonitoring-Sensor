@@ -198,7 +198,7 @@ def retry_queue(client: RequestClient) -> int:
 def main() -> int:
     """Entry point for the retry queue runner."""
     try:
-        client = RequestClient(base_url=cfg.API_URL, timeout=(RETRY_SECONDS, 15), verbose=cfg.VERBOSE, logger=log)
+        client = RequestClient(cfg.API_URL, timeout=(RETRY_SECONDS, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
     except Exception as e:
         log.exception("Failed to construct RequestClient: %s", e)
         return RC_NETWORK

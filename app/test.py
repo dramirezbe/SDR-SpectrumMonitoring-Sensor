@@ -1,6 +1,5 @@
-import requests
+"""import requests
 import json  # Necesario para el formateo
-from utils import get_persist_var
 import cfg
 
 # Definir URL y Headers
@@ -41,4 +40,21 @@ response = requests.get(url, headers=headers)
 
 # Ver resultados
 print(f"Status: {response.status_code}")
-print(f"Data: {response.json()}")
+print(f"Data: {response.json()}")"""
+
+
+
+import cfg
+from utils import RequestClient
+
+log = cfg.set_logger()
+
+client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
+
+
+rc, resp = client.get(cfg.JOBS_URL)
+
+if rc == 0 and resp is not None:
+    log.info(resp.json())
+else:
+    log.error(f"GET request: Failed to fetch jobs: rc={rc}")

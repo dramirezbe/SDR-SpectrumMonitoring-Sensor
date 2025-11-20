@@ -1,11 +1,10 @@
 {
-  "device_id": "10",
   "api_key": "10",
-  
   "current_camp": 1234,
   "current_mode": "campaign",
+  "device_id": "10",
   "last_delta_ms": 111,
-  "last_kal_ms": 12422,
+  "last_kal_ms": 1763653778905,
   "last_ntp_ms": 23524563,
-  "last_offset_hz": -36573.0
+  "last_offset_hz": -36854.0
 }
