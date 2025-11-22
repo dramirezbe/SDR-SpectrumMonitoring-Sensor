@@ -11,7 +11,7 @@ Behavior:
  - Convert NTP time to Colombia local time (UTC-5).
  - Temporarily disable automatic sync (timedatectl), set the system clock,
    then re-enable automatic sync.
- - If setting the clock succeeds, call modify_persist("last_npt_ms", cfg.get_time_ms())
+ - If setting the clock succeeds, call modify_persist("last_ntp_ms", cfg.get_time_ms())
    and validate its return code == 0 before logging success.
  - On NTP fetch failure, only log an error and exit non-zero (no modify_persist call).
 """
@@ -121,9 +121,9 @@ class NTPResync:
                 log.info("System time updated successfully.")
                 # Persist the timestamp only on success
                 try:
-                    rc = modify_persist("last_npt_ms", cfg.get_time_ms(), cfg.PERSIST_FILE)
+                    rc = modify_persist("last_ntp_ms", cfg.get_time_ms(), cfg.PERSIST_FILE)
                     if rc == 0:
-                        log.info("Persisted last_npt_ms successfully.")
+                        log.info("Persisted last_ntp_ms successfully.")
                     else:
                         log.error(f"modify_persist returned non-zero rc={rc}")
                 except Exception as exc:

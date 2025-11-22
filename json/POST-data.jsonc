@@ -1,5 +1,8 @@
 // Data post request
 {
+
+    //string
+    "device_id": "1234",
     // Array of Power Spectral Density data in dBm/Hz (float32)
     "Pxx": [-0.54, -0.43, -1.56],
     // In Hz (int)

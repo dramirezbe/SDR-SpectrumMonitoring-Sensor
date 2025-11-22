@@ -1,5 +1,8 @@
 // STATUS POST
 {
+  //string
+  "device_id": "123456789",
+
   "metrics": {
     // In percentage (float)
     // Percentage of usage per thread
@@ -17,13 +20,7 @@
     "swap_mb": 1234,
     "disk_mb": 786734
   },
-  "gps": {
-    // (float) (degrees)
-    "lat": 5.0741,
-    "lng": -75.5169,
-    // Altitude in meters
-    "alt": 2500.6
-  },
+
   // In ms response_time - request_time (int)
   "delta_t_ms": 467054056,
   // Last saved server ping (float)

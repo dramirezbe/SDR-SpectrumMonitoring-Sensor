@@ -9,9 +9,8 @@ import sys
 import json
 from pathlib import Path
 
-from utils import atomic_write_bytes, RequestClient, CampaignHackRF, get_persist_var
+from utils import atomic_write_bytes, RequestClient, CampaignHackRF, get_persist_var, modify_persist
 from status_device import StatusDevice
-from libs import init_lte, LTELibError
 
 # --- START OF PLOTTING ADDITIONS ---
 import numpy as np
@@ -173,12 +172,10 @@ def main() -> int:
 
 
     #switch antenna
-    try:
-        with init_lte(cfg.LIB_LTE, cfg.VERBOSE) as lte:
-            lte.switch_antenna(int(antenna_port))
-    except LTELibError as e:
-        log.error(f"LTE error: {e}")
-        return 2
+    rc = modify_persist("antenna_port", antenna_port, cfg.PERSIST_FILE)
+    if rc != 0:
+        log.error(f"Failed saving antenna_port into vars.json (modify_persist returned non-zero).")
+        return rc
     
     hack_rf = CampaignHackRF(start_freq_hz=start_freq_hz, end_freq_hz=end_freq_hz,
                 sample_rate_hz=20_000_000, resolution_hz=resolution_hz, 

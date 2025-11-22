@@ -10,14 +10,13 @@ import subprocess
 import traceback
 import sys
 import re
+import csv # Import the native CSV library
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
-import pandas as pd
 import argparse
 
 import cfg
-from cfg import KalState
 from utils import modify_persist
 
 log = cfg.set_logger()
@@ -40,6 +39,8 @@ class KalSync:
         r"chan:\s*(\d+)\s*\(\s*([\d.]+)\s*(MHz|kHz|Hz)\s*[+-]\s*([\d.]+)\s*(MHz|kHz|Hz)?\s*\)\s*power:\s*([\d.]+)",
         re.IGNORECASE,
     )
+    # regex to capture lines like:
+    # average: 17.082kHz
     NUM_UNIT_RE = re.compile(r"([+-]?\s*[\d.]+)\s*(kHz|Hz|MHz|ppm)\b", re.IGNORECASE)
 
     def __init__(self):
@@ -55,7 +56,8 @@ class KalSync:
         return subprocess.run(cmd, capture_output=True, text=True)
 
     def scan(self) -> int:
-        out_rows = []
+        # out_rows will be a list of dictionaries
+        out_rows: List[Dict[str, Any]] = []
         any_failure = False
 
         for cmd in self.cmds:
@@ -114,14 +116,22 @@ class KalSync:
             log.info("No channels found; leaving last_scan.csv unchanged.")
             return 0
 
+        # --- Replaced pandas CSV writing with native Python CSV ---
         try:
             CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
-            df = pd.DataFrame(out_rows, columns=["scan", "chan", "freq_hz", "bw_hz", "power"])
-            df.to_csv(CSV_FILE, index=False)
-            log.info(f"Wrote {len(df)} rows to {CSV_FILE}")
+            fieldnames = ["scan", "chan", "freq_hz", "bw_hz", "power"]
+
+            # Use DictWriter for easy dictionary-to-row conversion
+            with open(CSV_FILE, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(out_rows)
+
+            log.info(f"Wrote {len(out_rows)} rows to {CSV_FILE}")
         except Exception:
             log.error(f"Failed writing CSV {CSV_FILE}:\n{traceback.format_exc()}")
             return 1
+        # -----------------------------------------------------------
 
         return 0
 
@@ -132,6 +142,7 @@ class KalSync:
             if "average" in ln.lower():
                 m = self.NUM_UNIT_RE.search(ln)
                 if not m:
+                    # check next few lines if the average keyword is separate from the value
                     for j in range(i + 1, min(i + 4, len(lines))):
                         m = self.NUM_UNIT_RE.search(lines[j])
                         if m:
@@ -139,7 +150,7 @@ class KalSync:
                 if m:
                     return self._convert_to_hz(m, freq_hz)
 
-        # fallback
+        # fallback to the first line with a number and unit
         for ln in lines:
             m = self.NUM_UNIT_RE.search(ln)
             if m:
@@ -166,23 +177,38 @@ class KalSync:
             log.error(f"{CSV_FILE} does not exist; cannot calibrate.")
             return CalResult(1, None)
 
+        # --- Replaced pandas CSV reading and max search with native Python ---
+        data: List[Dict[str, Any]] = []
         try:
-            df = pd.read_csv(CSV_FILE, comment="#")
+            with open(CSV_FILE, 'r', newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    # Convert necessary fields from string to correct type
+                    try:
+                        row['chan'] = int(row['chan'])
+                        row['freq_hz'] = float(row['freq_hz'])
+                        row['power'] = float(row['power'])
+                        data.append(row)
+                    except (ValueError, KeyError) as e:
+                        log.warning(f"Skipping malformed row in CSV ({e}): {row}")
+
         except Exception:
             log.error(f"Failed reading {CSV_FILE}:\n{traceback.format_exc()}")
             return CalResult(1, None)
 
-        if df.empty:
-            log.error(f"{CSV_FILE} is empty; cannot calibrate.")
+        if not data:
+            log.error(f"{CSV_FILE} is empty or unreadable; cannot calibrate.")
             return CalResult(1, None)
 
-        idx = df["power"].idxmax()
-        best = df.loc[idx]
-        chan = int(best["chan"])
-        freq_hz = float(best["freq_hz"])
-        scan_name = str(best.get("scan", ""))
+        # Find the row with the maximum power using the max function with a key
+        best = max(data, key=lambda x: x['power'])
 
-        log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']}")
+        chan = best["chan"]
+        freq_hz = best["freq_hz"]
+        scan_name = str(best.get("scan", ""))
+        # -------------------------------------------------------------------
+
+        log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']:.2f}")
 
         try:
             proc = self._run(["kal", "-c", str(chan)])
@@ -210,11 +236,11 @@ class KalSync:
         log.info(f"Parsed offset: {offset_hz:.3f} Hz ({offset_hz/1e3:.3f} kHz, {ppm_equiv:.3f} ppm)")
         return CalResult(0, float(offset_hz))
 
-    def run(self, action: KalState) -> int:
-        if action == KalState.KAL_SCANNING:
+    def run(self, action: cfg.KalState) -> int:
+        if action == cfg.KalState.KAL_SCANNING:
             return self.scan()
 
-        if action == KalState.KAL_CALIBRATING:
+        if action == cfg.KalState.KAL_CALIBRATING:
             res = self.calibrate()
             if res.rc != 0 or res.offset_hz is None:
                 log.error("Calibration failed.")
@@ -261,7 +287,7 @@ def main() -> int:
         return 1
     args = parser.parse_args()
 
-    state = KalState.KAL_SCANNING if args.action == "scan" else KalState.KAL_CALIBRATING
+    state = cfg.KalState.KAL_SCANNING if args.action == "scan" else cfg.KalState.KAL_CALIBRATING
     return KalSync().run(state)
 
 
