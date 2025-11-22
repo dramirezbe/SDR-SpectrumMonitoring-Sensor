@@ -1,8 +1,9 @@
 // STATUS POST
 {
-  //string
-  "device_id": "123456789",
+  //int
+  "device_id": 10,
 
+  
   "metrics": {
     // In percentage (float)
     // Percentage of usage per thread

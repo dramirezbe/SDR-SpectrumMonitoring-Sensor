@@ -1,4 +1,4 @@
-// GET campaigns
+// GET jobs
 {
   // List of active or scheduled campaigns.
   // Can be empty ([]) but is always sent. Each element represents an independent campaign.

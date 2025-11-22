@@ -1,6 +1,6 @@
 {
-    //string
-    "device_id": "13223xs4",
+    //int
+    "device_id": 10,
     // (float) (degrees)
     "lat": 5.0741,
     "lng": -75.5169,
