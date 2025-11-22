@@ -1,4 +1,4 @@
-//main.c
+// main.c CORREGIDO
 
 #define _POSIX_C_SOURCE 200809L
 #include <stdlib.h>
@@ -6,11 +6,14 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
-#include <libgen.h>
 #include <limits.h>
 #include <errno.h>
-#include <stdlib.h>
 #include <sys/inotify.h>
+#include <stdbool.h>
+
+#include "Drivers/utils.h"
+
+// Drivers
 #include "Drivers/cJSON.h"
 #include "Drivers/bacn_gpio.h"
 #include "Drivers/bacn_LTE.h"
@@ -18,238 +21,144 @@
 
 st_uart LTE;
 gp_uart GPS;
-
 GPSCommand GPSInfo;
-
 bool LTE_open = false;
 bool GPS_open = false;
 
-int get_exec_dir(char *out, size_t out_size) {
-    char buf[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len == -1) return -1;               // errno ya contiene la razón
-    if ((size_t)len >= sizeof(buf) - 1) return -1; // truncado inesperado
+// --- Callback (Igual que antes) ---
+void handle_config_update(const char *watch_path, const char *filename, uint32_t mask, void *user_data) {
+    if (filename == NULL || strcmp(filename, "persistent.json") != 0) return;
 
-    buf[len] = '\0';
+    char full_path[PATH_MAX];
+    if (path_join(watch_path, filename, full_path, sizeof(full_path)) != 0) return;
 
-    // Opcional: canonicalizar para resolver enlaces simbólicos
-    char real[PATH_MAX];
-    if (!realpath(buf, real)) {
-        // Si realpath falla, usamos buf tal cual
-        strncpy(real, buf, sizeof(real));
-        real[sizeof(real)-1] = '\0';
+    printf("\n📢 Detectado cambio en: %s\n", filename);
+
+    char* json_text = read_file_to_string(full_path);
+    if (!json_text) return;
+
+    cJSON* root = cJSON_Parse(json_text);
+    free(json_text);
+
+    if (!root) {
+        printf("Error parseando JSON\n");
+        return;
     }
 
-    // Quitamos el componente final (nombre del ejecutable)
-    char *last = strrchr(real, '/');
-    if (!last) {
-        // no contiene '/', improbable, devolvemos "."
-        if (out_size < 2) return -1;
-        strcpy(out, ".");
-        return 0;
+    cJSON* antenna = cJSON_GetObjectItem(root, "antenna_port");
+    if (cJSON_IsNumber(antenna)) {
+        int num_antenna = antenna->valueint;
+        printf("🔧 Configuración aplicada: Puerto de antena = %d\n", num_antenna);
+        select_ANTENNA(num_antenna);
+    }
+    cJSON_Delete(root);
+}
+
+// --- Inicialización de Módulos (CORREGIDA) ---
+int initialize_modules() {
+    printf("--- Inicializando Módulos ---\n");
+
+    // 1. Inicializar UART LTE
+    if (init_usart(&LTE) != 0) {
+        printf("Error: Fallo al abrir UART LTE\n");
+        return -1; 
+        // NOTA: Si quieres que el programa siga aunque falle el LTE, cambia esto a return 0;
     }
 
-    size_t dir_len = (size_t)(last - real);
-    if (dir_len == 0) {
-        // el ejecutable en la raíz "/"
-        if (out_size < 2) return -1;
-        strcpy(out, "/");
-        return 0;
+    if (status_LTE()) {
+        printf("El módulo LTE ya estaba encendido.\n");
+    } else {
+        printf("Encendiendo módulo LTE...\n");
+        power_ON_LTE();
+    }
+    
+    printf("Esperando respuesta del LTE (Timeout de 10 segundos)...\n");
+    
+    // --- CORRECCIÓN DE BLOQUEO ---
+    int attempts = 0;
+    int max_attempts = 100; // 100 intentos * 100ms = 10 segundos aprox
+    bool lte_ready = false;
+
+    while (attempts < max_attempts) {
+        if (LTE_Start(&LTE)) {
+            lte_ready = true;
+            break;
+        }
+        usleep(100000); // Esperar 100ms entre intentos
+        attempts++;
+        if (attempts % 10 == 0) printf("."); // Feedback visual
+        fflush(stdout);
+    }
+    printf("\n");
+
+    if (lte_ready) {
+        printf("✅ LTE iniciado correctamente.\n");
+        LTE_open = true;
+    } else {
+        printf("⚠️ ADVERTENCIA: El LTE no respondió. El programa continuará sin LTE.\n");
+        // No hacemos return -1 para permitir que inotify funcione aunque el LTE falle
     }
 
-    if (dir_len + 1 > out_size) return -1;
-    memcpy(out, real, dir_len);
-    out[dir_len] = '\0';
+    // 2. GPS Initialization
+    if (init_usart1(&GPS) != 0) {
+        printf("Error: Fallo al abrir GPS\n");
+        return -1;
+    }
+    GPS_open = true;
+    printf("✅ GPS iniciado.\n");
+
     return 0;
 }
 
-int path_parent(const char *path, char *out, size_t out_size) {
-    if (!path || !out) return -1;
-    size_t len = strlen(path);
-    if (len == 0) return -1;
+// --- Bucle Principal (main) ---
 
-    // hacemos una copia local porque vamos a manipularla
-    if (len + 1 > PATH_MAX) return -1;
-    char tmp[PATH_MAX];
-    strncpy(tmp, path, sizeof(tmp));
-    tmp[sizeof(tmp)-1] = '\0';
-
-    // quitar barras de final
-    while (strlen(tmp) > 1 && tmp[strlen(tmp)-1] == '/') tmp[strlen(tmp)-1] = '\0';
-
-    char *last = strrchr(tmp, '/');
-    if (!last) {
-        // sin '/', parent es "."
-        if (out_size < 2) return -1;
-        strcpy(out, ".");
-        return 0;
-    }
-
-    if (last == tmp) {
-        // parent de "/algo" -> "/"
-        if (out_size < 2) return -1;
-        strcpy(out, "/");
-        return 0;
-    }
-
-    *last = '\0';
-    if (strlen(tmp) + 1 > out_size) return -1;
-    strcpy(out, tmp);
-    return 0;
-}
-
-int path_join(const char *base, const char *name, char *out, size_t out_size) {
-    if (!base || !name || !out) return -1;
-
-    // si base termina en '/', evitamos duplicar
-    size_t b = strlen(base);
-    int needs_slash = (b > 0 && base[b-1] != '/');
-
-    // snprintf devuelve el número de bytes que habría escrito (sin contar '\0')
-    int required = snprintf(out, out_size, "%s%s%s", base, needs_slash ? "/" : "", name);
-    if (required < 0) return -1;
-    if ((size_t)required >= out_size) return -1; // truncado
-    return 0;
-}
-
-char* read_json(const char* filename) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) return NULL;
-
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    rewind(f);
-
-    char* buffer = malloc(size + 1);
-    if (!buffer) {
-        fclose(f);
-        return NULL;
-    }
-
-    fread(buffer, 1, size, f);
-    buffer[size] = '\0';
-    fclose(f);
-    return buffer;
-}
-
-/* Ejemplo de uso */
 int main(void) {
-    char exec_dir[PATH_MAX];
-    char project_root[PATH_MAX];
-    char persistent_json_path[PATH_MAX];
+    int ret = 0;
+    paths_t paths; 
+    InotifyManager manager;
 
-    if (get_exec_dir(exec_dir, sizeof(exec_dir)) != 0) {
-        perror("get_exec_dir");
+    // 1. Rutas
+    if (fill_paths(&paths) != 0) return 1;
+    printf("Directorio raíz: %s\n", paths.project_root);
+
+    // 2. Inotify Init
+    if (inotify_manager_init(&manager) != 0) return 1;
+
+    // 3. Watch
+    if (inotify_manager_add_watch(
+            &manager,
+            paths.project_root,
+            IN_CLOSE_WRITE | IN_MOVED_TO, // Detecta escritura normal y atómica
+            handle_config_update,
+            NULL
+        ) != 0) {
+        inotify_manager_cleanup(&manager);
         return 1;
     }
 
-    if (path_parent(exec_dir, project_root, sizeof(project_root)) != 0) {
-        fprintf(stderr, "path_parent failed\n");
-        return 1;
-    }
+    // Carga inicial
+    handle_config_update(paths.project_root, "persistent.json", 0, NULL);
 
-    if (path_join(project_root, "persistent.json", persistent_json_path, sizeof(persistent_json_path)) != 0) {
-        fprintf(stderr, "path_join failed\n");
-        return 1;
-    }
+    // 4. Módulos (Ahora con timeout para no colgar el programa)
+    //initialize_modules(); 
 
-    int fd = inotify_init1(IN_NONBLOCK);
-    if (fd < 0) {
-        perror("inotify_init1");
-        return 1;
-    }
+    printf("🚀 Sistema corriendo. Esperando cambios en JSON o datos GPS...\n");
 
-    int wd = inotify_add_watch(fd, persistent_json_path, IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO);
-    if (wd < 0) {
-        perror("inotify_add_watch");
-        return 1;
-    }
-
-    char buf[4096]
-        __attribute__ ((aligned(__alignof__(struct inotify_event))));
-    ssize_t len;
-
-    //(No tocar)
-	if(status_LTE()) {
-		printf("LTE module is ON\r\n");
-	} else {
-    	power_ON_LTE();
-	}
-
-    if(init_usart(&LTE) != 0)
-    {
-        printf("Error : LTE open failed\r\n");
-        return -1;
-    }
-
-    printf("LTE module ready\r\n");
-    //(No tocar)
-    while(!LTE_Start(&LTE));
-    printf("LTE response OK\n");
-    //(No tocar)
-    if(init_usart1(&GPS) != 0)
-    {
-        printf("Error : GPS open failed\r\n");
-        return -1;
-    }
-
+    // 5. Bucle Principal
     while (1)
     {
-        len = read(fd, buf, sizeof(buf));
-        if (len <= 0) {
-            usleep(100000);
-            continue;
+        // A. Procesa eventos de archivo (CRÍTICO: Esto debe correr rápido)
+        if (inotify_manager_process_events(&manager) < 0) {
+            fprintf(stderr, "Error en inotify.\n");
+            break;
         }
 
-        for (char *ptr = buf; ptr < buf + len; ) {
-            struct inotify_event *event = (struct inotify_event *)ptr;
-
-            if (event->mask & IN_MODIFY ||
-                event->mask & IN_CLOSE_WRITE ||
-                event->mask & IN_MOVED_TO) {
-                //File updated
-
-                char* json_text = read_json(persistent_json_path);
-                if (!json_text) {
-                    printf("Error leyendo archivo JSON\n");
-                    return 1;
-                }
-
-                cJSON* root = cJSON_Parse(json_text);
-                free(json_text);
-
-                if (!root) {
-                    printf("Error parseando JSON: %s\n", cJSON_GetErrorPtr());
-                    return 1;
-                }
+        //Implement GPS
 
 
-                cJSON* antenna = cJSON_GetObjectItem(root, "antenna_port");
-                if (!cJSON_IsNumber(antenna)) {
-                    printf("Error leyendo el puerto de la antena\n");
-                    cJSON_Delete(root);
-                    return 1;
-                }
+        usleep(100000);
+    }
 
-                int num_antenna = antenna->valueint;
-                printf("antenna: %d\n", num_antenna);
-
-                cJSON_Delete(root);
-
-                select_ANTENNA(num_antenna);
-
-            }
-
-            ptr += sizeof(struct inotify_event) + event->len;
-        }
-
-        
-        //(No tocar)
-        printf ("Latitude = %s, Longitude = %s, Altitude = %s\n",GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
-        sleep(3);
-    }    
-
-    close(fd);
-    return 0;
+    inotify_manager_cleanup(&manager);
+    return ret;
 }
-
