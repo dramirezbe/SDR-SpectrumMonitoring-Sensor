@@ -3,6 +3,10 @@
 kal_sync.py
 
 Calibrate SDR clock offset using kalibrate-hackrf.
+Workflow: Scans for GSM base stations. Stops immediately upon finding 
+the FIRST peak (kills scan subprocess), then calibrates against it.
+
+No arguments required.
 """
 
 from __future__ import annotations
@@ -10,24 +14,18 @@ import subprocess
 import traceback
 import sys
 import re
-import csv # Import the native CSV library
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
-
-import argparse
 
 import cfg
 from utils import modify_persist
 
 log = cfg.set_logger()
 
-KAL_LOGS_DIR = cfg.LOGS_DIR / "kal"
-CSV_FILE = KAL_LOGS_DIR / "last_scan.csv"
-
-
 @dataclass
 class CalResult:
     rc: int
+    offset_ppm: Optional[float] = None
     offset_hz: Optional[float] = None
 
 
@@ -55,94 +53,77 @@ class KalSync:
     def _run(self, cmd: List[str]) -> subprocess.CompletedProcess:
         return subprocess.run(cmd, capture_output=True, text=True)
 
-    def scan(self) -> int:
-        # out_rows will be a list of dictionaries
-        out_rows: List[Dict[str, Any]] = []
-        any_failure = False
+    def scan_and_find_first(self) -> Optional[Dict[str, Any]]:
+        """
+        Runs kalibrate scans. Reads output in real-time.
+        As soon as a peak is found, terminates the subprocess and returns the peak info.
+        """
+        log.info("Starting GSM Scan (stopping on first peak)...")
 
         for cmd in self.cmds:
+            scan_name = " ".join(cmd)
+            log.info(f"Running: {scan_name}")
+            
+            # Use Popen to read output line-by-line
             try:
-                proc = self._run(cmd)
+                # bufsize=1 means line buffered
+                with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
+                    found_peak = None
+                    
+                    try:
+                        # Read line by line
+                        for line in proc.stdout:
+                            # Check for channel info
+                            m = self.LINE_RE.search(line)
+                            if m:
+                                chan = int(m.group(1))
+                                freq_val = float(m.group(2))
+                                freq_unit = m.group(3)
+                                power = float(m.group(6))
+                                freq_hz = freq_val * self.UNIT_MAP.get(freq_unit, 1e6)
+
+                                found_peak = {
+                                    "scan": scan_name, 
+                                    "chan": chan, 
+                                    "freq_hz": freq_hz, 
+                                    "power": power
+                                }
+                                log.info(f"Peak found: {line.strip()}")
+                                break  # Break the loop to terminate
+                    except Exception as e:
+                        log.error(f"Error reading output from {scan_name}: {e}")
+                    
+                    # If we broke out or finished, we're here. 
+                    # Terminate the process if it's still running.
+                    if proc.poll() is None:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                    
+                    if found_peak:
+                        return found_peak
+
             except FileNotFoundError:
                 log.error("'kal' not found. Please install kalibrate-hackrf.")
-                return 1
+                return None
             except Exception:
-                log.error(f"Unexpected error running {' '.join(cmd)}:\n{traceback.format_exc()}")
-                any_failure = True
+                log.error(f"Unexpected error running {scan_name}:\n{traceback.format_exc()}")
                 continue
 
-            if proc.returncode != 0:
-                output = (proc.stdout or "") + (proc.stderr or "")
-                log.error(f"Command {' '.join(cmd)} failed (rc={proc.returncode}). Output: {output.strip()}")
-                any_failure = True
-                continue
-
-            lines = (proc.stdout or "").splitlines()
-            # get scan header if present
-            scan_name = None
-            for l in lines:
-                m = re.match(r"kal:\s*Scanning for\s+([^\n\r]+)\s+base stations\.?", l, re.IGNORECASE)
-                if m:
-                    scan_name = m.group(1).strip()
-                    break
-            if not scan_name:
-                scan_name = " ".join(cmd)
-
-            for l in lines:
-                m = self.LINE_RE.search(l)
-                if not m:
-                    continue
-                chan = int(m.group(1))
-                freq_val = float(m.group(2))
-                freq_unit = m.group(3)
-                bw_val = float(m.group(4))
-                bw_unit = m.group(5) if m.group(5) else "kHz"
-                power = float(m.group(6))
-
-                freq_hz = freq_val * self.UNIT_MAP.get(freq_unit, 1e6)
-                bw_hz = bw_val * (1e3 if bw_unit.lower() == "khz" else self.UNIT_MAP.get(bw_unit, 1.0))
-
-                out_rows.append(
-                    {"scan": scan_name, "chan": chan, "freq_hz": freq_hz, "bw_hz": bw_hz, "power": power}
-                )
-
-            log.info(f"Completed {' '.join(cmd)} OK.")
-
-        if any_failure:
-            log.error("One or more kal commands failed — not modifying last_scan.csv.")
-            return 1
-
-        if not out_rows:
-            log.info("No channels found; leaving last_scan.csv unchanged.")
-            return 0
-
-        # --- Replaced pandas CSV writing with native Python CSV ---
-        try:
-            CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
-            fieldnames = ["scan", "chan", "freq_hz", "bw_hz", "power"]
-
-            # Use DictWriter for easy dictionary-to-row conversion
-            with open(CSV_FILE, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(out_rows)
-
-            log.info(f"Wrote {len(out_rows)} rows to {CSV_FILE}")
-        except Exception:
-            log.error(f"Failed writing CSV {CSV_FILE}:\n{traceback.format_exc()}")
-            return 1
-        # -----------------------------------------------------------
-
-        return 0
+        log.info("No GSM channels found after checking all bands.")
+        return None
 
     def _parse_offset_from_output(self, out: str, freq_hz: float) -> Optional[float]:
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        # search for lines containing "average" first, then fallback to first numeric match
+        
+        # search for lines containing "average" first
         for i, ln in enumerate(lines):
             if "average" in ln.lower():
                 m = self.NUM_UNIT_RE.search(ln)
                 if not m:
-                    # check next few lines if the average keyword is separate from the value
+                    # look ahead slightly
                     for j in range(i + 1, min(i + 4, len(lines))):
                         m = self.NUM_UNIT_RE.search(lines[j])
                         if m:
@@ -150,7 +131,7 @@ class KalSync:
                 if m:
                     return self._convert_to_hz(m, freq_hz)
 
-        # fallback to the first line with a number and unit
+        # fallback to first number found
         for ln in lines:
             m = self.NUM_UNIT_RE.search(ln)
             if m:
@@ -164,6 +145,7 @@ class KalSync:
             val = float(val_str)
         except Exception:
             return None
+        
         if unit == "ppm":
             return val * freq_hz / 1e6
         if unit == "khz":
@@ -172,123 +154,83 @@ class KalSync:
             return val * 1e6
         return val * 1.0  # Hz
 
-    def calibrate(self) -> CalResult:
-        if not CSV_FILE.exists():
-            log.error(f"{CSV_FILE} does not exist; cannot calibrate.")
-            return CalResult(1, None)
-
-        # --- Replaced pandas CSV reading and max search with native Python ---
-        data: List[Dict[str, Any]] = []
-        try:
-            with open(CSV_FILE, 'r', newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    # Convert necessary fields from string to correct type
-                    try:
-                        row['chan'] = int(row['chan'])
-                        row['freq_hz'] = float(row['freq_hz'])
-                        row['power'] = float(row['power'])
-                        data.append(row)
-                    except (ValueError, KeyError) as e:
-                        log.warning(f"Skipping malformed row in CSV ({e}): {row}")
-
-        except Exception:
-            log.error(f"Failed reading {CSV_FILE}:\n{traceback.format_exc()}")
-            return CalResult(1, None)
-
-        if not data:
-            log.error(f"{CSV_FILE} is empty or unreadable; cannot calibrate.")
-            return CalResult(1, None)
-
-        # Find the row with the maximum power using the max function with a key
-        best = max(data, key=lambda x: x['power'])
-
-        chan = best["chan"]
-        freq_hz = best["freq_hz"]
-        scan_name = str(best.get("scan", ""))
-        # -------------------------------------------------------------------
-
-        log.info(f"Calibrating using best peak: scan={scan_name}, chan={chan}, freq_hz={freq_hz}, power={best['power']:.2f}")
+    def execute_calibration(self, best_peak: Dict[str, Any]) -> CalResult:
+        chan = best_peak["chan"]
+        freq_hz = best_peak["freq_hz"]
+        power = best_peak["power"]
+        
+        log.info(f"Calibrating against found peak: Chan {chan} ({freq_hz/1e6:.1f} MHz) Power: {power}")
 
         try:
+            # Run calibration on specific channel
             proc = self._run(["kal", "-c", str(chan)])
         except FileNotFoundError:
-            log.error("'kal' not found. Please install kalibrate-hackrf.")
-            return CalResult(1, None)
+            log.error("'kal' not found.")
+            return CalResult(1)
         except Exception:
             log.error(f"Unexpected error running kal for calibration:\n{traceback.format_exc()}")
-            return CalResult(1, None)
-
-        if proc.returncode != 0:
-            output = (proc.stdout or "") + (proc.stderr or "")
-            log.error(f"Calibration command failed (rc={proc.returncode}). Output: {output.strip()}")
-            return CalResult(1, None)
+            return CalResult(1)
 
         out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        
+        # Get Offset in Hz
         offset_hz = self._parse_offset_from_output(out, freq_hz)
 
         if offset_hz is None:
             log.error("Could not parse offset from kal output.")
             log.debug("kal stdout/stderr:\n" + out)
-            return CalResult(1, None)
+            return CalResult(1)
 
-        ppm_equiv = offset_hz * 1e6 / freq_hz
-        log.info(f"Parsed offset: {offset_hz:.3f} Hz ({offset_hz/1e3:.3f} kHz, {ppm_equiv:.3f} ppm)")
-        return CalResult(0, float(offset_hz))
+        # Calculate PPM
+        if freq_hz == 0:
+            log.error("Frequency is zero, cannot calculate PPM.")
+            return CalResult(1)
 
-    def run(self, action: cfg.KalState) -> int:
-        if action == cfg.KalState.KAL_SCANNING:
-            return self.scan()
+        ppm = (offset_hz / freq_hz) * 1e6
+        
+        log.info(f"Result: {offset_hz:.2f} Hz offset @ {freq_hz/1e6:.1f} MHz = {ppm:.3f} PPM")
+        
+        return CalResult(0, offset_ppm=ppm, offset_hz=offset_hz)
 
-        if action == cfg.KalState.KAL_CALIBRATING:
-            res = self.calibrate()
-            if res.rc != 0 or res.offset_hz is None:
-                log.error("Calibration failed.")
-                return res.rc
+    def run(self) -> int:
+        # Step 1: Scan and find FIRST peak in memory
+        first_peak = self.scan_and_find_first()
+        
+        if not first_peak:
+            log.warning("No GSM peaks found. Skipping calibration.")
+            return 1 
 
-            # save offset to cfg.PERSIST_FILE (preserve previous behavior)
-            try:
-                if cfg.PERSIST_FILE is None:
-                    log.error("cfg.PERSIST_FILE is not defined; cannot persist offset to vars.json.")
-                    return 1
-                rc_json = modify_persist("last_offset_hz", float(res.offset_hz), cfg.PERSIST_FILE)
-                if rc_json != 0:
-                    log.error("Failed saving offset into vars.json (modify_persist returned non-zero).")
-                    return rc_json
-                log.info(f"Calibration successful. Offset {res.offset_hz:.3f} Hz saved to {cfg.PERSIST_FILE}")
-            except Exception:
-                log.error(f"Unexpected error saving offset to vars.json:\n{traceback.format_exc()}")
+        # Step 2: Calibrate using that peak
+        res = self.execute_calibration(first_peak)
+
+        if res.rc != 0 or res.offset_ppm is None:
+            log.error("Calibration failed. Variables will not be updated.")
+            return res.rc
+
+        # Step 3: Persist Result (Only on success)
+        try:
+            if cfg.PERSIST_FILE is None:
+                log.error("cfg.PERSIST_FILE is not defined; cannot persist offset.")
                 return 1
 
-            # On full success, write last_kal_ms timestamp (two-arg form per your request).
-            try:
-                rc_ts = modify_persist("last_kal_ms", cfg.get_time_ms(), cfg.PERSIST_FILE)
-                if rc_ts != 0:
-                    log.error(f"modify_persist('last_kal_ms', ...) returned non-zero rc={rc_ts}")
-                    return rc_ts
-                log.info("Persisted last_kal_ms successfully.")
-            except Exception:
-                log.error(f"Failed to persist last_kal_ms:\n{traceback.format_exc()}")
-                return 1
+            # Save PPM
+            rc_json = modify_persist("last_offset_ppm", float(res.offset_ppm), cfg.PERSIST_FILE)
+            if rc_json != 0:
+                log.error("Failed saving last_offset_ppm into vars.json.")
+                return rc_json
 
+            # Save Timestamp
+            modify_persist("last_kal_ms", cfg.get_time_ms(), cfg.PERSIST_FILE)
+            
+            log.info(f"Calibration successful. Offset {res.offset_ppm:.3f} ppm saved.")
             return 0
-
-        log.error(f"Unsupported action: {action}")
-        return 1
+        except Exception:
+            log.error(f"Unexpected error saving offset:\n{traceback.format_exc()}")
+            return 1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Calibrates SDR clock offset using kalibrate-hackrf (scan|calibrate)."
-    )
-    parser.add_argument("action", choices=["scan", "calibrate"])
-    if len(sys.argv) == 1:
-        parser.print_help(sys.stderr)
-        return 1
-    args = parser.parse_args()
-
-    state = cfg.KalState.KAL_SCANNING if args.action == "scan" else cfg.KalState.KAL_CALIBRATING
-    return KalSync().run(state)
+    return KalSync().run()
 
 
 if __name__ == "__main__":

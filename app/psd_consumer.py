@@ -5,7 +5,7 @@ psd_consumer.py
 Minimal PSD consumer using WelchEstimator from utils.
 
 CLI:
-  psd_consumer.py -f FREQ -s RATE -w RBW [--scale SCALE]
+  psd_consumer.py -f FREQ -s RATE -w RBW [-o OVERLAP] [-wi WINDOW] [--scale SCALE]
 
 Behavior:
  - Uses WelchEstimator (from utils) to compute PSD.
@@ -19,32 +19,45 @@ import logging
 import os
 import threading
 import time
-import warnings
-from typing import Optional, Tuple, Union
+import sys
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import matplotlib
 
+# 1. Set backend before importing pyplot
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
-from utils import WelchEstimator  # <- user-provided class
 
+try:
+    from utils import WelchEstimator
+except ImportError:
+    # Fallback/Error if utils is not found
+    print("[Error] Could not import utils. Ensure utils.py is in the parent directory.", file=sys.stderr)
+    sys.exit(1)
+
+import cfg
+log = cfg.set_logger()
 
 OUTPUT_FILE = "psd_out.png"
 
 
 def plot_psd_png(freqs: np.ndarray, psd_vals: np.ndarray, scale: str, fs: float, nperseg: int, center_freq: float):
-    fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(freqs / 1e6, psd_vals)
-    title = f"PSD (scale: {scale}, fc: {center_freq/1e6:.6f} MHz, fs: {fs/1e6:.6f} MHz, nperseg: {nperseg})"
-    ax.set_title(title)
-    ax.set_xlabel("Frequency [MHz]")
-    ax.set_ylabel(f"PSD [{scale}]")
-    ax.grid(True)
-    fig.tight_layout()
-    fig.savefig(OUTPUT_FILE, format="png", dpi=150)
-    plt.close(fig)
+    try:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(freqs / 1e6, psd_vals)
+        title = f"PSD (scale: {scale}, fc: {center_freq/1e6:.6f} MHz, fs: {fs/1e6:.6f} MHz, nperseg: {nperseg})"
+        ax.set_title(title)
+        ax.set_xlabel("Frequency [MHz]")
+        ax.set_ylabel(f"PSD [{scale}]")
+        ax.grid(True)
+        fig.tight_layout()
+        fig.savefig(OUTPUT_FILE, format="png", dpi=150)
+        plt.close(fig)
+    except Exception as e:
+        log.error(f"[Error] Plotting failed: {e}", sys.stderr)
 
 
 class RingBuffer:
@@ -101,17 +114,17 @@ class PSDWorker(threading.Thread):
             if iq is None:
                 continue
 
-            # call estimator; let warnings flow via warnings.warn; catch real exceptions only
             try:
                 freqs, pxx = self._est.execute_welch(iq, scale=self._scale)
             except Exception as exc:
-                self._logger.exception("WelchEstimator error: %s", exc)
+                self._logger.error("WelchEstimator error: %s", exc)
                 continue
 
-            plot_psd_png(freqs, pxx, self._scale, self._est.fs, self._est.desired_nperseg, self._est.freq)
-            self._logger.info("PSD saved: %s", OUTPUT_FILE)
+            final_dict = {
+                "device_id": cfg.get_persist_var("device_id", cfg.PERSIST_FILE),
+                "Pxx": pxx.tolist() if pxx is not None else None,
+            }
 
-            # fixed cadence: 1 second
             try:
                 time.sleep(1.0)
             except Exception:
@@ -131,13 +144,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("-s", "--rate", required=True, type=float, help="Sample rate in Hz (1e6 - 6e9)")
     p.add_argument("-w", "--rbw", required=True, type=float, help="RBW resolution bandwidth in Hz (>1)")
     p.add_argument("--scale", type=str, default="dbfs", choices=["dbfs", "dbm", "db", "v2/hz"], help="PSD units (default: dbfs)")
+    # New Arguments
+    p.add_argument("-o", "--overlap", type=float, default=0.5, help="Welch overlap ratio (0.0-1.0, default: 0.5)")
+    p.add_argument("-wi", "--window", type=str, default="hamming", help="Window function (default: hamming)")
 
     # rename optional arguments group to "options"
     for g in p._action_groups:
         if g.title == "optional arguments":
             g.title = "options"
 
-    # print help and exit 0 when no args
     if len(os.sys.argv) == 1:
         p.print_help()
         os.sys.exit(0)
@@ -150,16 +165,25 @@ def main() -> int:
     args = parser.parse_args()
 
     if not (1e6 <= args.freq <= 6e9):
-        parser.error("frequency must be between 1e6 and 6e9 Hz (1 MHz - 6 GHz)")
+        parser.error("frequency must be between 1e6 and 6e9 Hz")
     if not (1e6 <= args.rate <= 6e9):
-        parser.error("sample rate must be between 1e6 and 6e9 Hz (1 MHz - 6 GHz)")
+        parser.error("sample rate must be between 1e6 and 6e9 Hz")
     if not (args.rbw > 1):
         parser.error("rbw must be greater than 1 Hz")
+    if not (0.0 <= args.overlap < 1.0):
+        parser.error("overlap must be between 0.0 and 1.0")
 
-    # instantiate estimator and force impedance correction by passing r_ant=50.0
-    estimator = WelchEstimator(freq=int(args.freq), fs=int(args.rate), desired_rbw=int(args.rbw), r_ant=50.0, overlap=0.5, window="hamming")
+    # instantiate estimator
+    estimator = WelchEstimator(
+        freq=int(args.freq), 
+        fs=int(args.rate), 
+        desired_rbw=int(args.rbw), 
+        r_ant=50.0, 
+        overlap=args.overlap, 
+        window=args.window
+    )
 
-    # buffer size: use estimator.desired_nperseg and samples = nperseg * 4
+    # buffer size logic
     nperseg = estimator.desired_nperseg
     samples = int(nperseg * 16)
 
@@ -167,39 +191,42 @@ def main() -> int:
     ring_capacity = samples * 4
     rb = RingBuffer(ring_capacity)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    logger = logging.getLogger("psd_consumer")
+    log.info("--- PSD Real-Time Configuration ---")
+    log.info("  Sample rate (Fs): %.6f MHz", args.rate / 1e6)
+    log.info("  Center frequency (Fc): %.6f MHz", args.freq / 1e6)
+    log.info("  RBW: %.0f Hz", args.rbw)
+    log.info("  Overlap: %.2f", args.overlap)
+    log.info("  Window: %s", args.window)
+    log.info("----------------------------------")
+    log.info("Waiting for int8 IQ from stdin...")
 
-    logger.info("--- PSD Real-Time Configuration ---")
-    logger.info("  Sample rate (Fs): %.6f MHz", args.rate / 1e6)
-    logger.info("  Center frequency (Fc): %.6f MHz", args.freq / 1e6)
-    logger.info("  RBW: %.0f Hz", args.rbw)
-    logger.info("  nperseg (est): %d", nperseg)
-    logger.info("  samples (buffer): %d", samples)
-    logger.info("----------------------------------")
-    logger.info("Waiting for int8 IQ from stdin (I,Q,I,Q,...)...")
-
-    worker = PSDWorker(rb, estimator, args.scale, samples, logger)
+    worker = PSDWorker(rb, estimator, args.scale, samples, log)
     worker.start()
 
     try:
+        # 16KB read chunks (8192 complex samples)
+        # For high sample rates (20MHz), this loop runs ~2400 times/sec
         while True:
             data = os.read(0, 16384)
             if not data:
                 break
             arr = np.frombuffer(data, dtype=np.int8)
+            # Ensure even number of bytes for I/Q pairs
             if len(arr) % 2 != 0:
                 arr = arr[:-1]
+            
+            # Convert to float64 for processing
             I = arr[0::2].astype(np.float64)
             Q = arr[1::2].astype(np.float64)
             complex_samples = I + 1j * Q
+            
             rb.write(complex_samples)
+            
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt: exiting")
+        log.info("Keyboard interrupt: exiting")
     except Exception as exc:
-        logger.exception("Unhandled exception: %s", exc)
+        log.exception("Unhandled exception: %s", exc)
 
-    logger.info("stdin closed. Worker thread will finish soon (daemon).")
     return 0
 
 

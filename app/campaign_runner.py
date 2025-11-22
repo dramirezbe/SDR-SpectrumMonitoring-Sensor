@@ -7,6 +7,8 @@
 import cfg
 import sys
 import json
+import argparse
+import time
 from pathlib import Path
 
 from utils import atomic_write_bytes, RequestClient, CampaignHackRF, get_persist_var, modify_persist
@@ -21,6 +23,28 @@ log = cfg.set_logger()
 HISTORIC_DIR = cfg.PROJECT_ROOT / "Historic"
 
 status_obj = StatusDevice()
+
+# --- HELPER CLASSES/FUNCTIONS ---
+
+class HelpOnErrorParser(argparse.ArgumentParser):
+    """Custom parser that prints full help on error."""
+    def error(self, message):
+        sys.stderr.write(f'Error: {message}\n')
+        self.print_help()
+        sys.exit(2)
+
+def str_to_bool(value):
+    """Helper to parse various boolean string representations."""
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ('yes', 'true', 't', 'y', '1', 'on'):
+        return True
+    elif value.lower() in ('no', 'false', 'f', 'n', '0', 'off'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+# --- END HELPERS ---
 
 def get_disk_usage() -> float:
     """
@@ -38,7 +62,7 @@ def post_data(json_dict) -> int:
     """
     Send JSON data to remote API endpoint using RequestClient.
     """
-    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
+    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.get_mac())
 
     rc, resp = client.post_json(cfg.DATA_URL, json_dict)
 
@@ -157,63 +181,98 @@ def main() -> int:
     """
     Main acquisition and posting routine.
     """
-    if len(sys.argv) != 5:
-        log.error("Usage: acquire_runner <start_freq_hz> <end_freq_hz> <resolution_hz> <antenna_port>")
-        return 2
+    # --- 1. Define Argument Parser ---
+    parser = HelpOnErrorParser(description="RF Campaign Runner")
 
-    start_freq_hz = int(sys.argv[1])
-    end_freq_hz = int(sys.argv[2])
-    resolution_hz = int(sys.argv[3])
-    antenna_port = int(sys.argv[4])
+    # Required Core Arguments
+    parser.add_argument("-f1", "--start_freq", type=int, required=True, help="Start Frequency in Hz")
+    parser.add_argument("-f2", "--end_freq", type=int, required=True, help="End Frequency in Hz")
+    parser.add_argument("-w", "--resolution", type=int, required=True, help="Resolution Bandwidth (Hz)")
+    parser.add_argument("-p", "--port", type=int, required=True, help="Antenna Port ID")
 
-    log.info(f"Acquiring data from {start_freq_hz} to {end_freq_hz} with resolution {resolution_hz}")
+    # Extended Arguments (with defaults just in case, though Orchestrator sends them)
+    parser.add_argument("-wi", "--window", type=str, default="hamming", help="FFT Windowing function")
+    parser.add_argument("-o", "--overlap", type=float, default=0.5, help="FFT Overlap (0.0 - 1.0)")
+    parser.add_argument("-fs", "--sample_rate", type=int, default=20000000, help="SDR Sample Rate in Hz")
+    parser.add_argument("-l", "--lna", type=int, default=0, help="LNA Gain (dB)")
+    parser.add_argument("-g", "--vga", type=int, default=0, help="VGA Gain (dB)")
+    parser.add_argument("-a", "--antenna_amp", type=str_to_bool, default=False, help="Antenna Amp (True/False/1/0)")
 
+    # Parse Arguments
+    args = parser.parse_args()
+
+    # Map to local variables for clarity
+    start_freq_hz = args.start_freq
+    end_freq_hz = args.end_freq
+    resolution_hz = args.resolution
+    antenna_port = args.port
+    
+    # Extended
+    window = args.window
+    overlap = args.overlap
+    sample_rate_hz = args.sample_rate
+    lna_gain = args.lna
+    vga_gain = args.vga
+    antenna_amp = args.antenna_amp
+
+    # Log Initial State
+    log.info(f"Acquiring {start_freq_hz}-{end_freq_hz} Hz | Res: {resolution_hz} | Port: {antenna_port}")
+    log.info(f"Ext Args: Win={window}, Overlap={overlap}, SR={sample_rate_hz}, LNA={lna_gain}, VGA={vga_gain}, Amp={antenna_amp}")
     log.info(f"Saving samples to {cfg.SAMPLES_DIR}")
 
-
-    #switch antenna
+    # Switch antenna persistence
     rc = modify_persist("antenna_port", antenna_port, cfg.PERSIST_FILE)
     if rc != 0:
-        log.error(f"Failed saving antenna_port into vars.json (modify_persist returned non-zero).")
+        log.error(f"Failed saving antenna_port into persistent.json (modify_persist returned non-zero).")
         return rc
+    time.sleep(0.1) #giving time to change antenna
     
-    hack_rf = CampaignHackRF(start_freq_hz=start_freq_hz, end_freq_hz=end_freq_hz,
-                sample_rate_hz=20_000_000, resolution_hz=resolution_hz, 
-                scale='dBm', with_shift=True)
+    # --- Initialize HackRF with new arguments ---
+    hack_rf = CampaignHackRF(
+        start_freq_hz=start_freq_hz, 
+        end_freq_hz=end_freq_hz,
+        sample_rate_hz=sample_rate_hz, 
+        resolution_hz=resolution_hz, 
+        scale='dBm', 
+        with_shift=False,
+        window=window,
+        overlap=overlap,
+        lna_gain=lna_gain,
+        vga_gain=vga_gain,
+        antenna_amp=antenna_amp
+    )
     
-    result = hack_rf.get_psd()   # puede ser: Pxx or (f, Pxx) or None or (None, None)
+    result = hack_rf.get_psd()
 
-    # Desestructura según el tipo
+    # Destructure result
     if isinstance(result, tuple):
         freqs, Pxx = result
     else:
         freqs = None
         Pxx = result
 
+    # --- Plotting Code ---
+    timestamp = cfg.get_time_ms()
     
-    # --- START OF MODIFICATION: Plotting Code Integration ---
-    timestamp = cfg.get_time_ms() # Move timestamp assignment up to use for plotting filename
-    
-    # Plot the PSD if Pxx data exists
     if Pxx is not None:
         save_psd_plot(freqs, Pxx, timestamp, log)
     else:
         log.warning("Pxx is None. Skipping plot generation.")
-    # --- END OF MODIFICATION: Plotting Code Integration ---
 
-
+    # Prepare Data Payload
     post_dict = {
+        "device_id": get_persist_var("device_id",cfg.PERSIST_FILE),
         "Pxx": Pxx.tolist() if Pxx is not None else None,
         "start_freq_hz": start_freq_hz,
         "end_freq_hz": end_freq_hz,
-        "timestamp": timestamp, # Uses the timestamp defined above
-        "lat": 0,
-        "lng":0,
-        "campaign_id": get_persist_var("campaign_id",cfg.PERSIST_FILE)
+        "timestamp": timestamp,
+        "campaign_id": get_persist_var("campaign_id",cfg.PERSIST_FILE),
     }
+    log.info(f"POST Payload: {post_dict}")
 
     rc_post = post_data(post_dict)
 
+    # --- Logic for Queue vs Historic Save (Identical to before) ---
     # If POST failed -> try to queue (limit 50 files)
     if rc_post != 0:
         try:
@@ -221,20 +280,18 @@ def main() -> int:
         except Exception:
             queue_count = 999  # force "full" if we can't list
 
-        # If queue has less than 50 files just save as before
         if queue_count < 50:
             save_rc = save_json(post_dict, cfg.QUEUE_DIR, timestamp)
             if save_rc != 0:
                 log.error("Failed to save to queue after POST failure.")
                 return 2
             log.warning("POST failed; saved to queue.")
-            return 1  # indicate network/client/server error (non-zero)
+            return 1 
 
-        # If queue full
         else:
+            # Queue full logic
             try:
                 files = [p for p in cfg.QUEUE_DIR.iterdir() if p.is_file() and p.suffix == ".json"]
-
                 if not files:
                     log.error("Queue appears full but no JSON files found; dropping sample.")
                     return 1
@@ -249,7 +306,6 @@ def main() -> int:
                             return 2**63 - 1
 
                 oldest = min(files, key=_age_key)
-
                 try:
                     oldest.unlink()
                     log.info(f"Deleted oldest queued file {oldest} to make room (queue capped at 50).")
@@ -270,7 +326,6 @@ def main() -> int:
                 return 1
 
     # If POST succeeded
-    
     if get_disk_usage() < 0.8:
         hist_rc = save_json(post_dict, HISTORIC_DIR, timestamp)
         if hist_rc != 0:
@@ -278,16 +333,13 @@ def main() -> int:
         else:
             log.info("Saved copy to historic directory.")
     else:
-        # Disk usage high: attempt to delete up to 10 oldest historic files.
         log.warning(f"Disk usage high ({get_disk_usage():.3f}). Attempting to delete up to 10 oldest historic files.")
-
         deleted = _delete_oldest_files(HISTORIC_DIR, 10)
         if deleted > 0:
             log.info(f"Deleted {deleted} historic files; re-checking disk usage.")
         else:
             log.warning("No historic files deleted (none found or deletion errors).")
 
-        # Re-check disk usage after deletions
         if get_disk_usage() < 0.8:
             hist_rc = save_json(post_dict, HISTORIC_DIR, timestamp)
             if hist_rc != 0:
@@ -297,7 +349,6 @@ def main() -> int:
         else:
             log.warning(f"Disk usage still too high ({get_disk_usage():.3f}); skipping historic save.")
 
-    # All good
     return 0
 
 
@@ -305,5 +356,6 @@ def main() -> int:
 # Entry point
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
+    # run_and_capture wraps main, logging exceptions to file
     rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
     sys.exit(rc)

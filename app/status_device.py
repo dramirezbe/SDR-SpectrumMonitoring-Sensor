@@ -14,11 +14,9 @@ import subprocess
 
 import cfg
 
-from libs import LteHandler
 from utils import RequestClient, modify_persist, get_persist_var
 
 log = cfg.set_logger()
-
 
 class StatusDevice:
     """
@@ -26,7 +24,6 @@ class StatusDevice:
     """
     def __init__(self, disk_path:Path=Path('/'),
                  logs_dir:Path=cfg.LOGS_DIR,
-                 lte_handler:LteHandler=LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE),
                  logger=log):
         """
         Initializes StatusDevice
@@ -39,7 +36,6 @@ class StatusDevice:
         self._log = logger
         self.disk_path = disk_path
         self.disk_path_str = str(disk_path)
-        self.lte = lte_handler
         self.logs_dir = logs_dir
 
     def get_cpu_percent(self) -> Dict[str, List[float]]:
@@ -155,107 +151,6 @@ class StatusDevice:
         tot_metrics.update(self.get_total_disk())
         return tot_metrics
 
-    def parse_lte_gps(self):
-        err_dict = {'lat': None, 'lng': None, 'alt': None}
-        if self.lte is None:
-            return err_dict
-
-        raw = self.lte.get_gps()
-        if raw is None:
-            return err_dict
-
-        if isinstance(raw, (bytes, bytearray)):
-            try:
-                raw = raw.decode("utf-8", errors="ignore")
-            except Exception as e:
-                self._log.error(f"LTE GPS decode error: {e}")
-                return err_dict
-
-        raw = str(raw).strip()
-
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        gga = None
-        for ln in lines:
-            if ln.startswith("$GPGGA") or ln.startswith("$GNGGA"):
-                gga = ln
-                break
-            if "$GPGGA" in ln:
-                start = ln.find("$GPGGA")
-                gga = ln[start:]
-                break
-            if "$GNGGA" in ln:
-                start = ln.find("$GNGGA")
-                gga = ln[start:]
-                break
-        if gga is None:
-            if raw.startswith("$GPGGA") or raw.startswith("$GNGGA"):
-                gga = raw
-            else:
-                self._log.error(f"LTE GPS: No GGA sentence found in: {raw!r}")
-                return err_dict
-
-        if "*" in gga:
-            gga = gga.split("*", 1)[0]
-
-        parts = gga.split(",")
-        if len(parts) < 10:
-            self._log.error(f"LTE GPS: Incomplete GGA sentence: {gga!r}")
-            return err_dict
-
-        lat_str = parts[2]
-        lat_hemi = parts[3]
-        lon_str = parts[4]
-        lon_hemi = parts[5]
-        alt_str = parts[9]
-
-        def nmea_to_decimal(nmea_coord: str, hemi: str) -> Optional[float]:
-            if not nmea_coord or not hemi:
-                self._log.error(f"LTE GPS: Missing NMEA coordinate or hemisphere: coord={nmea_coord!r}, hemi={hemi!r}")
-                return None
-
-            coord = nmea_coord.strip()
-            if "." not in coord:
-                self._log.error(f"LTE GPS: Invalid NMEA coordinate format (no dot): {coord!r}")
-                return None
-
-            intpart = coord.split(".", 1)[0]
-            if len(intpart) == 4:
-                deg_len = 2
-            elif len(intpart) == 5:
-                deg_len = 3
-            else:
-                deg_len = 2 if hemi in ("N", "S") else 3
-
-            try:
-                deg = int(coord[:deg_len])
-                minutes = float(coord[deg_len:])
-            except Exception as e:
-                self._log.error(f"LTE GPS: Error parsing NMEA coordinate {coord!r}: {e}")
-                return None
-
-            decimal = deg + (minutes / 60.0)
-            if hemi in ("S", "W"):
-                decimal = -decimal
-            return decimal
-
-        lat = nmea_to_decimal(lat_str, lat_hemi)
-        if lat is None:
-            self._log.error(f"LTE GPS: Failed to parse latitude from {lat_str!r} {lat_hemi!r}")
-            return err_dict
-
-        lng = nmea_to_decimal(lon_str, lon_hemi)
-        if lng is None:
-            self._log.error(f"LTE GPS: Failed to parse longitude from {lon_str!r} {lon_hemi!r}")
-            return err_dict
-
-        try:
-            alt = float(alt_str) if alt_str != "" else None
-        except Exception:
-            self._log.error(f"LTE GPS: Failed to parse altitude from {alt_str!r}")
-            alt = None
-
-        return {"lat": lat, "lng": lng, "alt": alt}
-
     def get_ping_latency(self, ip: str):
         cmd = ["ping", "-c", "1", "-W", "1", ip]
         err_dict = {"ping_ms": None}
@@ -322,9 +217,6 @@ class StatusDevice:
         # Total metrics
         total_metrics = self.get_total_metrics_dict()
 
-        # GPS
-        gps = self.parse_lte_gps() or {}
-
         # Ping
         ping_dict = self.get_ping_latency(cfg.API_IP) or {}
         ping_ms = ping_dict.get("ping_ms")
@@ -340,9 +232,9 @@ class StatusDevice:
         delta_t_ms = get_persist_var("last_delta_ms", cfg.PERSIST_FILE)
 
         final_dict: Dict[str, object] = {
+            "device_id": get_persist_var("device_id", cfg.PERSIST_FILE),
             "metrics": metrics,
             "total_metrics": total_metrics,
-            "gps": gps,
             "delta_t_ms": delta_t_ms,
             "ping_ms": ping_ms,
             "timestamp_ms": cfg.get_time_ms(),
@@ -357,9 +249,8 @@ class StatusDevice:
 
 
 def main() -> int:
-    lte = LteHandler(cfg.LIB_LTE, verbose=cfg.VERBOSE)
-    status_obj = StatusDevice(disk_path=Path('/'), logs_dir=cfg.LOGS_DIR, lte_handler=lte, logger=log)
-    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.API_KEY)
+    status_obj = StatusDevice(disk_path=Path('/'), logs_dir=cfg.LOGS_DIR, logger=log)
+    client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.get_mac())
 
     start_delta = cfg.get_time_ms()
     rc, resp = client.post_json(cfg.STATUS_URL, status_obj.get_final_dict())

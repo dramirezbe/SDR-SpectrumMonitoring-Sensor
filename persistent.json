@@ -4,8 +4,7 @@
   "campaign_id": 5,
   "current_mode": "campaign",
   "device_id": "10",
-  "last_delta_ms": 153,
+  "last_delta_ms": 118,
   "last_kal_ms": 1763653778905,
-  "last_ntp_ms": 1763754879001,
-  "last_offset_hz": -36854.0
+  "last_ntp_ms": 1763754879001
 }

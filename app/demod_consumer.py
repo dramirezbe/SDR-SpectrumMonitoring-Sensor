@@ -49,7 +49,7 @@ class Demodulator:
         self.demod_type = demod_type.lower()
         self.decimate_to = float(decimate_to) if decimate_to is not None else None
         self.audio_rate = int(audio_rate)
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
 
     def _calc_decimation_from_bw(self) -> int:
         decimation = max(1, int(round(self.input_rate / self.rf_bandwidth)))
@@ -118,11 +118,11 @@ class Demodulator:
         If metrics=True, compute:
          - FM: instantaneous-frequency metrics (peak-to-peak, peak deviation, rms AC).
          - AM: envelope metrics (peak-to-peak amplitude, modulation depth, rms AC).
-        and print them every `metrics_interval` seconds to stderr. Audio pipeline runs unchanged.
+        and print them every `metrics_interval` seconds to logs. Audio pipeline runs unchanged.
         """
         pipeline_cmd = self.build_pipeline()
         if verbose:
-            sys.stderr.write(f"[demod_consumer] pipeline:\n{pipeline_cmd}\n")
+            self.logger.info(f"Pipeline command:\n{pipeline_cmd}")
 
         # Start the demod/play pipeline and feed its stdin via a PIPE so we can duplicate the bytes
         proc = subprocess.Popen(pipeline_cmd, shell=True, stdin=subprocess.PIPE)
@@ -226,7 +226,6 @@ class Demodulator:
                 # periodic report
                 now = time.time()
                 if metrics and (now - last_report_time) >= metrics_interval:
-                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
                     if run_count > 0:
                         mean_val = run_sum / run_count
                         mean_sq = run_sumsq / run_count
@@ -238,10 +237,8 @@ class Demodulator:
                             # peak deviation about the mean (carrier-centered)
                             peak_dev = max(abs(run_max - mean_val), abs(run_min - mean_val))
                             # rms_ac in Hz
-                            print(
-                                f"{ts}  FM excursion p2p: {p2p:.1f} Hz  peak_dev: {peak_dev:.1f} Hz  rms_ac: {rms_ac:.1f} Hz",
-                                file=sys.stderr,
-                                flush=True,
+                            self.logger.info(
+                                f"FM excursion p2p: {p2p:.1f} Hz  peak_dev: {peak_dev:.1f} Hz  rms_ac: {rms_ac:.1f} Hz"
                             )
                         else:  # AM
                             Amax = run_max
@@ -253,13 +250,11 @@ class Demodulator:
                                 m = 0.0
                             depth_pct = m * 100.0
                             # rms_ac in envelope units
-                            print(
-                                f"{ts}  AM envelope p2p: {Amax - Amin:.3f}  depth: {depth_pct:.1f}%  rms_ac: {rms_ac:.3f}",
-                                file=sys.stderr,
-                                flush=True,
+                            self.logger.info(
+                                f"AM envelope p2p: {Amax - Amin:.3f}  depth: {depth_pct:.1f}%  rms_ac: {rms_ac:.3f}"
                             )
                     else:
-                        print(f"{ts}  (no metric samples)", file=sys.stderr, flush=True)
+                        self.logger.info("(no metric samples)")
 
                     # reset running stats
                     run_max = -float("inf")
@@ -277,18 +272,18 @@ class Demodulator:
                 pass
             rc = proc.wait()
             if rc != 0:
-                sys.stderr.write(f"[demod_consumer] pipeline exited with code {rc}\n")
+                self.logger.error(f"Pipeline exited with code {rc}")
             return rc
 
         except KeyboardInterrupt:
-            sys.stderr.write("[demod_consumer] Interrupted by user\n")
+            self.logger.info("Interrupted by user")
             try:
                 proc.terminate()
             except Exception:
                 pass
             return 0
         except Exception as exc:
-            sys.stderr.write(f"[demod_consumer] Exception running pipeline: {exc}\n")
+            self.logger.error(f"Exception running pipeline: {exc}")
             try:
                 proc.kill()
             except Exception:
@@ -362,9 +357,6 @@ def main() -> int:
     args.dec = float(args.dec)
     args.aud_rate = int(args.aud_rate)
 
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s: %(message)s")
-
     demodulator = Demodulator(
         input_rate=args.rate,
         rf_bandwidth=args.bw,
@@ -377,14 +369,14 @@ def main() -> int:
     if args.verbose:
         decimation = demodulator._calc_decimation_to_target() if demodulator.decimate_to is not None else demodulator._calc_decimation_from_bw()
         decimated_rate = int(args.rate / max(1, decimation))
-        log.debug("--- Demodulator Configuration ---")
-        log.debug("Input Rate: %s Hz", float_to_plain(args.rate))
-        log.debug("Target IF Rate: %s Hz (Decimation: %d)", float_to_plain(decimated_rate), decimation)
-        log.debug("RF Bandwidth: %s Hz", float_to_plain(args.bw))
-        log.debug("Type: %s", args.type)
-        log.debug("Audio Rate: %s Hz", args.aud_rate)
-        log.debug("---------------------------------")
-        log.debug("Pipeline: %s", demodulator.build_pipeline())
+        log.info("--- Demodulator Configuration ---")
+        log.info("Input Rate: %s Hz", float_to_plain(args.rate))
+        log.info("Target IF Rate: %s Hz (Decimation: %d)", float_to_plain(decimated_rate), decimation)
+        log.info("RF Bandwidth: %s Hz", float_to_plain(args.bw))
+        log.info("Type: %s", args.type)
+        log.info("Audio Rate: %s Hz", args.aud_rate)
+        log.info("---------------------------------")
+        log.info("Pipeline: %s", demodulator.build_pipeline())
 
     def _signal_handler(signum, frame):
         log.info("Signal %d received, exiting", signum)
