@@ -1,3 +1,4 @@
+//GET /init
 {
     "device_id": 10,
     "daemons": {
