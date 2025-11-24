@@ -16,7 +16,6 @@ import sys
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
-import time
 
 import cfg
 from utils import modify_persist
@@ -231,12 +230,7 @@ class KalSync:
 
 
 def main() -> int:
-    start = time.perf_counter()
-    try:
-        return KalSync().run()
-    finally:
-        end = time.perf_counter()
-        log.info(f"Total execution time: {end - start:.10f} seconds")
+    return KalSync().run()
 
 
 if __name__ == "__main__":

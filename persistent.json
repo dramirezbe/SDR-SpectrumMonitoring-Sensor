@@ -2,7 +2,7 @@
   "antenna_port": 1,
   "api_key": "10",
   "campaign_id": 5,
-  "current_mode": "campaign",
+  "current_mode": "idle",
   "device_id": "10",
   "last_delta_ms": 118,
   "last_kal_ms": 1764004233329,
