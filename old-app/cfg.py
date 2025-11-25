@@ -14,9 +14,8 @@ import sys
 import io
 import traceback
 from typing import Optional, Callable
-from enum import Enum, auto, IntEnum
+from enum import Enum, auto
 from contextlib import redirect_stdout, redirect_stderr
-from dataclasses import dataclass
 
 from utils import get_persist_var
 
@@ -25,13 +24,12 @@ from utils import get_persist_var
 # =============================
 __all__ = [
     "LOG_LEVEL", "VERBOSE", "LOG_FILES_NUM", "PYTHON_EXEC",
-    "API_IP", "API_PORT", "API_URL", "RETRY_DELAY_SECONDS", "REALTIME_URL",
+    "API_IP", "API_PORT", "API_URL", "RETRY_DELAY_SECONDS", "API_KEY",  "REALTIME_URL",
     "DATA_URL", "STATUS_URL", "JOBS_URL",
     "APP_DIR", "PROJECT_ROOT", "SAMPLES_DIR", "QUEUE_DIR", "NTP_SERVER",
     "LOGS_DIR", "HISTORIC_DIR", "PERSIST_FILE",
     "get_time_ms", 
     "KalState",
-    "ZmqClients",
     "set_logger",
     "run_and_capture"
 ]
@@ -336,13 +334,6 @@ def run_and_capture(func: Callable[[], Optional[int]],
 class KalState(Enum):
     KAL_SCANNING = auto()
     KAL_CALIBRATING = auto()
-
-@dataclass
-class ZmqClients:
-    scheduler: str = "scheduler"
-    antenna_mux: str = "antenna_mux"
-    realtime: str = "realtime"       
-
 
 
 # =============================

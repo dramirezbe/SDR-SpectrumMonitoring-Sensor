@@ -3,13 +3,9 @@
 @brief Simple reusable HTTP client helper with rc codes and print-based logging.
 """
 
+import json
 import requests
 from typing import Optional, Tuple, Dict, Any
-import zmq
-import json
-import asyncio
-# Import the asynchronous context and socket from pyzmq
-import zmq.asyncio as azmq
 
 class RequestClient:
     """
@@ -149,80 +145,3 @@ class RequestClient:
             if self._log:
                 self._log.error(f"[HTTP] unexpected error: {e}")
             return 2, None
-        
-
-# --- Publisher Class (UNCHANGED) ---
-class ZmqPub:
-    def __init__(self, verbose=False, log=None):
-        self.verbose = verbose
-        self._log = log
-        # Use standard zmq.Context for a synchronous publisher
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.PUB)
-        self.socket.bind("tcp://*:5555")
-
-    def public_client(self, client_str:str, payload:dict):
-        """Sends a message with a topic prefix."""
-        json_msg = json.dumps(payload)
-        # Format: "TOPIC_STRING JSON_PAYLOAD"
-        full_msg = f"{client_str} {json_msg}" 
-        self.socket.send_string(full_msg)
-        if self.verbose:
-            print(f"Publisher sent: '{full_msg}'")
-
-    def close(self):
-        """Closes the socket and terminates the context."""
-        if hasattr(self, 'socket'):
-            self.socket.close()
-        if hasattr(self, 'context'):
-            self.context.term()
-
-# --- Subscriber Class (ASYNC IMPLEMENTATION) ---
-class ZmqSub:
-    def __init__(self, verbose=False, log=None, topic:str=""):
-        self.verbose = verbose
-        self._log = log
-        # Use asynchronous context and socket
-        self.context = azmq.Context()
-        self.socket = self.context.socket(zmq.SUB)
-        self.socket.connect("tcp://localhost:5555")
-        
-        self.topic = topic
-        # Subscribing to the topic
-        self.socket.subscribe(self.topic.encode('utf-8'))
-        
-        if self.verbose:
-             print(f"ZmqSub: Subscribed to topic '{self.topic}' on tcp://localhost:5555")
-
-    # The wait_msg method must be an async function
-    async def wait_msg(self):
-        """
-        Asynchronously waits for and receives a message from the socket.
-        It handles filtering (though ZMQ also filters).
-        """
-        while True:
-            # 1. Block ASYNCHRONOUSLY and wait for a message
-            # We use await self.socket.recv_string() which is now a coroutine
-            # provided by the azmq.Socket.
-            full_msg = await self.socket.recv_string()
-
-            # 2. Split the string into the topic and the JSON part
-            pub_topic, json_msg = full_msg.split(" ", 1)
-
-            # 3. Check if the published topic matches (explicit check)
-            if pub_topic == self.topic:
-                if self.verbose:
-                    print(f"Subscriber received matching message on topic '{self.topic}'")
-                # 4. If it matches, deserialize the JSON and return the payload
-                return json.loads(json_msg)
-            
-            # The loop continues if the message was received but the topic didn't match.
-
-    def close(self):
-        """Closes the socket and terminates the context."""
-        if hasattr(self, 'socket'):
-            self.socket.close()
-        if hasattr(self, 'context'):
-            # The asynchronous context also has a term method
-            self.context.term()
-
