@@ -2,6 +2,8 @@ from cfg import ZmqClients
 import cfg
 log = cfg.set_logger()
 
+from utils import ZmqPub
+
 import sys
 import subprocess
 import json

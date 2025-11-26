@@ -35,6 +35,6 @@
   // Last ntp synchronization (unix ms) (int)
   "last_ntp_ms": 123451,
 
-  // Last 20 lines of warnings and errors logs (str)
+  // Last 10 lines of warnings and errors logs (str)
   "logs": "[module-name]WARNING|ERROR:text"
 }

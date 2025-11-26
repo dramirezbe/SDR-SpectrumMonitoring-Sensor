@@ -13,14 +13,14 @@
     "timestamp": 1758435092721,
 
 
-    //Can be null if not available
+    //None if not available(with_metrics)
     "excursion": {
         "unit": "hz",
         "peak_to_peak_hz": 123.4,
         "peak_deviation_hz": 235123.4,
         "rms_deviation_hz": 123.4
     },
-    //Can be null if not available
+    //None if not available(with_metrics)
     "depth": {
         "unit": "percent",
         "peak_to_peak": 15.23,

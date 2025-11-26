@@ -15,14 +15,13 @@
       // 'error' = finished due to failure
       "status": "scheduled",
 
-      // Initial spectral analysis frequency (Hz).
-      "start_freq_hz": 88000000,
-
-      // Final spectral analysis frequency (Hz).
-      "end_freq_hz": 108000000,
+      // Central spectral analysis frequency (Hz).
+      "center_freq_hz": 9800000,
 
       // Spectral resolution or RBW (Resolution Bandwidth) in Hz.
-      "resolution_hz": 10000,
+      "rbw_hz": 10000,
+
+      "sample_rate_hz": 20000000,
 
       // Connected physical antenna port.
       "antenna_port": 1,
@@ -30,12 +29,18 @@
       // Interval between consecutive measurements, in seconds.
       "acquisition_period_s": 300, // 5 min
 
+      //int span<=sample_rate
+      "span": 20000000,
+
+      //string (dBm, dBmV, dBuV, V, W)
+      "scale": "dbm",
+
       //-----default stats--------
       "window": "hamming",
       //float
       "overlap": 0.5,
       //int
-      "sample_rate_hz": 20000000,
+      
       "lna_gain": 0,
       "vga_gain": 0,
       //bool
@@ -48,9 +53,21 @@
 
         // Unix timestamp (ms) of the scheduled end.
         "end": 1758442292721
+      },
+
+      //None if not needed
+      "filter":{
+        //lowpass, bandpass highpass
+        "type": "lowpass",
+        //int
+        "filter_bw_hz": 200000,
+
+        //default stat
+        "order_filter":2
       }
     }
 
     // ...there can be multiple campaigns or the list can be empty []
   ]
+
 }

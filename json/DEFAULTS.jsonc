@@ -1,6 +1,18 @@
-//GET /init
 {
-    "device_id": 10,
+    //int
+    "order_filter":2,
+    //str
+    "window": "hamming",
+    //float
+    "overlap": 0.5,  
+    //int  
+    "lna_gain": 0,
+    //int
+    "vga_gain": 0,
+    //bool
+    "antenna_amp": true,
+
+    //always in /init endpoint
     "daemons": {
         "ntp_sync": {
             "interval_s": 900,
@@ -29,5 +41,18 @@
             "interval_s": 300,
             "enabled": true
         }
+    },
+    // This saved in database
+    "device_sdr": {
+        "hackrf": {
+            "fs_range": {
+                "min": 1500000, //forced
+                "max": 20000000
+            },
+            "freq_range": {
+                "min": 1000000,
+                "max": 6000000000
+            }
+        }   
     }
 }
