@@ -7,6 +7,7 @@ import tempfile
 import os
 import logging
 import json
+import time
 from typing import Any, Callable, Optional
 from dataclasses import dataclass, field
 from crontab import CronTab
@@ -214,3 +215,16 @@ class CronHandler:
             self.logger.info(f"[CRON]|INFO| Added job with comment '{comment}' to run every {minutes} minutes.")
 
         return 0
+    
+
+
+
+class ElapsedTimer:
+    def __init__(self):
+        self.end_time = 0
+
+    def init_count(self, seconds):
+        self.end_time = time.time() + seconds
+
+    def time_elapsed(self):
+        return time.time() >= self.end_time

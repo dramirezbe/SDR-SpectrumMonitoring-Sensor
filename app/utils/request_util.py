@@ -6,10 +6,9 @@
 import requests
 from typing import Optional, Tuple, Dict, Any
 import zmq
+import zmq.asyncio
 import json
-import asyncio
-# Import the asynchronous context and socket from pyzmq
-import zmq.asyncio as azmq
+import logging
 
 class RequestClient:
     """
@@ -150,79 +149,56 @@ class RequestClient:
                 self._log.error(f"[HTTP] unexpected error: {e}")
             return 2, None
         
+# Shared IPC address
+IPC_ADDR = "ipc:///tmp/zmq_feed"
 
-# --- Publisher Class (UNCHANGED) ---
 class ZmqPub:
-    def __init__(self, verbose=False, log=None):
+    def __init__(self, verbose=False, log=logging.getLogger(__name__)):
         self.verbose = verbose
         self._log = log
-        # Use standard zmq.Context for a synchronous publisher
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PUB)
-        self.socket.bind("tcp://*:5555")
+        # Bind to IPC address
+        self.socket.bind(IPC_ADDR)
 
-    def public_client(self, client_str:str, payload:dict):
-        """Sends a message with a topic prefix."""
+        self._log.info(f"ZmqPub initialized at {IPC_ADDR}")
+        
+
+    def public_client(self, topic: str, payload: dict):
         json_msg = json.dumps(payload)
-        # Format: "TOPIC_STRING JSON_PAYLOAD"
-        full_msg = f"{client_str} {json_msg}" 
+        full_msg = f"{topic} {json_msg}"
         self.socket.send_string(full_msg)
         if self.verbose:
-            print(f"Publisher sent: '{full_msg}'")
+            self._log.info(f"[ZmqPub]Sent: {full_msg}")
 
     def close(self):
-        """Closes the socket and terminates the context."""
-        if hasattr(self, 'socket'):
-            self.socket.close()
-        if hasattr(self, 'context'):
-            self.context.term()
+        self.socket.close()
+        self.context.term()
 
-# --- Subscriber Class (ASYNC IMPLEMENTATION) ---
 class ZmqSub:
-    def __init__(self, verbose=False, log=None, topic:str=""):
+    def __init__(self, topic: str, verbose=False, log=logging.getLogger(__name__)):
         self.verbose = verbose
-        self._log = log
-        # Use asynchronous context and socket
-        self.context = azmq.Context()
-        self.socket = self.context.socket(zmq.SUB)
-        self.socket.connect("tcp://localhost:5555")
-        
         self.topic = topic
-        # Subscribing to the topic
+        self._log = log
+        self.context = zmq.asyncio.Context()
+        self.socket = self.context.socket(zmq.SUB)
+        # Connect to IPC address
+        self.socket.connect(IPC_ADDR)
         self.socket.subscribe(self.topic.encode('utf-8'))
-        
-        if self.verbose:
-             print(f"ZmqSub: Subscribed to topic '{self.topic}' on tcp://localhost:5555")
 
-    # The wait_msg method must be an async function
+        self._log.info(f"ZmqPub initialized at {IPC_ADDR} with topic {self.topic}")
+
     async def wait_msg(self):
-        """
-        Asynchronously waits for and receives a message from the socket.
-        It handles filtering (though ZMQ also filters).
-        """
         while True:
-            # 1. Block ASYNCHRONOUSLY and wait for a message
-            # We use await self.socket.recv_string() which is now a coroutine
-            # provided by the azmq.Socket.
             full_msg = await self.socket.recv_string()
-
-            # 2. Split the string into the topic and the JSON part
             pub_topic, json_msg = full_msg.split(" ", 1)
 
-            # 3. Check if the published topic matches (explicit check)
             if pub_topic == self.topic:
                 if self.verbose:
-                    print(f"Subscriber received matching message on topic '{self.topic}'")
-                # 4. If it matches, deserialize the JSON and return the payload
+                    print(f"[ZmqSub-{self.topic}] Received: {json_msg}")
                 return json.loads(json_msg)
-            
-            # The loop continues if the message was received but the topic didn't match.
 
     def close(self):
-        """Closes the socket and terminates the context."""
-        if hasattr(self, 'socket'):
-            self.socket.close()
-        if hasattr(self, 'context'):
-            # The asynchronous context also has a term method
-            self.context.term()
+        self.socket.close()
+        self.context.term()
 

@@ -1,4 +1,15 @@
 {
+    //---Env Sensor Params---
+    "api_ip": "127.0.0.1",
+    "api_port": 9000,
+    "jobs_ep": "/jobs",
+    "init_ep": "/init",
+    "data_ep": "/data",
+    "status_ep": "/status",
+    "realtime_ep": "/realtime",
+    "verbose": true, 
+
+    //---Acquisition Params---
     //int
     "order_filter":2,
     //str
