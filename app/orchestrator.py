@@ -4,9 +4,9 @@ from utils import ZmqPub, RequestClient, ElapsedTimer
 
 import sys
 from dataclasses import dataclass
+from crontab import CronTab
 from typing import Optional, List
 import time
-
 
 state = cfg.SysState.IDLE
 
@@ -56,6 +56,58 @@ class JobResponse:
         # Auto-convert list of dicts to list of Campaign objects
         if self.campaigns:
             self.campaigns = [Campaign(**c) if isinstance(c, dict) else c for c in self.campaigns]
+
+
+class CrontabUtil:
+    def __init__(self):
+        self.cron = CronTab(user=True)
+        self.crontab_changed = False
+        self.now = cfg.get_time_ms() #now ms unix
+
+    def _add_job(self, comment, command, minutes):
+        job = self.cron.new(command=command, comment=comment)
+
+        job.minute.every(minutes)
+        job.enable()
+        self._write_crontab()
+        log.info(f"[Crontab] saved job with comment: {comment}")
+
+    def _delete_job(self, comment:str):
+        self.cron.remove_all(comment=comment)
+        self._write_crontab()
+        log.info(f"[Crontab] deleted job with comment: {comment}")
+
+    def _write_crontab(self):
+        if self.crontab_changed:
+            self.cron.write()
+            self.crontab_changed = False
+
+    def is_active_window(self, timeframe_dict:dict) -> bool:
+        # 5 mins (300,000ms) - 10 secs (10,000ms) = 290,000ms
+        offset = 290000
+        
+        # Pads the start and end inwards by the offset
+        return (timeframe_dict.start - offset) <= self.now <= (timeframe_dict.end - offset)
+    
+
+    def sync_campaigns(self, camp_dict:dict):
+        for c in camp_dict.campaigns:
+            comment = c.campaign_id
+            minutes = int(c.acquisition_period_s / 60)
+
+            delete_reason = ["canceled", "finished", "error"]
+            add_reason = ["active", "scheduled"]
+
+            # Delete job if:
+            if c.status in delete_reason or not self.is_active_window(c.timeframe):
+                self.crontab_changed = True
+                self._delete_job(comment=comment)
+
+            # Add job if:
+            if c.status in add_reason and self.is_active_window(c.timeframe):
+                self.crontab_changed = True
+                self._add_job(comment=comment, command=, minutes=minutes)
+
 
 def send_select_antenna(pub_obj:ZmqPub, num_antenna:int) -> None:
     pub_obj.public_client(cfg.ZmqClients.antenna_mux, {"select_antenna": num_antenna})
@@ -110,7 +162,7 @@ def main() -> int:
 
                 # Job fetching logic remains the same
                 if tim_jobs.time_elapsed():
-                    tim_jobs.init_count(cfg.CAMPAIGNS_INTERVAL_S)
+                    tim_jobs.init_count(cfg.CAMPAIGNS_INTERVAL_S) # Reset timer immediately
 
                     err, resp = client.get(cfg.JOBS_URL)
                     
