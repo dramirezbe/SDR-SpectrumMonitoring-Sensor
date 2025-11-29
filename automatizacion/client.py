@@ -22,7 +22,7 @@ def disconnect():
 def configure_sensor(config):
     start_freq = config['start_freq_hz']
     end_freq = config['end_freq_hz']
-    resolution = config['resolution_hz']
+    resolution = config['rbw_hz']
     port = config['antenna_port'] 
     window = config['window']
     overlap = config['overlap']
