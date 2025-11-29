@@ -9,7 +9,7 @@ from flask import Flask, request
 from flask_socketio import SocketIO, emit
 
 # --- CONFIGURACIÓN ---
-N9000B_IP = '10.42.0.41'
+N9000B_IP = '192.168.0.110'
 VISA_TIMEOUT = 10000
 OUTPUT_DIR = 'comparative_data'
 
@@ -42,7 +42,7 @@ def handle_sensor_reading(data):
 def run_server():
     """Ejecuta el servidor Flask/SocketIO."""
     # Usar un host específico para el entorno de red
-    socketio.run(app, host='10.182.143.246', port=5000, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='localhost', port=5000, allow_unsafe_werkzeug=True)
 
 # --- PRINCIPAL ---
 def main():
@@ -100,7 +100,7 @@ def main():
             # 2.2. Solicitar datos al N9000B
             inst.write(f':SENSe:FREQuency:CENTer {center_freq}')
             inst.write(f':SENSe:FREQuency:SPAN {SPAN}')
-            time.sleep(0.5) # Pequeña espera para estabilizar el barrido
+            time.sleep(1) # Pequeña espera para estabilizar el barrido
             
             # Obtener datos del trazo 1
             n9000_y = np.array(inst.query_ascii_values(':TRACe:DATA? TRACE1'))

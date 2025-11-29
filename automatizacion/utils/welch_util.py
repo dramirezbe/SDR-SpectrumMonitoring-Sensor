@@ -204,143 +204,105 @@ class WelchEstimator:
     
 class CampaignHackRF:
     """
-    Adquiere muestras reales con pyhackrf2 y calcula la PSD con WelchEstimator.
-    Pensado para integrarse con client.configure_sensor() y devolver siempre (f, Pxx).
+    Simple wrapper to acquire samples with pyhackrf2 and calculate PSD with WelchEstimator.
     """
-
-    def __init__(
-        self,
-        start_freq_hz: int,
-        end_freq_hz: int,
-        sample_rate_hz: int,
-        resolution_hz: int,
-        scale: str = "dBm",
-        verbose: bool = False,
-        log: logging.Logger = logging.getLogger(__name__),
-        **kwargs: Any,
-    ) -> None:
-        self.freq = int(((end_freq_hz - start_freq_hz) / 2) + start_freq_hz)
-        self.sample_rate_hz = int(sample_rate_hz) if sample_rate_hz else 20_000_000
-        self.resolution_hz = int(resolution_hz) if resolution_hz else 10_000
-        self.scale = scale or "dBm"
+    def __init__(self, start_freq_hz: int, end_freq_hz: int, 
+                 sample_rate_hz: int, resolution_hz: int, 
+                 scale: str = 'dBm', verbose: bool = False, 
+                 log=logging.getLogger(__name__),
+                 **kwargs):
+        
+        self.freq = int(((end_freq_hz - start_freq_hz)/2) + start_freq_hz) # Center freq
+        self.sample_rate_hz = sample_rate_hz
+        self.resolution_hz = resolution_hz
+        self.scale = scale
+        self.hack = None
         self.verbose = verbose
         self._log = log
+        self.iq = None
 
-        # Instancia HackRF y buffer de IQ
-        self.hack: Optional[HackRF] = None
-        self.iq: Optional[np.ndarray] = None
+        # Control to generate or not the frequency vector in the output
+        self.with_shift = kwargs.get("with_shift", True)
 
-        # Controla si se generan frecuencias en la salida (client asume True)
-        self.with_shift: bool = kwargs.get("with_shift", True)
+        # --- New Parameters Handling ---
+        # If keys are not present in kwargs, default values are used.
+        self.window = kwargs.get("window", "hamming")
+        self.overlap = kwargs.get("overlap", 0.5)
+        self.lna_gain = kwargs.get("lna_gain", 0)         # Default 0 if not specified
+        self.vga_gain = kwargs.get("vga_gain", 0)         # Default 0 if not specified
+        self.antenna_amp = kwargs.get("antenna_amp", False) # Default False
 
-        # Parametros de Welch
-        self.window: str = kwargs.get("window", "hamming")
-        self.overlap: float = kwargs.get("overlap", 0.5)
-        self.r_ant: float = kwargs.get("r_ant", 50.0)
-
-        # Parametros RF
-        self.lna_gain: int = kwargs.get("lna_gain", 0)
-        self.vga_gain: int = kwargs.get("vga_gain", 0)
-        self.antenna_amp: bool = kwargs.get("antenna_amp", True)
-        self.bias_tee: bool = kwargs.get("bias_tee", False)
-
-        # Control de captura
-        self.num_samples: Optional[int] = kwargs.get("num_samples")
-        self.capture_seconds: Optional[float] = kwargs.get("capture_seconds")
-
-    def _ensure_hackrf(self) -> Optional[HackRF]:
-        if HackRF is None:
-            self._log.error(f"pyhackrf2 no disponible: {_HACKRF_IMPORT_ERROR}")
-            return None
-
-        if self.hack is not None:
-            return self.hack
-
+    def init_hack(self) -> Optional[HackRF]:
         try:
-            self.hack = HackRF()
-            if self.verbose:
-                self._log.info("HackRF inicializada")
-        except Exception as exc:
-            self._log.error(f"Error abriendo HackRF: {exc}")
-            self.hack = None
-        return self.hack
+            hack = HackRF()
+        except Exception as e:
+            self._log.error(f"Error opening HackRF: {e}")
+            hack = None
 
-    def _configure_device(self, hack: HackRF) -> None:
-        # Configuracion basica antes de leer
+        return hack
+    
+    def acquire_hackrf(self) -> int:
+        hack = self.init_hack()
+        if hack is None:
+            return 1
+        
         hack.center_freq = self.freq
         hack.sample_rate = self.sample_rate_hz
+        
+        # Apply user-defined or default gains/amp settings
         hack.amplifier_on = self.antenna_amp
         hack.lna_gain = self.lna_gain
         hack.vga_gain = self.vga_gain
-        hack.bias_tee_on = self.bias_tee
-
-    def _samples_to_read(self, est: WelchEstimator) -> int:
-        # Si el usuario especifico la cantidad, respetarla
-        if self.num_samples:
-            return int(self.num_samples)
-
-        # Permitir captura por segundos (util para promediar mas tiempo)
-        if self.capture_seconds:
-            return int(self.sample_rate_hz * self.capture_seconds)
-
-        # Por defecto, usar al menos 1s o 2x nperseg calculado
-        return max(self.sample_rate_hz, est.desired_nperseg * 2)
-
-    def acquire_hackrf(self, est: WelchEstimator) -> int:
-        hack = self._ensure_hackrf()
-        if hack is None:
-            return 1
-
+        
+        # read_samples can be blocking and return a complex array
         try:
-            self._configure_device(hack)
-            n_samples = self._samples_to_read(est)
-            self.iq = hack.read_samples(n_samples)
+            self.iq = hack.read_samples(hack.sample_rate)
             if self.verbose:
-                self._log.info(f"Capturadas {len(self.iq)} muestras a {self.sample_rate_hz} sps")
-        except Exception as exc:
-            self._log.error(f"Error leyendo muestras HackRF: {exc}")
-            self.iq = None
+                self._log.info(f"Acquired {len(self.iq)} samples")
+        except Exception as e:
+            self._log.error(f"Error reading samples: {e}")
             return 1
+        finally:
+            # Good practice to close/release device if init created a new instance per call
+            # Assuming hack instance lifecycle is managed here
+            hack.close()
 
         return 0
-
-    def close(self) -> None:
-        if self.hack is not None:
-            try:
-                self.hack.close()
-            except Exception as exc:
-                self._log.warning(f"No se pudo cerrar HackRF limpiamente: {exc}")
-            self.hack = None
-
-    def get_psd(
-        self, return_meta: bool = False
-    ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[Tuple[np.ndarray, np.ndarray], Dict[str, Any]]]:
+    
+    def get_psd(self):
         """
-        Captura IQ con la HackRF y calcula la PSD.
-        Siempre devuelve (f, Pxx) o ((f, Pxx), meta) si return_meta=True.
+        Acquires samples and calculates PSD. Return conditioned by self.with_shift:
+          - with_shift == True  -> (frequencies, Pxx)
+          - with_shift == False -> Pxx
+        In case of acquisition failure:
+          - with_shift == True  -> (None, None)
+          - with_shift == False -> None
         """
+        # Pass the specific window and overlap settings to the estimator
         est = WelchEstimator(
-            freq=self.freq,
-            fs=self.sample_rate_hz,
-            desired_rbw=self.resolution_hz,
-            r_ant=self.r_ant,
+            freq=self.freq, 
+            fs=self.sample_rate_hz, 
+            desired_rbw=self.resolution_hz, 
+            r_ant=50.0,
             with_shift=self.with_shift,
             window=self.window,
-            overlap=self.overlap,
+            overlap=self.overlap
         )
-
-        err = self.acquire_hackrf(est)
+        
+        err = self.acquire_hackrf()
         if err != 0 or self.iq is None:
             if self.with_shift:
-                return (None, None) if not return_meta else ((None, None), {})
-            return None if not return_meta else (None, {})
+                return None, None
+            else:
+                return None
+        
+        result = est.execute_welch(self.iq, self.scale)
 
-        result = est.execute_welch(self.iq, self.scale, return_meta=return_meta)
+        # result can be (f, Pxx) or Pxx depending on with_shift
+        if self.with_shift:
+            f, Pxx_scaled = result
+            return f, Pxx_scaled
+        else:
+            Pxx_scaled = result
+            return Pxx_scaled
 
-        if return_meta:
-            (f, pxx), meta = result
-            return (f, pxx), meta
-
-        # Con with_shift=True, execute_welch devuelve (f, pxx)
-        f, pxx = result
-        return f, pxx

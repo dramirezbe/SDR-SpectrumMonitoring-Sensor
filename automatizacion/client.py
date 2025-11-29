@@ -7,103 +7,128 @@ import socketio
 import time
 import numpy as np
 
-# Enable built-in reconnection logic
-sio = socketio.Client(reconnection=True, reconnection_delay=2)
+class PersistentSensor:
+    def __init__(self, server_url):
+        self.server_url = server_url
+        self.sio = None # Will be created fresh every cycle
 
-@sio.event
-def connect():
-    log.info(">>> CONNECTED to Master Server")
+    def setup_client(self):
+        """Creates a fresh SocketIO instance and binds events."""
+        self.sio = socketio.Client(reconnection=False, request_timeout=10)
 
-@sio.event
-def disconnect():
-    log.info("xxx DISCONNECTED from Master Server")
+        # --- EVENT HANDLERS (Defined inside to access self.sio) ---
+        
+        @self.sio.event
+        def connect():
+            log.info(">>> CONNECTED to Master Server")
 
-@sio.event
-def configure_sensor(config):
-    start_freq = config['start_freq_hz']
-    end_freq = config['end_freq_hz']
-    resolution = config['rbw_hz']
-    port = config['antenna_port'] 
-    window = config['window']
-    overlap = config['overlap']
-    sample_rate = config['sample_rate_hz']
-    lna_gain = config['lna_gain']
-    vga_gain = config['vga_gain']
-    antenna_amp = config['antenna_amp']
-    span = config['span_hz']
-    scale = config['scale']
+        @self.sio.event
+        def disconnect():
+            log.info("xxx DISCONNECTED from Master Server")
 
-    log.info("ACQUIRING WITH")
-    log.info("-------------")
-    log.info(f"Start Freq: {start_freq}")
-    log.info(f"End Freq: {end_freq}")
-    log.info(f"Resolution: {resolution}")
-    log.info(f"Sample Rate: {sample_rate}")
-    log.info(f"Window: {window}")
-    log.info(f"Overlap: {overlap}")
-    log.info(f"lna_gain: {lna_gain}")
-    log.info(f"vga_gain: {vga_gain}")
-    log.info(f"antenna_amp: {antenna_amp}")
-    log.info("-------------")
+        @self.sio.event
+        def server_ack(data):
+            log.info(f"[ACK] {data}. Waiting for next job...")
 
-    # Note: 'with_shift' is removed as the new class always returns (f, Pxx)
-    hack = CampaignHackRF(start_freq_hz=start_freq, end_freq_hz=end_freq, 
-                         sample_rate_hz=sample_rate, resolution_hz=resolution, 
-                         window=window, overlap=overlap, lna_gain=lna_gain, 
-                         vga_gain=vga_gain, antenna_amp=antenna_amp,
-                         r_ant=50.0, verbose=True, scale=scale)
+        @self.sio.on('configure_sensor')
+        def on_configure_sensor(config):
+            self.handle_job(config)
 
-    # --- Unpack the tuple (freqs, pxx) ---
-    _, pxx = hack.get_psd()    
-    
-    # Check if acquisition failed
-    if pxx is None:
-        log.error("Acquisition failed (hack.get_psd returned None)")
-        return
+    def handle_job(self, config):
+        """The logic to run the HackRF and send data."""
+        start_freq = config['start_freq_hz']
+        end_freq = config['end_freq_hz']
+        # Extract other configs
+        resolution = config.get('rbw_hz', 10000)
+        sample_rate = config.get('sample_rate_hz', 20000000)
+        scale = config.get('scale', 'dBm')
 
-    payload = {
-        "timestamp": time.time(),
-        "start_freq_hz": config['start_freq_hz'],
-        "end_freq_hz": config['end_freq_hz'],
-        "Pxx": pxx.tolist() # Convert numpy array to list for JSON serialization
-    }
-    
-    log.info(">>> Sending Results to Server")
-    sio.emit('sensor_reading', payload)
+        log.info(f"JOB: {start_freq/1e6} MHz -> {end_freq/1e6} MHz")
 
-@sio.event
-def server_ack(data):
-    log.info(f"[ACK] {data}. Waiting for next job...")
+        # 1. Acquire
+        hack = CampaignHackRF(
+            start_freq_hz=start_freq, 
+            end_freq_hz=end_freq, 
+            sample_rate_hz=sample_rate, 
+            resolution_hz=resolution, 
+            window=config.get('window', 'hamming'), 
+            overlap=config.get('overlap', 0.5), 
+            lna_gain=config.get('lna_gain', 0), 
+            vga_gain=config.get('vga_gain', 0), 
+            antenna_amp=config.get('antenna_amp', False),
+            r_ant=50.0, 
+            verbose=True, 
+            scale=scale
+        )
 
-def main() -> int:
-    server_url = 'http://10.182.143.246:5000'
-    
-    # Infinite Connection Loop
-    while True:
+        _, pxx = hack.get_psd()    
+        
+        if pxx is None:
+            log.error("Acquisition failed.")
+            return
+
+        # 2. Check Connection before sending
+        if not self.sio.connected:
+            log.warning("Lost connection during job. Discarding result.")
+            return
+
+        # 3. Send
+        payload = {
+            "timestamp": time.time(),
+            "start_freq_hz": start_freq,
+            "end_freq_hz": end_freq,
+            "Pxx": pxx.tolist() 
+        }
+        
         try:
-            if not sio.connected:
-                log.info(f"Attempting to connect to {server_url}...")
-                sio.connect(server_url)
-                sio.wait() # Blocks here until disconnected
-            else:
-                time.sleep(1)
-                
-        except socketio.exceptions.ConnectionError:
-            log.info("Server not found. Retrying in 2 seconds...")
-            time.sleep(2)
-        except KeyboardInterrupt:
-            # Handle KeyboardInterrupt: Disconnect gracefully if connected
-            log.info("User interruption detected. Attempting graceful disconnect.")
-            if sio.connected:
-                sio.disconnect()
-            time.sleep(1)
-            # The loop continues to the next iteration, attempting to connect again
+            log.info(">>> Sending Results...")
+            self.sio.emit('sensor_reading', payload)
         except Exception as e:
-            log.info(f"Unexpected error: {e}. Retrying in 2 seconds...")
-            time.sleep(2)
-    # This line is theoretically unreachable due to the infinite loop
-    return 0 
+            log.error(f"Emit failed: {e}")
+
+    def run_forever(self):
+        log.info("--- Starting Immortal Client ---")
+        
+        while True:
+            try:
+                # 1. Create a FRESH instance (Prevents Segfaults)
+                self.setup_client()
+                
+                # 2. Try to connect
+                log.info(f"Connecting to {self.server_url}...")
+                self.sio.connect(self.server_url)
+                
+                # 3. Block here while connected
+                while self.sio.connected:
+                    time.sleep(1)
+                
+                # If we get here, we disconnected naturally
+                log.info("Connection lost. Restarting cycle...")
+
+            except socketio.exceptions.ConnectionError:
+                log.info("Server not found. Retrying in 5s...")
+            except KeyboardInterrupt:
+                log.info("Stopping...")
+                if self.sio and self.sio.connected:
+                    self.sio.disconnect()
+                break
+            except Exception as e:
+                log.error(f"Unexpected error: {e}")
+            
+            # 4. Clean up before retry
+            if self.sio:
+                try:
+                    self.sio.disconnect()
+                except:
+                    pass
+                self.sio = None # Destroy object
+            
+            time.sleep(5) # Wait before rebuilding
 
 if __name__ == "__main__":
-    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
+    # Point this to your server IP
+    client = PersistentSensor('http://localhost:5000')
+    
+    # Run and capture logs using your utility
+    rc = cfg.run_and_capture(client.run_forever, cfg.LOG_FILES_NUM)
     sys.exit(rc)
