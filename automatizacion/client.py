@@ -1,4 +1,4 @@
-from utils import WelchEstimator, CampaignHackRF
+from utils import CampaignHackRF
 import cfg
 log = cfg.set_logger()
 
@@ -53,7 +53,7 @@ def configure_sensor(config):
                          vga_gain=vga_gain, antenna_amp=antenna_amp,
                          r_ant=50.0, verbose=True, scale=scale)
 
-    # --- FIX: Unpack the tuple (freqs, pxx) ---
+    # --- Unpack the tuple (freqs, pxx) ---
     _, pxx = hack.get_psd()    
     
     # Check if acquisition failed
@@ -65,7 +65,7 @@ def configure_sensor(config):
         "timestamp": time.time(),
         "start_freq_hz": config['start_freq_hz'],
         "end_freq_hz": config['end_freq_hz'],
-        "Pxx": pxx.tolist() # Now calling tolist() on the numpy array
+        "Pxx": pxx.tolist() # Convert numpy array to list for JSON serialization
     }
     
     log.info(">>> Sending Results to Server")
@@ -92,12 +92,17 @@ def main() -> int:
             log.info("Server not found. Retrying in 2 seconds...")
             time.sleep(2)
         except KeyboardInterrupt:
-            log.info("User stopped script.")
-            break
+            # Handle KeyboardInterrupt: Disconnect gracefully if connected
+            log.info("User interruption detected. Attempting graceful disconnect.")
+            if sio.connected:
+                sio.disconnect()
+            time.sleep(1)
+            # The loop continues to the next iteration, attempting to connect again
         except Exception as e:
-            log.info(f"Unexpected error: {e}. Retrying...")
+            log.info(f"Unexpected error: {e}. Retrying in 2 seconds...")
             time.sleep(2)
-    return 0
+    # This line is theoretically unreachable due to the infinite loop
+    return 0 
 
 if __name__ == "__main__":
     rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
