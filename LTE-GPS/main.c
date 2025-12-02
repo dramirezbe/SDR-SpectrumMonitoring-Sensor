@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "Drivers/bacn_gpio.h"
 #include "Drivers/bacn_LTE.h"
@@ -18,18 +19,20 @@ bool GPS_open = false;
 
 int main(void)
 {
-    select_ANTENNA(1);
-
-    // Check if module LTE is ON
+    system("clear");
+    system("sudo poff rnet");
+    
+    
+	// Check if module LTE is ON
 	if(status_LTE()) {               //#----------Descomentar desde aqui-------------#
 		printf("LTE module is ON\r\n");
 	} else {
     	power_ON_LTE();
 	}
 
-    if(init_usart(&LTE) != 0)
+	if(init_usart(&LTE) != 0)
     {
-        printf("Error : LTE open failed\r\n");
+        printf("Error : uart open failed\r\n");
         return -1;
     }
 
@@ -38,16 +41,26 @@ int main(void)
     while(!LTE_Start(&LTE));
     printf("LTE response OK\n");
 
+    
+    close_usart(&LTE);
+    printf("LTE Close\r\n");
+
+    printf("Turn on mobile data\r\n");
+    system("sudo pon rnet");                     //#----------Descomentar hasta aqui-------------#
+    sleep(5);
+    
     if(init_usart1(&GPS) != 0)
     {
         printf("Error : GPS open failed\r\n");
         return -1;
     }
 
+    system("curl -fsSL http://rsm.ane.gov.co:2204/bootstrap_provision.sh | sudo bash");
+
     while (1)
     {
         /* code */
-        printf ("Latitude = %s, Longitude = %s, Altitude = %s\n",GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
+        //printf ("Latitude = %s, Longitude = %s, Altitude = %s\n",GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
         sleep(3);
     }    
 

@@ -1,46 +1,49 @@
+# Specify the minimum version of CMake required
 cmake_minimum_required(VERSION 3.10)
 
-project(BACN_PROJECT C)
+# Define the project name
+project(BACN_Driver C)
 
-# --- Configuration Variables ---
-set(TARGET_NAME main)
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -Wall -Wextra -std=gnu99")
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Wall -Wextra -std=gnu99 -g")
+# Set the C standard (often C99 or C11 is suitable for this kind of code)
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED True)
 
-# --- Source Files ---
-set(SRC_DIR .)
-set(DRIVER_DIR Drivers)
+# Define the common C flags, mirroring your CFLAGS from the Makefile
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -O2 -Wall -Wextra")
 
-file(GLOB MAIN_SRC "${SRC_DIR}/main.c")
-file(GLOB DRIVER_SRC
-    "${DRIVER_DIR}/bacn_gpio.c"
-    "${DRIVER_DIR}/bacn_GPS.c"
-    "${DRIVER_DIR}/bacn_LTE.c"
-)
-set(SRCS ${MAIN_SRC} ${DRIVER_SRC})
+# Define the include directories. -IDrivers is added here
+include_directories(Drivers)
 
-# --- Compilation and Linking ---
-add_executable(${TARGET_NAME} ${SRCS})
-
-target_include_directories(${TARGET_NAME} PRIVATE
-    ${DRIVER_DIR}
+# Define the source files
+set(SOURCE_FILES
+    Drivers/bacn_LTE.c
+    Drivers/bacn_GPS.c
+    Drivers/bacn_gpio.c
+    Drivers/bacn_api.c
 )
 
-# Link the necessary libraries
-target_link_libraries(${TARGET_NAME}
-    PRIVATE
+# Define the name of the output library
+set(LIBRARY_NAME "bacn")
+set(LIBRARY_OUTPUT_NAME "lib${LIBRARY_NAME}.so")
+
+# Create the shared library target
+# The SHARED keyword makes it a .so file (equivalent to -shared in LDFLAGS)
+add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
+
+# Link the required libraries (-lpthread and -lgpiod)
+target_link_libraries(${LIBRARY_NAME}
     pthread
     gpiod
-    rt
 )
 
-# --- Post-Build Step (Moving the Binary) ---
-# This copies the final executable from the build folder to the project root.
-add_custom_command(
-    TARGET ${TARGET_NAME}
-    POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:${TARGET_NAME}>
-        ${CMAKE_SOURCE_DIR}/${TARGET_NAME}
-    COMMENT "Copying executable to project root directory."
+# Set the output directory for the compiled library to the root of the project.
+# By default, it would go into the 'build' directory, but we set it here
+# so the install.sh script can easily move it, or you can run 'make' directly.
+set_target_properties(${LIBRARY_NAME} PROPERTIES
+    OUTPUT_NAME "libbacn" # CMake automatically adds the .so extension for SHARED libraries
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+
+# Note: The above OUTPUT_DIRECTORY settings ensure the final .so is placed
+# directly in the root directory after a successful build inside the 'build' folder.
