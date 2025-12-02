@@ -1,49 +1,56 @@
-# Specify the minimum version of CMake required
 cmake_minimum_required(VERSION 3.10)
 
-# Define the project name
-project(BACN_Driver C)
+# Project Name
+project(BACN_GPS_LTE C)
 
-# Set the C standard (often C99 or C11 is suitable for this kind of code)
+# Set C Standard (C99 or C11 is recommended for embedded)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
-# Define the common C flags, mirroring your CFLAGS from the Makefile
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -O2 -Wall -Wextra")
+# -----------------------------------------------------------------------------
+# 1. Find Dependencies
+# -----------------------------------------------------------------------------
 
-# Define the include directories. -IDrivers is added here
-include_directories(Drivers)
+# Find Pthread (Standard CMake method)
+set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+find_package(Threads REQUIRED)
 
-# Define the source files
-set(SOURCE_FILES
-    Drivers/bacn_LTE.c
-    Drivers/bacn_GPS.c
+# Find libgpiod
+# We search for the library specifically. 
+find_library(GPIOD_LIB gpiod)
+
+if(NOT GPIOD_LIB)
+    message(FATAL_ERROR "libgpiod not found! Please install it (e.g., sudo apt install libgpiod-dev)")
+else()
+    message(STATUS "Found libgpiod: ${GPIOD_LIB}")
+endif()
+
+# -----------------------------------------------------------------------------
+# 2. Define Sources
+# -----------------------------------------------------------------------------
+
+set(SOURCES
+    main.c
     Drivers/bacn_gpio.c
-    Drivers/bacn_api.c
+    Drivers/bacn_GPS.c
+    Drivers/bacn_LTE.c
 )
 
-# Define the name of the output library
-set(LIBRARY_NAME "bacn")
-set(LIBRARY_OUTPUT_NAME "lib${LIBRARY_NAME}.so")
+# -----------------------------------------------------------------------------
+# 3. Create Executable
+# -----------------------------------------------------------------------------
 
-# Create the shared library target
-# The SHARED keyword makes it a .so file (equivalent to -shared in LDFLAGS)
-add_library(${LIBRARY_NAME} SHARED ${SOURCE_FILES})
+add_executable(bacn_app ${SOURCES})
 
-# Link the required libraries (-lpthread and -lgpiod)
-target_link_libraries(${LIBRARY_NAME}
-    pthread
-    gpiod
+# -----------------------------------------------------------------------------
+# 4. Include Paths & Linking
+# -----------------------------------------------------------------------------
+
+# Add the current root directory to includes so #include "Drivers/..." works
+target_include_directories(bacn_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Link the libraries found earlier
+target_link_libraries(bacn_app PRIVATE 
+    Threads::Threads 
+    ${GPIOD_LIB}
 )
-
-# Set the output directory for the compiled library to the root of the project.
-# By default, it would go into the 'build' directory, but we set it here
-# so the install.sh script can easily move it, or you can run 'make' directly.
-set_target_properties(${LIBRARY_NAME} PROPERTIES
-    OUTPUT_NAME "libbacn" # CMake automatically adds the .so extension for SHARED libraries
-    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}"
-)
-
-# Note: The above OUTPUT_DIRECTORY settings ensure the final .so is placed
-# directly in the root directory after a successful build inside the 'build' folder.

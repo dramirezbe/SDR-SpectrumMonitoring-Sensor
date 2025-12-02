@@ -7,8 +7,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
-#include <pthread.h>
-extern pthread_mutex_t gps_mutex;
 
 #include "bacn_GPS.h"
 
@@ -67,42 +65,71 @@ void close_usart1(gp_uart *s_uart)
 
 void GPS_Track(char* GPSData)
 {
-    /* tokeniza la línea NMEA. Usamos strdup para mantener strings estables
-       y protegemos la asignación con gps_mutex. */
-    char *saveptr = NULL;
-    char *token;
-    const char delim[] = "$,";
+    //System_printf(GPSNMEA);
+    //System_flush();
 
-    /* local temporales */
-    char *fields[16];
-    int idx = 0;
+    char *token = strtok(GPSData, g);
 
-    /* strtok_r para seguridad reentrante */
-    token = strtok_r(GPSData, delim, &saveptr);
-    while(token != NULL && idx < 16) {
-        fields[idx++] = token;
-        token = strtok_r(NULL, delim, &saveptr);
+    if (token != NULL) {
+        GPSInfo.Header = token;
     }
-
-    pthread_mutex_lock(&gps_mutex);
-    /* Free previous fields if any (las funciones de api se encargan en close).
-       Aquí sobrescribimos, liberamos las antiguas si existen y strdup las nuevas. */
-    if (idx > 0) { if (GPSInfo.Header) free(GPSInfo.Header); GPSInfo.Header = strdup(fields[0]); }
-    if (idx > 1) { if (GPSInfo.UTC_Time) free(GPSInfo.UTC_Time); GPSInfo.UTC_Time = strdup(fields[1]); }
-    if (idx > 2) { if (GPSInfo.Latitude) free(GPSInfo.Latitude); GPSInfo.Latitude = strdup(fields[2]); }
-    if (idx > 3) { if (GPSInfo.LatDir) free(GPSInfo.LatDir); GPSInfo.LatDir = strdup(fields[3]); }
-    if (idx > 4) { if (GPSInfo.Longitude) free(GPSInfo.Longitude); GPSInfo.Longitude = strdup(fields[4]); }
-    if (idx > 5) { if (GPSInfo.LonDir) free(GPSInfo.LonDir); GPSInfo.LonDir = strdup(fields[5]); }
-    if (idx > 6) { if (GPSInfo.Quality) free(GPSInfo.Quality); GPSInfo.Quality = strdup(fields[6]); }
-    if (idx > 7) { if (GPSInfo.Satelites) free(GPSInfo.Satelites); GPSInfo.Satelites = strdup(fields[7]); }
-    if (idx > 8) { if (GPSInfo.HDOP) free(GPSInfo.HDOP); GPSInfo.HDOP = strdup(fields[8]); }
-    if (idx > 9) { if (GPSInfo.Altitude) free(GPSInfo.Altitude); GPSInfo.Altitude = strdup(fields[9]); }
-    if (idx > 10) { if (GPSInfo.Units_al) free(GPSInfo.Units_al); GPSInfo.Units_al = strdup(fields[10]); }
-    if (idx > 11) { if (GPSInfo.Undulation) free(GPSInfo.Undulation); GPSInfo.Undulation = strdup(fields[11]); }
-    if (idx > 12) { if (GPSInfo.Units_un) free(GPSInfo.Units_un); GPSInfo.Units_un = strdup(fields[12]); }
-    if (idx > 13) { if (GPSInfo.Age) free(GPSInfo.Age); GPSInfo.Age = strdup(fields[13]); }
-    if (idx > 14) { if (GPSInfo.Cheksum) free(GPSInfo.Cheksum); GPSInfo.Cheksum = strdup(fields[14]); }
-    pthread_mutex_unlock(&gps_mutex);
+     token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.UTC_Time = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Latitude = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.LatDir = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Longitude = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.LonDir = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Quality = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Satelites = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.HDOP = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Altitude = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Units_al = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Undulation = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Units_un = token;
+    }
+    token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Age = token;
+    }
+     token = strtok(NULL, g);
+    if (token != NULL) {
+        GPSInfo.Cheksum = token;
+    }
+   
 }
 
 void* GPSIntHandler(void *arg)
