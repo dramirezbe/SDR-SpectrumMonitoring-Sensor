@@ -1,0 +1,30 @@
+// Data post request
+{
+    //int
+    "mac": "01:02:03:04:05:06",
+    //Optional, only If is a campaign medition, if real time it will do not appear
+    "campaign_id": 123,
+    // Array of Power Spectral Density data in dBm/Hz (float32)
+    "Pxx": [-0.54, -0.43, -1.56],
+    // In Hz (int)
+    "start_freq_hz": 1000,
+    "end_freq_hz": 2000,
+    // Timestamp of the moment the acquisition was performed (unix ms)
+    "timestamp": 1758435092721,
+
+
+    //None if not available(with_metrics)
+    "excursion": {
+        "unit": "hz",
+        "peak_to_peak_hz": 123.4,
+        "peak_deviation_hz": 235123.4,
+        "rms_deviation_hz": 123.4
+    },
+    //None if not available(with_metrics)
+    "depth": {
+        "unit": "percent",
+        "peak_to_peak": 15.23,
+        "peak_deviation": 100.0,
+        "rms_deviation":21.32
+    }
+}

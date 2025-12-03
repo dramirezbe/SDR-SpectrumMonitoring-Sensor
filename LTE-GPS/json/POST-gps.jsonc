@@ -1,0 +1,9 @@
+{
+    //int
+    "device_id": 10,
+    // (float) (degrees)
+    "lat": 5.0741,
+    "lng": -75.5169,
+    // Altitude in meters
+    "alt": 2500.6
+}

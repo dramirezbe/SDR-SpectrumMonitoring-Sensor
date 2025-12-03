@@ -1,0 +1,144 @@
+\documentclass[a4paper, 12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+% Configuración de márgenes
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% Estilo de párrafos
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.8em}
+
+\title{\textbf{Manual de Despliegue: Nodo de Monitoreo Espectral}}
+\author{Departamento de Ingeniería}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Introducción}
+Este documento guía paso a paso el proceso para conectar y encender el equipo de monitoreo. El sensor es una unidad diseñada para operar de forma autónoma una vez conectada a la corriente y a la antena.
+
+Componentes principales del equipo:
+\begin{itemize}
+    \item \textbf{Unidad Principal:} Computador interno (Raspberry Pi 5).
+    \item \textbf{Radio:} Receptor interno para capturar señales.
+    \item \textbf{Conectividad:} Módulo 4G/LTE y GPS integrado.
+    \item \textbf{Puertos:} Conectores para antenas externas.
+\end{itemize}
+
+% -------------------------------------------------------------------
+% FASE 1: HARDWARE (Tono Sencillo)
+% -------------------------------------------------------------------
+\section{Fase 1: Instalación Física}
+
+\subsection{Paso 1: Conexión de Antena y Energía}
+Antes de configurar el software, realice las conexiones físicas en el siguiente orden:
+
+\begin{enumerate}
+    \item \textbf{Antena:} Enrosque el cable de la antena en el conector del equipo. Por defecto se usa el \textbf{Puerto 1} (el conector de más arriba). Apriételo con la mano suavemente hasta que no gire más.
+    \item \textbf{Encendido:} Conecte el cable USB-C a la entrada de energía.
+    
+    \begin{quote}
+        \textbf{IMPORTANTE:} Si al conectar el cable las luces no encienden después de 10 segundos, desconecte el cable del puerto, \textbf{gírelo (déle la vuelta al conector)} y vuelva a insertarlo.
+    \end{quote}
+    
+    \item \textbf{Confirmación:} Espere unos 20 segundos. El equipo estará listo cuando la luz roja parpadee de forma constante.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/sensor/antenas.jpg}
+    \caption{Ubicación de los puertos de antena.}
+\end{figure}
+
+\subsection{Paso 2: Identificación del Equipo}
+Para registrar el equipo necesita su identificador único. 
+
+Busque la etiqueta pegada en la caja y anote el código llamado \textbf{MAC} (son letras y números separados por dos puntos, ej. \texttt{d0:65:...}). Necesitará este dato exacto para el siguiente paso.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{img/sensor/etiqueta.jpg}
+    \caption{Ejemplo de la etiqueta con el código MAC.}
+\end{figure}
+
+% -------------------------------------------------------------------
+% FASE 2: SOFTWARE
+% -------------------------------------------------------------------
+\section{Fase 2: Configuración en el Sistema}
+
+\subsection{Paso 3: Ingreso a la Plataforma}
+Desde su computador, abra el navegador y entre a:
+
+\begin{center}
+    \large\textbf{\url{http://rsm.ane.gov.co:1280/}}
+\end{center}
+
+En el menú de la izquierda, vaya a \textbf{Red de monitoreo}, luego "Sensores"\ y haga clic en el botón \textbf{+ Nuevo}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/frontend/paso1.png}
+    \caption{Botón para agregar sensor.}
+\end{figure}
+
+\subsection{Paso 4: Registro}
+Llene el formulario con los datos del equipo:
+
+\begin{itemize}
+    \item \textbf{MAC:} Escriba el código de la etiqueta (Fase 1).
+    \item \textbf{Ubicación:} Ingrese la Latitud y Longitud donde instaló el equipo.
+    \item \textbf{Estado:} Seleccione ``Activo''.
+    \item Haga clic en \textbf{Crear Sensor}.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{img/frontend/paso2.png}
+    \caption{Formulario de registro.}
+\end{figure}
+
+\subsection{Paso 5: Verificar Conexión}
+Vaya a la sección \textbf{Análisis} en el menú lateral.
+\begin{enumerate}
+    \item En "Fuente de datos", elija: \textbf{Tiempo Real (API)}.
+    \item En la lista "Sensor", busque el nombre de su equipo.
+    \item Verifique que aparezca un punto \textbf{verde}. Esto significa que el equipo tiene internet y está respondiendo.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/frontend/paso3.png}
+    \caption{Verificación de estado en línea.}
+\end{figure}
+
+% -------------------------------------------------------------------
+% PARTE TÉCNICA (DSP)
+% -------------------------------------------------------------------
+\subsection{Paso 6: Parámetros de Adquisición DSP}
+Configure los parámetros de procesamiento digital de señales (DSP) para definir la ventana de captura espectral.
+
+Definición técnica de variables:
+\begin{itemize}
+    \item \textbf{Frecuencia Central ($f_c$):} Define el centro exacto de la banda a analizar (ej. 97.5 MHz).
+    \item \textbf{Sample Rate ($f_s$):} Define la tasa de muestreo del SDR. Debe ser coherente con la capacidad del bus de datos (Para HackRF, 20 MS/s).
+    \item \textbf{Span:} Ancho de banda instantáneo visualizado. En arquitecturas de conversión directa (Zero-IF), este valor suele ser igual al Sample Rate.
+    \item \textbf{RBW (Resolution Bandwidth):} Ancho de banda de resolución. Determina el tamaño del ``bin'' en la transformada rápida de Fourier (FFT). Un RBW menor reduce el piso de ruido (mejor SNR) pero incrementa la carga computacional.
+\end{itemize}
+
+Haga clic en \textbf{Iniciar Adquisición} para enviar la orden al sensor e iniciar el streaming de datos IQ/FFT.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/frontend/paso4.png}
+    \caption{Panel de control de ingeniería RF.}
+\end{figure}
+
+\end{document}

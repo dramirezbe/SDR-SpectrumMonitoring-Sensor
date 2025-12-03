@@ -1,0 +1,56 @@
+//GET realtime endpoint (defalult always capture spectrum)
+{
+    /// Central spectral analysis frequency (Hz).
+    "center_freq_hz": 9800000,
+
+    // Spectral resolution or RBW (Resolution Bandwidth) in Hz.
+    "rbw_hz": 10000,
+
+    "sample_rate_hz": 20000000,
+
+    //int span<=sample_rate
+    "span": 20000000,
+
+    //string (dBm, dBmV, dBuV, V, W)
+    "scale": "dbm",
+
+    //-----default stats--------
+    "window": "hamming",
+    //float
+    "overlap": 0.5,
+    //int
+    
+    "lna_gain": 0,
+    "vga_gain": 0,
+    //bool
+    "antenna_amp": false,
+
+    //Can be null if no demodulation is required
+    "demodulation": {
+
+        // Type of demodulation (AM/FM). (str)
+        "type": "FM",
+
+        //Calculate excursion, and depth (bool)
+        "with_metrics": true,
+
+        // Bandwidth of the demodulated channel (Hz).
+        "bw_hz": 250000,
+
+        // Center frequency of the dem
+        // odulated channel (Hz).
+        "center_freq_hz": 95500000,
+
+        "port_socket": "/1234"
+    },
+    //None if not needed
+    "filter":{
+        //lowpass, bandpass highpass
+        "type": "lowpass",
+        //int
+        "filter_bw_hz": 200000,
+
+        //default stat
+        "order_filter":2
+    }
+}
