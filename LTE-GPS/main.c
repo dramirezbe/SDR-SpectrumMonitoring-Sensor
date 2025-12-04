@@ -301,29 +301,8 @@ int main() {
         return -1;
     }
 
-    // 2. Internet Connection (Priority: LTE -> Eth -> WLAN)
-    char current_ip[IP_BUF] = {0};
-    int net_status = -1;
-
-    printf("=== Network Init (Priority: LTE > Eth > WLAN) ===\n");
-
-    if (establish_ppp_connection(current_ip) == 0) {
-        printf("[NET] Selected LTE Interface (ppp0).\n");
-        net_status = 0;
-    } 
-    else if (establish_eth_connection(current_ip) == 0) {
-        printf("[NET] Selected Ethernet Interface (eth0).\n");
-        net_status = 0;
-    } 
-    else if (establish_wlan_connection(current_ip) == 0) {
-        printf("[NET] Selected WLAN Interface (wlan0).\n");
-        net_status = 0;
-    } 
-
-    if (net_status != 0) {
-        fprintf(stderr, "[CRITICAL] All network interfaces failed. Exiting.\n");
-        return 1; 
-    }
+    //Here internet
+    
 
     // 3. Environment & Threading
     char *api_url = getenv_c("API_URL"); 
