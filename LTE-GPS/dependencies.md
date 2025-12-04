@@ -1,1 +1,2 @@
-sudo apt install libzmq3-dev ibportaudio-ocaml-dev libcjson-dev
+sudo apt install libzmq3-dev libcjson-dev libcurl4-openssl-dev
+ 

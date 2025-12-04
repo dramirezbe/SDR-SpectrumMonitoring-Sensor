@@ -13,4 +13,5 @@ include_directories(${CMAKE_SOURCE_DIR})
 add_executable(main main.c ${DRIVER_SOURCES})
 
 # Link zmq and pthread
-target_link_libraries(main zmq pthread hackrf portaudio m fftw3 cjson gpiod)
+target_link_libraries(main zmq pthread hackrf m fftw3 cjson gpiod curl)
+

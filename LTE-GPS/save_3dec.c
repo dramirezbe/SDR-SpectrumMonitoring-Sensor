@@ -9,18 +9,12 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <math.h>
-#include <string.h>
-#include <pthread.h>
+#include <string.h> 
 #include <libhackrf/hackrf.h>
 #include <inttypes.h>
 #include <cjson/cJSON.h>
 
-// Modules
 #include "Modules/psd.h"
-#include "Modules/utils.h"
-#include "Modules/datatypes.h" 
-
-// Drivers
 #include "Drivers/ring_buffer.h" 
 #include "Drivers/sdr_HAL.h"
 #include "Drivers/zmqsub.h"
@@ -28,17 +22,106 @@
 #include "Drivers/bacn_gpio.h"
 #include "Drivers/bacn_LTE.h"
 #include "Drivers/bacn_GPS.h"
+#define MAX_URL_LENGTH 1024
 
-// ----------------------------------------------------------------------
-// Global State & Config
-// ----------------------------------------------------------------------
+char *getenv_c(const char *key) {
+    FILE *file;
+    char line[1024];
+    size_t key_len = strlen(key);
+
+    // 1. Open the .env file
+    file = fopen(".env", "r");
+    if (file == NULL) {
+        // Could not open .env file
+        return NULL; 
+    }
+
+    // 2. Format the search string (e.g., "API_URL=")
+    char search_prefix[key_len + 2];
+    snprintf(search_prefix, sizeof(search_prefix), "%s=", key);
+
+    // 3. Read the file line by line
+    while (fgets(line, sizeof(line), file) != NULL) {
+        
+        // Remove trailing newline character, if present
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') {
+            line[len - 1] = '\0';
+            len--;
+        }
+
+        // Check if the line starts with the target key prefix (e.g., "API_URL=")
+        if (strncmp(line, search_prefix, key_len + 1) == 0) {
+            
+            // 4. Key found! Extract the value part of the string
+            // The value starts right after the '=' (which is at index key_len)
+            const char *value_start = line + key_len + 1;
+            
+            // 5. Dynamically allocate memory for the value
+            char *result = strdup(value_start);
+            
+            // Close the file before returning
+            fclose(file); 
+            
+            return result;
+        }
+    }
+
+    // Key not found after reading the whole file
+    fclose(file);
+    return NULL;
+}
+
+int process_gps_data(
+    const char *base_api_url,
+    const char *altitude_str,
+    const char *latitude_str,
+    const char *longitude_str,
+    char *full_url_gps_out,
+    float *altitude_out,
+    float *latitude_out,
+    float *longitude_out)
+{
+    // --- 1. CONVERT STRINGS TO FLOATS ---
+    
+    // The atof() function converts the string argument to a double, 
+    // which is then stored in a float variable.
+    *altitude_out = (float)atof(altitude_str);
+    *latitude_out = (float)atof(latitude_str);
+    *longitude_out = (float)atof(longitude_str);
+    
+    // --- 2. CONSTRUCT THE FULL URL ---
+    
+    // Use snprintf to safely concatenate the base URL with the "/gps" endpoint
+    // snprintf prevents buffer overflow by respecting MAX_URL_LENGTH.
+    int chars_written = snprintf(
+        full_url_gps_out, 
+        MAX_URL_LENGTH, 
+        "%s/gps", 
+        base_api_url
+    );
+
+    // Check if the resulting string was truncated
+    if (chars_written >= MAX_URL_LENGTH || chars_written < 0) {
+        // Handle error: URL is too long for the buffer
+        return 1; 
+    }
+    
+    // Success
+    return 0;
+}
 
 st_uart LTE;
 gp_uart GPS;
+
 GPSCommand GPSInfo;
 
 bool LTE_open = false;
 bool GPS_open = false;
+
+// ----------------------------------------------------------------------
+// Global State & Config
+// ----------------------------------------------------------------------
 
 hackrf_device* device = NULL;
 ring_buffer_t rb;
@@ -61,54 +144,6 @@ void print_desired(const DesiredCfg_t *cfg);
 int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg);
 void publish_results(double* freq_array, double* psd_array, int length);
 int recover_hackrf(void);
-
-// ----------------------------------------------------------------------
-// GPS Send each 10 secs
-// ----------------------------------------------------------------------
-
-/**
- * @brief Thread to post GPS data every 10 seconds.
- * Runs in parallel with the SDR acquisition loop.
- */
-void *gps_monitor_thread(void *arg) {
-    char *api_url = (char *)arg;
-
-    printf("[GPS-THREAD] Started. Reporting to: %s\n", api_url);
-
-    while (!stop_streaming) { // Loop until the main program stops
-        
-        // Check if we have valid URL and non-empty GPS data
-        // We use strlen > 0 to ensure we don't send empty strings if GPS isn't locked yet.
-        if (api_url != NULL && 
-            strlen(GPSInfo.Latitude) > 0 && 
-            strlen(GPSInfo.Longitude) > 0) 
-        {
-            // Debug print (optional)
-            // printf("[GPS-THREAD] Sending: Lat=%s, Lon=%s, Alt=%s\n", 
-            //        GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
-
-            // Pass strings directly to the utils function
-            int res = post_gps_data(
-                api_url, 
-                GPSInfo.Altitude, 
-                GPSInfo.Latitude, 
-                GPSInfo.Longitude
-            );
-
-            if (res != 0) {
-                fprintf(stderr, "[GPS-THREAD] POST failed (Error code: %d)\n", res);
-            }
-        } 
-        else if (api_url != NULL) {
-            // Optional: Print a warning if GPS data is missing
-            // printf("[GPS-THREAD] Waiting for GPS lock...\n");
-        }
-
-        sleep(10); // Wait 10 seconds
-    }
-
-    return NULL;
-}
 
 // ----------------------------------------------------------------------
 // HackRF Callback
@@ -246,52 +281,21 @@ void handle_psd_message(const char *payload) {
 // ----------------------------------------------------------------------
 
 int main() {
-    // -------------------------------------------------
-    // 1. Hardware/Driver Init
-    // -------------------------------------------------
-    if(init_usart(&LTE) != 0) {
-        printf("Error : LTE open failed\r\n");
-        return -1;
-    }
-
-    if(init_usart1(&GPS) != 0) {
-        printf("Error : GPS open failed\r\n");
-        return -1;
-    }
-
-    // -------------------------------------------------
-    // 2. Load Environment Variables (Using utils module)
-    // -------------------------------------------------
     char *api_url = getenv_c("API_URL");
     if (api_url != NULL) {
         printf("API URL: %s\n", api_url);
-    } else {
-        printf("API URL not found in .env\n");
+    }
+    else {
+        printf("API URL (NULL): %s\n", api_url);
     }
 
-    // -------------------------------------------------
-    // NEW: LAUNCH GPS THREAD
-    // -------------------------------------------------
-    /**
-    pthread_t gps_tid;
-    
-    if (api_url != NULL) {
-        // Create the thread passing the URL string
-        int ret = pthread_create(&gps_tid, NULL, gps_monitor_thread, (void *)api_url);
-        if (ret != 0) {
-            fprintf(stderr, "Error: Failed to create GPS thread\n");
-        }
-    } else {
-        printf("[SYSTEM] Warning: No API_URL. GPS thread disabled.\n");
-    }
-    */
-
-    // -------------------------------------------------
-    // 3. System Initialization
-    // -------------------------------------------------
     char *input_topic = "acquire";
     int cycle_count = 0;
-    bool needs_recovery = false; 
+    bool needs_recovery = false; // Trigger for error handling logic
+
+    // -------------------------------------------------
+    // 1. System Initialization
+    // -------------------------------------------------
     
     // A. ZMQ Input
     zsub_t *sub = zsub_init(input_topic, handle_psd_message);
@@ -315,7 +319,7 @@ int main() {
 
 
     // -------------------------------------------------
-    // 4. Continuous Loop
+    // 2. Continuous Loop
     // -------------------------------------------------
     while (1) {
         
@@ -423,7 +427,6 @@ int main() {
     hackrf_exit();
     zsub_close(sub);
     zpub_close(publisher);
-    if(api_url) free(api_url); // Free the env string
     return 0;
 }
 
