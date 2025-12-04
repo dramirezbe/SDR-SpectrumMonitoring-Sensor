@@ -1,4 +1,11 @@
-// main.c
+/**
+ * @file main.c
+ * @brief Continuous Headless PSD Analyzer
+ * * Logic is separated:
+ * - main.c: Orchestration and Flow
+ * - functions.c: Heavy lifting, globals, and drivers
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -7,7 +14,11 @@
 #include <libhackrf/hackrf.h>
 #include <inttypes.h>
 
-// We still need the Type Definitions
+// --- MISSING HEADERS ADDED HERE ---
+#include "Modules/utils.h"       // Required for getenv_c
+#include "Drivers/sdr_HAL.h"     // Required for SDR_cfg_t and hackrf_apply_cfg
+
+// Common Types
 #include "Modules/psd.h"
 #include "Modules/datatypes.h" 
 #include "Drivers/ring_buffer.h" 
@@ -27,9 +38,10 @@ extern zpub_t *publisher;
 extern volatile bool stop_streaming;
 extern volatile bool config_received;
 
+// These structs require the headers included above to be known
 extern DesiredCfg_t desired_config;
 extern PsdConfig_t psd_cfg;
-extern SDR_cfg_t hack_cfg;
+extern SDR_cfg_t hack_cfg; 
 extern RB_cfg_t rb_cfg;
 
 // =========================================================
@@ -47,15 +59,22 @@ int recover_hackrf(void);
 // =========================================================
 int main() {
     // 1. Hardware Init
-    if(init_usart(&LTE) != 0) return -1;
-    if(init_usart1(&GPS) != 0) return -1;
+    if(init_usart(&LTE) != 0) {
+        fprintf(stderr, "Error: LTE Init failed\n");
+        return -1;
+    }
+    if(init_usart1(&GPS) != 0) {
+        fprintf(stderr, "Error: GPS Init failed\n");
+        return -1;
+    }
 
     // 2. Internet Connection
     char ip[64];
     if (establish_ppp_connection(ip) != 0) return 1;
 
     // 3. Environment & Threading
-    char *api_url = getenv_c("API_URL");
+    // getenv_c requires "Modules/utils.h"
+    char *api_url = getenv_c("API_URL"); 
     pthread_t gps_tid;
     
     if (api_url != NULL) {
@@ -72,8 +91,10 @@ int main() {
     if (!publisher) return 1;
 
     if (hackrf_init() != HACKRF_SUCCESS) return 1;
+    
+    // Attempt initial open
     if (hackrf_open(&device) != HACKRF_SUCCESS) {
-        fprintf(stderr, "[SYSTEM] Warning: Initial Open failed.\n");
+        fprintf(stderr, "[SYSTEM] Warning: Initial Open failed. Will retry in loop.\n");
     }
 
     // 5. Continuous Loop
@@ -98,7 +119,10 @@ int main() {
         // B. Setup Acquisition
         rb_init(&rb, rb_cfg.rb_size);
         stop_streaming = false;
+
+        // hackrf_apply_cfg requires "Drivers/sdr_HAL.h"
         hackrf_apply_cfg(device, &hack_cfg);
+        
         hackrf_start_rx(device, rx_callback, NULL);
 
         // C. Wait for Buffer Fill
