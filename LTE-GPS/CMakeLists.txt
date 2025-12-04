@@ -21,8 +21,7 @@ include_directories(${CMAKE_SOURCE_DIR})
 # 4. Create Executable
 # IMPORTANT: We explicitly add functions.c here alongside main.c
 add_executable(main 
-    main.c 
-    functions.c 
+    main.c
     ${DRIVER_SOURCES}
 )
 

@@ -1,73 +1,338 @@
 /**
  * @file main.c
- * @brief Continuous Headless PSD Analyzer
- * * Logic is separated:
- * - main.c: Orchestration and Flow
- * - functions.c: Heavy lifting, globals, and drivers
+ * @brief Continuous Headless PSD Analyzer (Unified)
+ * @details logic merged from previous main.c and functions.c
  */
 
+#define _GNU_SOURCE // For advanced string functions if needed
+
+// --- STANDARD HEADERS ---
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <pthread.h>
-#include <libhackrf/hackrf.h>
+#include <math.h>
+#include <string.h>
 #include <inttypes.h>
+#include <ctype.h>
 
-// --- HEADERS ---
+// --- LIBRARY HEADERS ---
+#include <libhackrf/hackrf.h>
+#include <cjson/cJSON.h>
+
+// --- CUSTOM MODULES & DRIVERS ---
 #include "Modules/utils.h"       
-#include "Drivers/sdr_HAL.h"     
-
-// Common Types
 #include "Modules/psd.h"
 #include "Modules/datatypes.h" 
+#include "Drivers/sdr_HAL.h"     
 #include "Drivers/ring_buffer.h" 
 #include "Drivers/zmqsub.h"
 #include "Drivers/zmqpub.h"
+#include "Drivers/bacn_gpio.h"
 #include "Drivers/bacn_LTE.h"
 #include "Drivers/bacn_GPS.h"
 
 // =========================================================
-// MANUAL EXTERNS (Variables defined in functions.c)
+// DEFINITIONS & MACROS
 // =========================================================
-extern st_uart LTE;
-extern gp_uart GPS;
-extern hackrf_device* device;
-extern ring_buffer_t rb;
-extern zpub_t *publisher;
-extern volatile bool stop_streaming;
-extern volatile bool config_received;
-
-extern DesiredCfg_t desired_config;
-extern PsdConfig_t psd_cfg;
-extern SDR_cfg_t hack_cfg; 
-extern RB_cfg_t rb_cfg;
-
+#define CMD_BUF 256
 #ifndef IP_BUF
 #define IP_BUF 64
 #endif
 
 // =========================================================
-// MANUAL PROTOTYPES (Functions defined in functions.c)
+// GLOBAL VARIABLES (Formerly External)
 // =========================================================
+// Hardware Handles
+st_uart LTE;
+gp_uart GPS;
+hackrf_device* device = NULL;
+
+// Data Structures
+GPSCommand GPSInfo;
+ring_buffer_t rb;
+zpub_t *publisher = NULL; 
+
+// State Flags
+bool LTE_open = false;
+bool GPS_open = false;
+volatile bool stop_streaming = false;
+volatile bool config_received = false; 
+
+// Configuration Containers
+DesiredCfg_t desired_config = {0};
+PsdConfig_t psd_cfg = {0};
+SDR_cfg_t hack_cfg = {0};
+RB_cfg_t rb_cfg = {0};
+
+// =========================================================
+// FUNCTION PROTOTYPES (Forward Declarations)
+// =========================================================
+void run_cmd(const char *cmd);
+int get_iface_ip(const char *interface, char *ip);
 int establish_ppp_connection(char* ip_buffer);
 int establish_wlan_connection(char* ip_buffer);
 int establish_eth_connection(char* ip_buffer);
+void print_desired(const DesiredCfg_t *cfg);
+int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg);
+bool is_valid_gps_data(const char* lat_str, const char* lon_str);
 void* gps_monitor_thread(void *arg);
-void handle_psd_message(const char *payload);
 int rx_callback(hackrf_transfer* transfer);
-void publish_results(double* freq_array, double* psd_array, int length);
 int recover_hackrf(void);
+void publish_results(double* freq_array, double* psd_array, int length);
+void handle_psd_message(const char *payload);
 
 // =========================================================
-// MAIN LOGIC
+// HELPER IMPLEMENTATIONS
 // =========================================================
+
+void run_cmd(const char *cmd) {
+    printf("[CMD] %s\n", cmd);
+    system(cmd);
+}
+
+// Excludes Loopback (127.0.0.1) and Link-Local (169.254.x.x)
+int get_iface_ip(const char *interface, char *ip) {
+    FILE *fp;
+    char cmd[CMD_BUF];
+    char buffer[IP_BUF] = {0};
+
+    snprintf(cmd, sizeof(cmd), 
+             "ip -o -4 addr show dev %s | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.'", 
+             interface);
+
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        buffer[strcspn(buffer, "\n")] = 0; // Remove newline
+        if (strlen(buffer) > 0) {
+            strcpy(ip, buffer);
+            pclose(fp);
+            return 1; // Success
+        }
+    }
+    pclose(fp);
+    return 0; 
+}
+
+// --- Connection Logic ---
+
+int establish_ppp_connection(char* ip_buffer) {
+    printf("Starting PPP connection...\n");
+    if (get_iface_ip("ppp0", ip_buffer)) return 0;
+
+    run_cmd("sudo pon rnet");
+    sleep(8); 
+
+    if (!get_iface_ip("ppp0", ip_buffer)) {
+        printf("No IP assigned to ppp0! Restarting...\n");
+        run_cmd("sudo poff rnet");
+        sleep(5);
+        run_cmd("sudo pon rnet");
+        sleep(10); 
+
+        if (!get_iface_ip("ppp0", ip_buffer)) {
+            printf("PPP failed. No IP.\n");
+            return -1;
+        }
+    }
+    printf("PPP connected. IP = %s\n", ip_buffer);
+    return 0;
+}
+
+int establish_wlan_connection(char* ip_buffer) {
+    printf("Checking wlan0 connection...\n");
+    if (get_iface_ip("wlan0", ip_buffer)) {
+        printf("WLAN already connected. IP = %s\n", ip_buffer);
+        return 0;
+    }
+
+    printf("WLAN down. Attempting to bring up...\n");
+    run_cmd("sudo ip link set wlan0 up");
+    run_cmd("sudo wpa_cli -i wlan0 reassociate > /dev/null 2>&1");
+    sleep(8); 
+
+    if (!get_iface_ip("wlan0", ip_buffer)) {
+        printf("WLAN failed. Hard resetting interface...\n");
+        run_cmd("sudo ip link set wlan0 down");
+        sleep(2);
+        run_cmd("sudo ip link set wlan0 up");
+        sleep(10); 
+
+        if (!get_iface_ip("wlan0", ip_buffer)) {
+            printf("WLAN failed. No IP assigned.\n");
+            return -1;
+        }
+    }
+    printf("WLAN connected. IP = %s\n", ip_buffer);
+    return 0;
+}
+
+int establish_eth_connection(char* ip_buffer) {
+    printf("Checking eth0 connection...\n");
+    if (get_iface_ip("eth0", ip_buffer)) {
+        printf("Ethernet already connected. IP = %s\n", ip_buffer);
+        return 0;
+    }
+
+    printf("Ethernet down. Restarting link...\n");
+    run_cmd("sudo ip link set eth0 up");
+    sleep(4);
+
+    if (!get_iface_ip("eth0", ip_buffer)) {
+        printf("Ethernet No IP. Forcing DHCP...\n");
+        run_cmd("sudo dhclient -r eth0"); 
+        usleep(500000);
+        run_cmd("sudo dhclient -v eth0");
+        sleep(6);
+
+        if (!get_iface_ip("eth0", ip_buffer)) {
+            printf("Ethernet failed. Check cable?\n");
+            return -1;
+        }
+    }
+    printf("Ethernet connected. IP = %s\n", ip_buffer);
+    return 0;
+}
+
+// --- Config Logic ---
+
+void print_desired(const DesiredCfg_t *cfg) {
+    printf("  [CFG] Freq: %" PRIu64 " | RBW: %d | Scale: %s\n", 
+           cfg->center_freq, cfg->rbw, cfg->scale ? cfg->scale : "dBm");
+}
+
+int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg) {
+    double enbw_factor = get_window_enbw_factor(desired.window_type);
+    double required_nperseg_val = enbw_factor * (double)desired.sample_rate / (double)desired.rbw;
+    int exponent = (int)ceil(log2(required_nperseg_val));
+    
+    psd_cfg->nperseg = (int)pow(2, exponent);
+    psd_cfg->noverlap = psd_cfg->nperseg * desired.overlap;
+    psd_cfg->window_type = desired.window_type;
+    psd_cfg->sample_rate = desired.sample_rate;
+
+    hack_cfg->sample_rate = desired.sample_rate;
+    hack_cfg->center_freq = desired.center_freq;
+    hack_cfg->amp_enabled = desired.amp_enabled;
+    hack_cfg->lna_gain = desired.lna_gain;
+    hack_cfg->vga_gain = desired.vga_gain;
+    hack_cfg->ppm_error = desired.ppm_error;
+
+    rb_cfg->total_bytes = (size_t)(desired.sample_rate * 2);
+    rb_cfg->rb_size = (int)(rb_cfg->total_bytes * 2);
+    return 0;
+}
+
+// --- GPS Logic ---
+
+bool is_valid_gps_data(const char* lat_str, const char* lon_str) {
+    if (!lat_str || !lon_str) return false;
+    if (strlen(lat_str) < 1 || strlen(lon_str) < 1) return false;
+
+    char *endptr_lat, *endptr_lon;
+    double lat = strtod(lat_str, &endptr_lat);
+    double lon = strtod(lon_str, &endptr_lon);
+
+    if (lat_str == endptr_lat || lon_str == endptr_lon) return false;
+    if (lat < -90.0 || lat > 90.0) return false;
+    if (lon < -180.0 || lon > 180.0) return false;
+    if (fabs(lat) < 0.0001 && fabs(lon) < 0.0001) return false;
+
+    return true;
+}
+
+void *gps_monitor_thread(void *arg) {
+    char *api_url = (char *)arg;
+    printf("[GPS-THREAD] Started. Reporting to: %s\n", api_url);
+
+    while (!stop_streaming) {
+        if (api_url != NULL) {
+            // Note: GPSInfo is a global structure updated by GPS ISR/Driver
+            if (is_valid_gps_data(GPSInfo.Latitude, GPSInfo.Longitude)) {
+                post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
+            } else {
+                printf("[GPS-THREAD] WARN: Waiting for valid fix...\n");
+            }
+        }
+        sleep(10);
+    }
+    return NULL;
+}
+
+// --- Hardware Callbacks ---
+
+int rx_callback(hackrf_transfer* transfer) {
+    if (stop_streaming) return -1;
+    rb_write(&rb, transfer->buffer, transfer->valid_length);
+    return 0;
+}
+
+int recover_hackrf(void) {
+    printf("\n[RECOVERY] Initiating Hardware Reset sequence...\n");
+    if (device != NULL) {
+        hackrf_stop_rx(device);
+        usleep(100000);
+        hackrf_close(device);
+        device = NULL;
+    }
+
+    int attempts = 0;
+    while (attempts < 3) {
+        usleep(500000);
+        int status = hackrf_open(&device);
+        if (status == HACKRF_SUCCESS) {
+            printf("[RECOVERY] Device Re-opened successfully.\n");
+            return 0;
+        }
+        attempts++;
+    }
+    return -1;
+}
+
+void publish_results(double* freq_array, double* psd_array, int length) {
+    if (!publisher || !freq_array || !psd_array) return;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "start_freq_hz", freq_array[0] + (double)hack_cfg.center_freq);
+    cJSON_AddNumberToObject(root, "end_freq_hz", freq_array[length-1] + (double)hack_cfg.center_freq);
+    cJSON_AddNumberToObject(root, "bin_count", length);
+
+    cJSON *pxx_array = cJSON_CreateDoubleArray(psd_array, length);
+    cJSON_AddItemToObject(root, "Pxx", pxx_array);
+
+    char *json_string = cJSON_PrintUnformatted(root); 
+    zpub_publish(publisher, "data", json_string);
+    printf("[ZMQ] Published results (%d bins)\n", length);
+
+    free(json_string);
+    cJSON_Delete(root);
+}
+
+void handle_psd_message(const char *payload) {
+    printf("\n>>> [ZMQ] Received Command Payload.\n");
+    free_desired_psd(&desired_config); 
+    memset(&desired_config, 0, sizeof(DesiredCfg_t));
+
+    if (parse_psd_config(payload, &desired_config) == 0) {
+        find_params_psd(desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
+        print_desired(&desired_config);
+        config_received = true; 
+    } else {
+        fprintf(stderr, ">>> [PARSER] Failed to parse JSON configuration.\n");
+    }
+}
+
+// =========================================================
+// MAIN ORCHESTRATION
+// =========================================================
+
 int main() {
     // 1. Hardware Init
     if(init_usart(&LTE) != 0) {
         fprintf(stderr, "Error: LTE Init failed (UART issue)\n");
-        // We continue, as we might still have Ethernet/WiFi, 
-        // but establish_ppp_connection will likely fail later.
     }
     if(init_usart1(&GPS) != 0) {
         fprintf(stderr, "Error: GPS Init failed\n");
@@ -80,29 +345,25 @@ int main() {
 
     printf("=== Network Init (Priority: LTE > Eth > WLAN) ===\n");
 
-    // Priority 1: LTE / PPP
     if (establish_ppp_connection(current_ip) == 0) {
         printf("[NET] Selected LTE Interface (ppp0).\n");
         net_status = 0;
     } 
-    // Priority 2: Ethernet (Fallback)
     else if (establish_eth_connection(current_ip) == 0) {
         printf("[NET] Selected Ethernet Interface (eth0).\n");
         net_status = 0;
     } 
-    // Priority 3: WLAN (Last Resort)
     else if (establish_wlan_connection(current_ip) == 0) {
         printf("[NET] Selected WLAN Interface (wlan0).\n");
         net_status = 0;
     } 
 
-    // 3. Check for Total Failure
     if (net_status != 0) {
         fprintf(stderr, "[CRITICAL] All network interfaces failed. Exiting.\n");
         return 1; 
     }
 
-    // 4. Environment & Threading
+    // 3. Environment & Threading
     char *api_url = getenv_c("API_URL"); 
     pthread_t gps_tid;
     
@@ -111,7 +372,7 @@ int main() {
         pthread_create(&gps_tid, NULL, gps_monitor_thread, (void *)api_url);
     }
 
-    // 5. ZMQ & SDR Init
+    // 4. ZMQ & SDR Init
     zsub_t *sub = zsub_init("acquire", handle_psd_message);
     if (!sub) return 1;
     zsub_start(sub);
@@ -121,12 +382,11 @@ int main() {
 
     if (hackrf_init() != HACKRF_SUCCESS) return 1;
     
-    // Attempt initial open
     if (hackrf_open(&device) != HACKRF_SUCCESS) {
         fprintf(stderr, "[SYSTEM] Warning: Initial Open failed. Will retry in loop.\n");
     }
 
-    // 6. Continuous Loop
+    // 5. Continuous Loop
     int cycle_count = 0;
     bool needs_recovery = false; 
 
