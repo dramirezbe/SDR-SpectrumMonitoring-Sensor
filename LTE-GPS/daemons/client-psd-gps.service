@@ -1,0 +1,23 @@
+[Unit]
+Description=SDR C Main Executable Service PSD/GPS
+After=network.target
+
+[Service]
+
+User=anepi
+
+WorkingDirectory=/home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/
+
+ExecStart=/home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/main
+
+
+Restart=always
+RestartSec=5
+
+
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=sdr-c-logger
+
+[Install]
+WantedBy=multi-user.target
