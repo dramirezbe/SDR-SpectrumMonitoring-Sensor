@@ -21,16 +21,8 @@ def fetch_job(client):
     if not json_payload:
         return {}, resp
 
-    start = json_payload.get("start_freq_hz")
-    end = json_payload.get("end_freq_hz")
-    
-    try:
-        center = ((int(end) - int(start)) / 2) + int(start)
-    except (TypeError, ValueError):
-        return {}, resp
-    
-    # This is the span requested by the User/API
-    desired_span = int(end) - int(start)
+    center = int(json_payload.get("center_freq_hz"))
+    desired_span = int(json_payload.get("span"))
         
     return {
         "center_freq_hz": center,
