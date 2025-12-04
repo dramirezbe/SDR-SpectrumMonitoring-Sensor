@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(ZMQ_Project)
 
-# Find all C and H files in Drivers automatically
+#Find manually compiled libraries
+link_directories(/usr/bin)
+
 file(GLOB DRIVER_SOURCES "Drivers/*.c" "Drivers/*.h" "Modules/*.c" "Modules/*.h")
 
 # Add root directory to includes so "Drivers/zmqsub.h" works

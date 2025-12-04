@@ -19,6 +19,18 @@
 #include "Drivers/sdr_HAL.h"
 #include "Drivers/zmqsub.h"
 #include "Drivers/zmqpub.h"
+#include "Drivers/bacn_gpio.h"
+#include "Drivers/bacn_LTE.h"
+#include "Drivers/bacn_GPS.h"
+
+
+st_uart LTE;
+gp_uart GPS;
+
+GPSCommand GPSInfo;
+
+bool LTE_open = false;
+bool GPS_open = false;
 
 // ----------------------------------------------------------------------
 // Global State & Config

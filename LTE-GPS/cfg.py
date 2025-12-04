@@ -76,28 +76,35 @@ def get_time_ms() -> int:
     return int(time.time() * 1000)
 
 def get_mac() -> str:
-    """Return the Ethernet MAC address of the Linux device."""
+    """Return the Ethernet MAC address of the Linux Wi-Fi device."""
     try:
         import os
 
+        # Prioritize checking for common Wi-Fi interface prefixes
+        wifi_prefixes = ("wlan", "wlp")
+
         for iface in os.listdir("/sys/class/net"):
             path = f"/sys/class/net/{iface}/address"
-            # Skip non-Ethernet or virtual interfaces
-            if iface.startswith(("lo", "sit", "docker", "veth", "vir", "br")):
+
+            # Check if the interface starts with a known Wi-Fi prefix
+            if not iface.startswith(wifi_prefixes):
                 continue
+                
             try:
                 with open(path) as f:
                     mac = f.read().strip()
+                # Ensure the MAC address is not empty or the all-zeros broadcast address
                 if mac and mac != "00:00:00:00:00:00":
                     return mac
             except Exception:
+                # Silently catch file read/access errors
                 pass
 
     except Exception:
+        # Silently catch errors related to os.listdir or import
         pass
 
     return ""
-
 
 # =============================
 # 5. PROJECT PATHS
@@ -131,7 +138,7 @@ for _path in [SAMPLES_DIR, QUEUE_DIR, LOGS_DIR, HISTORIC_DIR]:
 # =============================
 # API URL depends on device_id stored in persistent file
 _device_id = get_persist_var('device_id', PERSIST_FILE)
-API_URL = f"http://{API_IP}:{API_PORT}/api/sensor/"
+API_URL = f"http://rsm.ane.gov.co:1280/api/sensor/"
 
 
 
