@@ -14,6 +14,7 @@
 #include <libhackrf/hackrf.h>
 #include <inttypes.h>
 #include <cjson/cJSON.h>
+#include <ctype.h> // Required for validation logic
 
 // Modules
 #include "Modules/psd.h"
@@ -63,8 +64,40 @@ void publish_results(double* freq_array, double* psd_array, int length);
 int recover_hackrf(void);
 
 // ----------------------------------------------------------------------
-// GPS Send each 10 secs
+// GPS Validation & Thread
 // ----------------------------------------------------------------------
+
+/**
+ * @brief Validates GPS strings to ensure they are real coordinates.
+ * Checks for: NULL, Empty, Non-numeric, Out of Range, and 0.0 (No Fix).
+ */
+bool is_valid_gps_data(const char* lat_str, const char* lon_str) {
+    if (!lat_str || !lon_str) return false;
+    
+    // Check length (needs at least 1 digit)
+    if (strlen(lat_str) < 1 || strlen(lon_str) < 1) return false;
+
+    char *endptr_lat, *endptr_lon;
+    double lat = strtod(lat_str, &endptr_lat);
+    double lon = strtod(lon_str, &endptr_lon);
+
+    // 1. Check if conversion actually consumed characters (valid number)
+    // If *endptr is not the null terminator (and not whitespace), parsing failed or had garbage
+    if (lat_str == endptr_lat || lon_str == endptr_lon) return false;
+
+    // 2. Range Logic
+    // Latitude must be -90 to 90
+    if (lat < -90.0 || lat > 90.0) return false;
+    // Longitude must be -180 to 180
+    if (lon < -180.0 || lon > 180.0) return false;
+
+    // 3. "Null Island" Check
+    // Most GPS modules output 0.0000 when they don't have a fix yet.
+    // We treat (0,0) as invalid unless you are actually in the ocean off Africa.
+    if (fabs(lat) < 0.0001 && fabs(lon) < 0.0001) return false;
+
+    return true;
+}
 
 /**
  * @brief Thread to post GPS data every 10 seconds.
@@ -75,33 +108,34 @@ void *gps_monitor_thread(void *arg) {
 
     printf("[GPS-THREAD] Started. Reporting to: %s\n", api_url);
 
-    while (!stop_streaming) { // Loop until the main program stops
+    while (!stop_streaming) {
         
-        // Check if we have valid URL and non-empty GPS data
-        // We use strlen > 0 to ensure we don't send empty strings if GPS isn't locked yet.
-        if (api_url != NULL && 
-            strlen(GPSInfo.Latitude) > 0 && 
-            strlen(GPSInfo.Longitude) > 0) 
-        {
-            // Debug print (optional)
-            // printf("[GPS-THREAD] Sending: Lat=%s, Lon=%s, Alt=%s\n", 
-            //        GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
+        // Only attempt to send if the URL is valid
+        if (api_url != NULL) {
+            
+            // Validate the current global GPSInfo data
+            if (is_valid_gps_data(GPSInfo.Latitude, GPSInfo.Longitude)) {
+                
+                // Debug: Print the payload that will be sent
+                printf("[GPS-THREAD] Sending Payload: {\"latitude\": \"%s\", \"longitude\": \"%s\", \"altitude\": \"%s\"}\n",
+                       GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
 
-            // Pass strings directly to the utils function
-            int res = post_gps_data(
-                api_url, 
-                GPSInfo.Altitude, 
-                GPSInfo.Latitude, 
-                GPSInfo.Longitude
-            );
+                int res = post_gps_data(
+                    api_url, 
+                    GPSInfo.Altitude, 
+                    GPSInfo.Latitude, 
+                    GPSInfo.Longitude
+                );
 
-            if (res != 0) {
-                fprintf(stderr, "[GPS-THREAD] POST failed (Error code: %d)\n", res);
+                if (res != 0) {
+                    fprintf(stderr, "[GPS-THREAD] POST failed (Error code: %d)\n", res);
+                }
+            } 
+            else {
+                // WARNING: GPS is available but data is invalid or not locked yet
+                printf("[GPS-THREAD] WARN: Waiting for valid fix (Lat: '%s', Lon: '%s', Alt: '%s'). Retrying in 10s...\n", 
+                       GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
             }
-        } 
-        else if (api_url != NULL) {
-            // Optional: Print a warning if GPS data is missing
-            // printf("[GPS-THREAD] Waiting for GPS lock...\n");
         }
 
         sleep(10); // Wait 10 seconds
@@ -259,6 +293,13 @@ int main() {
         return -1;
     }
 
+    sleep(5);
+    system("sudo pon rnet");
+    sleep(5);
+    system("sudo poff rnet");
+    sleep(5);
+    system("sudo pon rnet");
+
     // -------------------------------------------------
     // 2. Load Environment Variables (Using utils module)
     // -------------------------------------------------
@@ -270,25 +311,22 @@ int main() {
     }
 
     // -------------------------------------------------
-    // NEW: LAUNCH GPS THREAD
+    // 3. System Initialization
     // -------------------------------------------------
-    /**
-    pthread_t gps_tid;
     
+    // START GPS THREAD
+    pthread_t gps_tid;
     if (api_url != NULL) {
-        // Create the thread passing the URL string
         int ret = pthread_create(&gps_tid, NULL, gps_monitor_thread, (void *)api_url);
         if (ret != 0) {
             fprintf(stderr, "Error: Failed to create GPS thread\n");
+        } else {
+            printf("[SYSTEM] GPS Monitor Thread Launched.\n");
         }
     } else {
         printf("[SYSTEM] Warning: No API_URL. GPS thread disabled.\n");
     }
-    */
-
-    // -------------------------------------------------
-    // 3. System Initialization
-    // -------------------------------------------------
+    
     char *input_topic = "acquire";
     int cycle_count = 0;
     bool needs_recovery = false; 
