@@ -55,45 +55,121 @@ void run_cmd(const char *cmd) {
     system(cmd);
 }
 
-int get_ppp_ip(char *ip) {
+// FIXED: Now excludes Loopback (127.0.0.1) and Link-Local (169.254.x.x)
+int get_iface_ip(const char *interface, char *ip) {
     FILE *fp;
-    char cmd[] = "ip -o -4 addr show dev ppp0 | awk '{print $4}' | cut -d/ -f1";
+    char cmd[CMD_BUF];
     char buffer[IP_BUF] = {0};
+
+    // This command gets the IP, but 'grep -v' filters out 127.0.0.1 and 169.254.*
+    snprintf(cmd, sizeof(cmd), 
+             "ip -o -4 addr show dev %s | awk '{print $4}' | cut -d/ -f1 | grep -v '^127\\.' | grep -v '^169\\.254\\.'", 
+             interface);
 
     fp = popen(cmd, "r");
     if (!fp) return 0;
 
     if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        buffer[strcspn(buffer, "\n")] = 0;
+        buffer[strcspn(buffer, "\n")] = 0; // Remove newline
         if (strlen(buffer) > 0) {
             strcpy(ip, buffer);
             pclose(fp);
-            return 1;
+            return 1; // Success: Real Internet IP found
         }
     }
     pclose(fp);
-    return 0;
+    return 0; // Failed or only invalid IPs found
 }
 
-// Moves the messy connection logic out of main
+// ----------------------------------------------------------------------
+// Connection Logic
+// ----------------------------------------------------------------------
+
 int establish_ppp_connection(char* ip_buffer) {
     printf("Starting PPP connection...\n");
+    
+    // Check if already connected first to save time
+    if (get_iface_ip("ppp0", ip_buffer)) return 0;
+
     run_cmd("sudo pon rnet");
-    sleep(5); 
+    sleep(8); // PPP takes a bit longer to negotiate
 
-    if (!get_ppp_ip(ip_buffer)) {
-        printf("No IP address assigned! Restarting PPP...\n");
+    if (!get_iface_ip("ppp0", ip_buffer)) {
+        printf("No IP assigned to ppp0! Restarting...\n");
         run_cmd("sudo poff rnet");
-        sleep(10);
-        run_cmd("sudo pon rnet");
         sleep(5);
+        run_cmd("sudo pon rnet");
+        sleep(10); // Give it more time
 
-        if (!get_ppp_ip(ip_buffer)) {
-            printf("PPP failed again. No IP assigned.\n");
+        if (!get_iface_ip("ppp0", ip_buffer)) {
+            printf("PPP failed. No IP.\n");
             return -1;
         }
     }
     printf("PPP connected. IP = %s\n", ip_buffer);
+    return 0;
+}
+
+int establish_wlan_connection(char* ip_buffer) {
+    printf("Checking wlan0 connection...\n");
+    
+    if (get_iface_ip("wlan0", ip_buffer)) {
+        printf("WLAN already connected. IP = %s\n", ip_buffer);
+        return 0;
+    }
+
+    printf("WLAN down. Attempting to bring up...\n");
+    run_cmd("sudo ip link set wlan0 up");
+    
+    // REQUIRED: Trigger wpa_supplicant re-scan if the daemon is running
+    // This tells the OS "Hey, look for known networks again"
+    run_cmd("sudo wpa_cli -i wlan0 reassociate > /dev/null 2>&1");
+    
+    sleep(8); 
+
+    if (!get_iface_ip("wlan0", ip_buffer)) {
+        printf("WLAN failed. Hard resetting interface...\n");
+        run_cmd("sudo ip link set wlan0 down");
+        sleep(2);
+        run_cmd("sudo ip link set wlan0 up");
+        sleep(10); // Wait for DHCP
+
+        if (!get_iface_ip("wlan0", ip_buffer)) {
+            printf("WLAN failed. No IP assigned.\n");
+            return -1;
+        }
+    }
+    printf("WLAN connected. IP = %s\n", ip_buffer);
+    return 0;
+}
+
+int establish_eth_connection(char* ip_buffer) {
+    printf("Checking eth0 connection...\n");
+
+    if (get_iface_ip("eth0", ip_buffer)) {
+        printf("Ethernet already connected. IP = %s\n", ip_buffer);
+        return 0;
+    }
+
+    printf("Ethernet down. Restarting link...\n");
+    run_cmd("sudo ip link set eth0 up");
+    sleep(4);
+
+    if (!get_iface_ip("eth0", ip_buffer)) {
+        printf("Ethernet No IP. Forcing DHCP...\n");
+        // -r releases, -v gets new one. 
+        // Note: This might conflict if NetworkManager is running, but acts as a good force-override
+        run_cmd("sudo dhclient -r eth0"); 
+        usleep(500000);
+        run_cmd("sudo dhclient -v eth0");
+        sleep(6);
+
+        if (!get_iface_ip("eth0", ip_buffer)) {
+            printf("Ethernet failed. Check cable?\n");
+            return -1;
+        }
+    }
+    printf("Ethernet connected. IP = %s\n", ip_buffer);
     return 0;
 }
 

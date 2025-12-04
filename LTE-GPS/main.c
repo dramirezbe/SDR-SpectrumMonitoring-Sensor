@@ -14,9 +14,9 @@
 #include <libhackrf/hackrf.h>
 #include <inttypes.h>
 
-// --- MISSING HEADERS ADDED HERE ---
-#include "Modules/utils.h"       // Required for getenv_c
-#include "Drivers/sdr_HAL.h"     // Required for SDR_cfg_t and hackrf_apply_cfg
+// --- HEADERS ---
+#include "Modules/utils.h"       
+#include "Drivers/sdr_HAL.h"     
 
 // Common Types
 #include "Modules/psd.h"
@@ -38,16 +38,21 @@ extern zpub_t *publisher;
 extern volatile bool stop_streaming;
 extern volatile bool config_received;
 
-// These structs require the headers included above to be known
 extern DesiredCfg_t desired_config;
 extern PsdConfig_t psd_cfg;
 extern SDR_cfg_t hack_cfg; 
 extern RB_cfg_t rb_cfg;
 
+#ifndef IP_BUF
+#define IP_BUF 64
+#endif
+
 // =========================================================
 // MANUAL PROTOTYPES (Functions defined in functions.c)
 // =========================================================
 int establish_ppp_connection(char* ip_buffer);
+int establish_wlan_connection(char* ip_buffer);
+int establish_eth_connection(char* ip_buffer);
 void* gps_monitor_thread(void *arg);
 void handle_psd_message(const char *payload);
 int rx_callback(hackrf_transfer* transfer);
@@ -60,20 +65,44 @@ int recover_hackrf(void);
 int main() {
     // 1. Hardware Init
     if(init_usart(&LTE) != 0) {
-        fprintf(stderr, "Error: LTE Init failed\n");
-        return -1;
+        fprintf(stderr, "Error: LTE Init failed (UART issue)\n");
+        // We continue, as we might still have Ethernet/WiFi, 
+        // but establish_ppp_connection will likely fail later.
     }
     if(init_usart1(&GPS) != 0) {
         fprintf(stderr, "Error: GPS Init failed\n");
         return -1;
     }
 
-    // 2. Internet Connection
-    char ip[64];
-    if (establish_ppp_connection(ip) != 0) return 1;
+    // 2. Internet Connection (Priority: LTE -> Eth -> WLAN)
+    char current_ip[IP_BUF] = {0};
+    int net_status = -1;
 
-    // 3. Environment & Threading
-    // getenv_c requires "Modules/utils.h"
+    printf("=== Network Init (Priority: LTE > Eth > WLAN) ===\n");
+
+    // Priority 1: LTE / PPP
+    if (establish_ppp_connection(current_ip) == 0) {
+        printf("[NET] Selected LTE Interface (ppp0).\n");
+        net_status = 0;
+    } 
+    // Priority 2: Ethernet (Fallback)
+    else if (establish_eth_connection(current_ip) == 0) {
+        printf("[NET] Selected Ethernet Interface (eth0).\n");
+        net_status = 0;
+    } 
+    // Priority 3: WLAN (Last Resort)
+    else if (establish_wlan_connection(current_ip) == 0) {
+        printf("[NET] Selected WLAN Interface (wlan0).\n");
+        net_status = 0;
+    } 
+
+    // 3. Check for Total Failure
+    if (net_status != 0) {
+        fprintf(stderr, "[CRITICAL] All network interfaces failed. Exiting.\n");
+        return 1; 
+    }
+
+    // 4. Environment & Threading
     char *api_url = getenv_c("API_URL"); 
     pthread_t gps_tid;
     
@@ -82,7 +111,7 @@ int main() {
         pthread_create(&gps_tid, NULL, gps_monitor_thread, (void *)api_url);
     }
 
-    // 4. ZMQ & SDR Init
+    // 5. ZMQ & SDR Init
     zsub_t *sub = zsub_init("acquire", handle_psd_message);
     if (!sub) return 1;
     zsub_start(sub);
@@ -97,7 +126,7 @@ int main() {
         fprintf(stderr, "[SYSTEM] Warning: Initial Open failed. Will retry in loop.\n");
     }
 
-    // 5. Continuous Loop
+    // 6. Continuous Loop
     int cycle_count = 0;
     bool needs_recovery = false; 
 
@@ -120,9 +149,7 @@ int main() {
         rb_init(&rb, rb_cfg.rb_size);
         stop_streaming = false;
 
-        // hackrf_apply_cfg requires "Drivers/sdr_HAL.h"
         hackrf_apply_cfg(device, &hack_cfg);
-        
         hackrf_start_rx(device, rx_callback, NULL);
 
         // C. Wait for Buffer Fill
