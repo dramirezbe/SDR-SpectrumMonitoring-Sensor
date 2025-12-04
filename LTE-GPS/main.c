@@ -63,6 +63,40 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
 void publish_results(double* freq_array, double* psd_array, int length);
 int recover_hackrf(void);
 
+//LTE connection internet
+#define CMD_BUF 256
+#define IP_BUF 64
+
+// Run a shell command and get output
+void run_cmd(const char *cmd) {
+    printf("[CMD] %s\n", cmd);
+    system(cmd);
+}
+
+// Get PPP0 IP address
+int get_ppp_ip(char *ip) {
+    FILE *fp;
+    char cmd[] = "ip -o -4 addr show dev ppp0 | awk '{print $4}' | cut -d/ -f1";
+    char buffer[IP_BUF] = {0};
+
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        // Remove newline
+        buffer[strcspn(buffer, "\n")] = 0;
+        if (strlen(buffer) > 0) {
+            strcpy(ip, buffer);
+            pclose(fp);
+            return 1;
+        }
+    }
+
+    pclose(fp);
+    return 0;
+}
+
+
 // ----------------------------------------------------------------------
 // GPS Validation & Thread
 // ----------------------------------------------------------------------
@@ -293,12 +327,27 @@ int main() {
         return -1;
     }
 
-    sleep(5);
-    system("sudo pon rnet");
-    sleep(5);
-    system("sudo poff rnet");
-    sleep(5);
-    system("sudo pon rnet");
+    char ip[IP_BUF];
+    printf("Starting PPP connection...\n");
+    run_cmd("sudo pon rnet");
+    sleep(5); // allow time for ppp to start
+
+    if (!get_ppp_ip(ip)) {
+        printf("No IP address assigned! Restarting PPP...\n");
+
+        run_cmd("sudo poff rnet");
+        sleep(10);
+
+        run_cmd("sudo pon rnet");
+        sleep(5);
+
+        if (!get_ppp_ip(ip)) {
+            printf("PPP failed again. No IP assigned.\n");
+            return 1;
+        }
+    }
+
+    printf("PPP connected. IP = %s\n", ip);
 
     // -------------------------------------------------
     // 2. Load Environment Variables (Using utils module)
