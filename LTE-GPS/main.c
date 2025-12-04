@@ -70,10 +70,6 @@ RB_cfg_t rb_cfg = {0};
 // FUNCTION PROTOTYPES (Forward Declarations)
 // =========================================================
 void run_cmd(const char *cmd);
-int get_iface_ip(const char *interface, char *ip);
-int establish_ppp_connection(char* ip_buffer);
-int establish_wlan_connection(char* ip_buffer);
-int establish_eth_connection(char* ip_buffer);
 void print_desired(const DesiredCfg_t *cfg);
 int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg);
 bool is_valid_gps_data(const char* lat_str, const char* lon_str);
