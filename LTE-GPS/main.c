@@ -37,9 +37,7 @@
 // DEFINITIONS & MACROS
 // =========================================================
 #define CMD_BUF 256
-#ifndef IP_BUF
 #define IP_BUF 64
-#endif
 
 // =========================================================
 // GLOBAL VARIABLES (Formerly External)
@@ -302,7 +300,32 @@ int main() {
     }
 
     //Here internet
+    char ip[IP_BUF];
     
+    printf("Starting PPP connection...\n");
+    run_cmd("sudo pon rnet");
+
+    sleep(5); //allow time for ppp to start
+
+    if(get_eth_ip(ip)) {
+    	printf("IP address assignet to ethernet\n");
+    } else if(get_wlan_ip(ip)) {
+    	printf("IP address assigned to WiFi\n");
+    } else {
+	while(!get_ppp_ip(ip)) {
+        	printf("No ip address assigned! Restarting PPP...\n");
+
+        	run_cmd("sudo poff rnet");
+                sleep(10);
+                run_cmd("sudo pon rnet");
+                sleep(10);
+
+                if(!get_ppp_ip(ip)) {
+			printf("PPP failed again. No IP assigned.\n");
+                }
+        }
+        printf("PPP conected. IP = %s\n",ip);
+    }
 
     // 3. Environment & Threading
     char *api_url = getenv_c("API_URL"); 
