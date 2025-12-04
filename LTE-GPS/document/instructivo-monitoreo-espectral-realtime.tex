@@ -25,13 +25,29 @@
 \section{Introducción}
 Este documento guía paso a paso el proceso para conectar y encender el equipo de monitoreo. El sensor es una unidad diseñada para operar de forma autónoma una vez conectada a la corriente y a la antena.
 
+\subsection{Vista General del Equipo}
+A continuación se presenta una vista general del dispositivo ensamblado para su identificación.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/sensor/vista-general.jpg}
+    \caption{Vista general del nodo de monitoreo.}
+\end{figure}
+
+\subsection{Componentes Internos y Conectividad}
 Componentes principales del equipo:
 \begin{itemize}
     \item \textbf{Unidad Principal:} Computador interno (Raspberry Pi 5).
     \item \textbf{Radio:} Receptor interno para capturar señales.
-    \item \textbf{Conectividad:} Módulo 4G/LTE y GPS integrado.
+    \item \textbf{Conectividad:} Módulo 4G/LTE (tarjeta SIM) y GPS integrado.
     \item \textbf{Puertos:} Conectores para antenas externas.
 \end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{img/sensor/vista-interna.jpg}
+    \caption{Vista interna: Ubicación del módulo de comunicaciones y ranura SIM.}
+\end{figure}
 
 % -------------------------------------------------------------------
 % FASE 1: HARDWARE (Tono Sencillo)
@@ -39,7 +55,13 @@ Componentes principales del equipo:
 \section{Fase 1: Instalación Física}
 
 \subsection{Paso 1: Conexión de Antena y Energía}
-Antes de configurar el software, realice las conexiones físicas en el siguiente orden:
+Antes de configurar el software, realice las conexiones físicas en el siguiente orden. Identifique primero los puertos de conexión del dispositivo:
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{img/sensor/conectores-usb-eth.jpg}
+    \caption{Detalle de conectores: USB-C (Energía) y Ethernet.}
+\end{figure}
 
 \begin{enumerate}
     \item \textbf{Antena:} Enrosque el cable de la antena en el conector del equipo. Por defecto se usa el \textbf{Puerto 1} (el conector de más arriba). Apriételo con la mano suavemente hasta que no gire más.
