@@ -208,20 +208,18 @@ __marimo__/
 
 
 #Tex
-
-**/*.aux
-**/*.fdb_latexmk
-**/*.fls
-**/*.log
-**/*.out
-**/*.synctex.gz
-**/
-**/*.toc
-**/*.nav
-**/*.snm
-**/*.vrb
-**/*.bbl
-**/*.blg
-**/*.dvi
-**/*.lof
-**/*.lot
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.nav
+*.snm
+*.vrb
+*.bbl
+*.blg
+*.dvi
+*.lof
+*.lot
