@@ -10,7 +10,8 @@ deactivate
 
 chmod +x build.sh
 ./build.sh
-chmod +x /home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/main
+chmod +x /home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/rf_app
+chmod +x /home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/gps_lte_app
 
 ```
 
@@ -20,16 +21,10 @@ chmod +x /home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/main
 cd daemons
 ```
 
-for orchestrator:
-
 ```bash
+sudo cp lte-gps-client.service /etc/systemd/system/
+sudo cp rf-client.service /etc/systemd/system/
 sudo cp orchestrator-realtime.service /etc/systemd/system/
-```
-
-for client-psd-gps:
-
-```bash
-sudo cp client-psd-gps.service /etc/systemd/system/
 ```
 
 Install in systemd:
@@ -39,11 +34,13 @@ Install in systemd:
 sudo systemctl daemon-reload
 
 # 2. Enable the service to start automatically on boot
-sudo systemctl enable client-psd-gps.service
+sudo systemctl enable lte-gps-client.service
+sudo systemctl enable rf-client.service
 sudo systemctl enable orchestrator-realtime.service
 
 # 3. Start the service right now
-sudo systemctl start client-psd-gps.service
+sudo systemctl start lte-gps-client.service
+sudo systemctl start rf-client.service
 sudo systemctl start orchestrator-realtime.service
 ```
 

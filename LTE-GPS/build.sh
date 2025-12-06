@@ -1,15 +1,28 @@
 #!/bin/bash
 
-# Always remove build directory first
-rm -rf build
+# Stop the script if any command fails (compilation errors)
+set -e
 
-# Create and enter build directory
+# 1. Clean previous build artifacts
+echo "Cleaning build directory..."
+rm -rf build
+rm -f rf_app
+rm -f gps_lte_app
+
+# 2. Create and enter build directory
 mkdir build
 cd build
 
-# Compile
+# 3. Generate Makefiles and Compile
+echo "Configuring CMake..."
 cmake ..
+
+echo "Compiling..."
 make
 
-# Move executable to root
-mv main ..
+# 4. Move the new executables to the root directory
+echo "Moving executables to project root..."
+mv rf_app ..
+mv gps_lte_app ..
+
+echo "Build Success! Created: ./rf_app and ./gps_lte_app"

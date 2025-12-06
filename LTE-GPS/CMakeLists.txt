@@ -1,40 +1,68 @@
 cmake_minimum_required(VERSION 3.10)
-project(ZMQ_Project C)
+project(RF_LTEGPS_Project C)
 
-# 1. Set C Standard (Recommended for C11/C99 features)
+# 1. Standard Settings
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# 2. Source Management
-# Grab all .c and .h files in subdirectories
-file(GLOB DRIVER_SOURCES 
-    "Drivers/*.c" 
-    "Drivers/*.h" 
-    "Modules/*.c" 
-    "Modules/*.h"
+# --------------------------------------------------------
+# 2. COMMON LIBRARY (Shared Code + Shared Deps)
+# --------------------------------------------------------
+add_library(common_lib STATIC
+    common/bacn_gpio.c
+    common/bacn_gpio.h
 )
 
-# 3. Include Paths
-# This ensures #include "Drivers/zmqsub.h" works from anywhere
-include_directories(${CMAKE_SOURCE_DIR})
+target_include_directories(common_lib PUBLIC common)
 
-# 4. Create Executable
-# IMPORTANT: We explicitly add functions.c here alongside main.c
-add_executable(main 
-    main.c
-    ${DRIVER_SOURCES}
-)
-
-# 5. Libraries
-# Note: I removed link_directories(/usr/bin) as libraries (.so/.a) 
-# are rarely in /bin. Standard libs are found automatically.
-target_link_libraries(main 
-    zmq 
-    pthread 
-    hackrf 
-    m           # Math library (essential for -lm)
-    fftw3       # FFT library (Ensure your Welch method uses this)
+# KEY CHANGE: Use PUBLIC here.
+# This ensures that both rf_app and gps_lte_app automatically 
+# get linked to gpiod, cjson, m (math), and pthread.
+target_link_libraries(common_lib PUBLIC 
     cjson 
-    gpiod       # GPIO Driver
-    curl        # CURL (Ensure your GPS HTTP post uses this)
+    gpiod
+    m           # Math (Standard in both)
+    pthread     # Threads (Standard in both)
+)
+
+
+# --------------------------------------------------------
+# 3. RF PROGRAM (Specific: HackRF, ZMQ, FFTW)
+# --------------------------------------------------------
+file(GLOB RF_LIB_SOURCES "rf/libs/*.c" "rf/libs/*.h")
+
+add_executable(rf_app
+    rf/rf.c
+    ${RF_LIB_SOURCES}
+)
+
+target_include_directories(rf_app PRIVATE rf/libs)
+
+# Only link libraries specific to RF here.
+# (cjson, gpiod, m, and pthread are inherited from common_lib)
+target_link_libraries(rf_app PRIVATE
+    common_lib      
+    zmq             
+    hackrf          
+    fftw3           
+)
+
+
+# --------------------------------------------------------
+# 4. GPS-LTE PROGRAM (Specific: CURL)
+# --------------------------------------------------------
+file(GLOB GPS_LIB_SOURCES "gps-lte/libs/*.c" "gps-lte/libs/*.h")
+
+add_executable(gps_lte_app
+    gps-lte/gps-lte.c
+    ${GPS_LIB_SOURCES}
+)
+
+target_include_directories(gps_lte_app PRIVATE gps-lte/libs)
+
+# Only link libraries specific to GPS/LTE here.
+# (cjson, gpiod, m, and pthread are inherited from common_lib)
+target_link_libraries(gps_lte_app PRIVATE
+    common_lib      
+    curl            
 )

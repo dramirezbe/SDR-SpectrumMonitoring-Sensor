@@ -1,0 +1,23 @@
+[Unit]
+Description=SDR PSD C service  
+After=network.target
+
+[Service]
+
+User=anepi
+
+WorkingDirectory=/home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/
+
+ExecStart=/home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/rf_app
+
+
+Restart=always
+RestartSec=5
+
+
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=rf_logic_ane2
+
+[Install]
+WantedBy=multi-user.target
