@@ -10,21 +10,14 @@ import json
 import argparse
 import time
 from pathlib import Path
-
-from utils import atomic_write_bytes, RequestClient, CampaignHackRF, get_persist_var, modify_persist
 from status_device import StatusDevice
 
-# --- START OF PLOTTING ADDITIONS ---
-import numpy as np
-import matplotlib.pyplot as plt
-# --- END OF PLOTTING ADDITIONS ---
+from utils import atomic_write_bytes, RequestClient, CampaignHackRF, get_persist_var, modify_persist
 
 log = cfg.set_logger()
 HISTORIC_DIR = cfg.PROJECT_ROOT / "Historic"
 
 status_obj = StatusDevice()
-
-# --- HELPER CLASSES/FUNCTIONS ---
 
 class HelpOnErrorParser(argparse.ArgumentParser):
     """Custom parser that prints full help on error."""
@@ -132,51 +125,6 @@ def _delete_oldest_files(dir_path: Path, to_delete: int) -> int:
     return deleted
 
 
-# --- START OF PLOTTING ADDITIONS (MODIFIED) ---
-def save_psd_plot(freqs, Pxx, timestamp, log):
-    """
-    Generate and save a plot of the Power Spectral Density (Pxx) vs. Frequency or Sample Index.
-    """
-    if Pxx is None:
-        log.warning("Cannot plot: Pxx data is missing.")
-        return 2
-
-    try:
-        Pxx = np.array(Pxx)
-        
-        if freqs is not None:
-            # Use actual frequency vector
-            freqs = np.array(freqs)
-            freqs_mhz = freqs / 1e6
-            x_axis = freqs_mhz
-            x_label = 'Frequency (MHz)'
-        else:
-            # Fallback: Use sample index if frequency vector is missing
-            x_axis = np.arange(len(Pxx))
-            x_label = 'Sample Index (Frequency Data Unavailable)'
-            log.warning("Frequency vector 'freqs' is None. Plotting against sample index.")
-        
-        plt.figure(figsize=(10, 6))
-        plt.plot(x_axis, Pxx)
-        plt.title(f'Power Spectral Density (PSD) Acquisition - {timestamp}')
-        plt.xlabel(x_label)
-        plt.ylabel('Power (dBm)')
-        plt.grid(True)
-        plt.tight_layout()
-        
-        # Save the plot with the timestamp in the filename in the current directory
-        plot_path = Path(f"{timestamp}_psd.png")
-        plt.savefig(plot_path)
-        plt.close() # Close the figure to free memory
-        
-        log.info(f"Saved PSD plot to {plot_path}")
-        return 0
-    except Exception as e:
-        log.error(f"Error saving PSD plot: {e}")
-        return 2
-# --- END OF PLOTTING ADDITIONS (MODIFIED) ---
-
-
 def main() -> int:
     """
     Main acquisition and posting routine.
@@ -185,10 +133,8 @@ def main() -> int:
     parser = HelpOnErrorParser(description="RF Campaign Runner")
 
     # Required Core Arguments
-    parser.add_argument("-f1", "--start_freq", type=int, required=True, help="Start Frequency in Hz")
-    parser.add_argument("-f2", "--end_freq", type=int, required=True, help="End Frequency in Hz")
+    parser.add_argument("-f", "--center_freq", type=int, required=True, help="Center Frequency in Hz")
     parser.add_argument("-w", "--resolution", type=int, required=True, help="Resolution Bandwidth (Hz)")
-    parser.add_argument("-p", "--port", type=int, required=True, help="Antenna Port ID")
 
     # Extended Arguments (with defaults just in case, though Orchestrator sends them)
     parser.add_argument("-wi", "--window", type=str, default="hamming", help="FFT Windowing function")

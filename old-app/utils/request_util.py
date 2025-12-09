@@ -3,9 +3,12 @@
 @brief Simple reusable HTTP client helper with rc codes and print-based logging.
 """
 
-import json
 import requests
 from typing import Optional, Tuple, Dict, Any
+import zmq
+import zmq.asyncio
+import json
+import logging
 
 class RequestClient:
     """
@@ -145,3 +148,57 @@ class RequestClient:
             if self._log:
                 self._log.error(f"[HTTP] unexpected error: {e}")
             return 2, None
+        
+# Shared IPC address
+IPC_ADDR = "ipc:///tmp/zmq_feed"
+
+class ZmqPub:
+    def __init__(self, verbose=False, log=logging.getLogger(__name__)):
+        self.verbose = verbose
+        self._log = log
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.PUB)
+        # Bind to IPC address
+        self.socket.bind(IPC_ADDR)
+
+        self._log.info(f"ZmqPub initialized at {IPC_ADDR}")
+        
+
+    def public_client(self, topic: str, payload: dict):
+        json_msg = json.dumps(payload)
+        full_msg = f"{topic} {json_msg}"
+        self.socket.send_string(full_msg)
+        if self.verbose:
+            self._log.info(f"[ZmqPub]Sent: {full_msg}")
+
+    def close(self):
+        self.socket.close()
+        self.context.term()
+
+class ZmqSub:
+    def __init__(self, topic: str, verbose=False, log=logging.getLogger(__name__)):
+        self.verbose = verbose
+        self.topic = topic
+        self._log = log
+        self.context = zmq.asyncio.Context()
+        self.socket = self.context.socket(zmq.SUB)
+        # Connect to IPC address
+        self.socket.connect(IPC_ADDR)
+        self.socket.subscribe(self.topic.encode('utf-8'))
+
+        self._log.info(f"ZmqPub initialized at {IPC_ADDR} with topic {self.topic}")
+
+    async def wait_msg(self):
+        while True:
+            full_msg = await self.socket.recv_string()
+            pub_topic, json_msg = full_msg.split(" ", 1)
+
+            if pub_topic == self.topic:
+                if self.verbose:
+                    print(f"[ZmqSub-{self.topic}] Received: {json_msg}")
+                return json.loads(json_msg)
+
+    def close(self):
+        self.socket.close()
+        self.context.term()
+

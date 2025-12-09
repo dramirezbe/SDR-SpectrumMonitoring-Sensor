@@ -1,137 +1,134 @@
-#!/usr/bin/env bash
-# install.sh - RPi5 distribution installer (improved for PyInstaller + numpy/scipy)
-# - builds fcron from source (same steps)
-# - installs system packages, kalibrate-hackrf, python venv and project build
-set -euo pipefail
+#!/bin/bash
 
-# -------------------------
-# Configuration / variables
-# -------------------------
-PROJECT_ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-SCRIPTS_DIR="$PROJECT_ROOT/cmd"
-VENV_DIR="$PROJECT_ROOT/venv"
-VENV_ACTIVATE="$VENV_DIR/bin/activate"
-HOME_DIR="${HOME:-/root}"
-KALIBRATE_DIR="$HOME_DIR/kalibrate-hackrf"
-MAKE_JOBS="$(command -v nproc >/dev/null 2>&1 && nproc || echo 1)"
-FCRON_VERSION="3.4.0"
-FCRON_TARBALL="fcron-${FCRON_VERSION}.src.tar.gz"
-FCRON_URL="http://fcron.free.fr/archives/${FCRON_TARBALL}"
-TMP_DIR="$(mktemp -d /tmp/install-rpi5.XXXXXX)"
+# ==============================================================================
+# ANE2 Realtime - Installation Script
+# Target: Raspberry Pi 5 (Debian/Bookworm)
+# ==============================================================================
 
-# -------------------------
-# Start
-# -------------------------
-echo "Starting install.sh (project root: $PROJECT_ROOT)"
+set -e  # Exit immediately if a command exits with a non-zero status
 
-# -------------------------
-# Step 1: APT packages (exact list provided)
-# -------------------------
-echo "Updating apt and installing system packages..."
-sudo apt update -y
-sudo apt install -y software-properties-common
+# --- Configuration ---
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="${PROJECT_ROOT}/venv"
+BINARY_PATH="${PROJECT_ROOT}/main"
+DAEMON_DIR="${PROJECT_ROOT}/daemons"
 
-# add deadsnakes PPA
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt update -y && sudo apt upgrade -y
+# --- Colors for Output ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# install packages
-sudo apt-get install -y git make cmake automake libtool libhackrf-dev \
-    hackrf libusb-1.0-0-dev libfftw3-dev build-essential sendmail \
-    libpam0g-dev docbook-utils python3.13-full libpython3.13 \
-    pkg-config
+# --- Helper Functions ---
+log_info() {
+    echo -e "${YELLOW}[INFO]${NC} $1"
+}
 
+log_success() {
+    echo -e "${GREEN}[OK]${NC} $1"
+}
 
-# -------------------------
-# Step 3: Clone & build kalibrate-hackrf
-# -------------------------
-echo "Cloning/building kalibrate-hackrf into $KALIBRATE_DIR"
-if [ -d "$KALIBRATE_DIR/.git" ]; then
-    echo "kalibrate-hackrf repo already exists; updating to origin/HEAD"
-    pushd "$KALIBRATE_DIR" >/dev/null
-    git fetch --all --prune
-    git reset --hard origin/HEAD
-else
-    echo "Cloning repository"
-    git clone https://github.com/scateu/kalibrate-hackrf.git "$KALIBRATE_DIR"
-    pushd "$KALIBRATE_DIR" >/dev/null
-fi
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-if [ -x "./bootstrap" ]; then
-    echo "Running ./bootstrap"
-    ./bootstrap || echo "./bootstrap returned nonzero"
-elif [ -f "./autogen.sh" ]; then
-    echo "Running ./autogen.sh"
-    ./autogen.sh || echo "./autogen.sh returned nonzero"
-else
-    echo "Running autoreconf -iv (if needed)"
-    autoreconf -iv || true
-fi
-
-echo "Running ./configure"
-./configure || echo "./configure returned nonzero (continuing to make)"
-echo "Running make -j$MAKE_JOBS"
-make -j"$MAKE_JOBS"
-if make -n check 2>/dev/null | grep -q "check"; then
-    echo "Running make check"
-    if ! make check; then
-        echo "make check failed — continuing"
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        log_error "Please run this script as root (sudo ./install.sh)"
+        exit 1
     fi
-else
-    echo "No make check target detected; skipping tests"
-fi
+}
 
-echo "Running sudo make install for kalibrate-hackrf"
-sudo make install || echo "sudo make install returned nonzero"
-sudo ldconfig || true
+# --- Main Execution ---
 
-popd >/dev/null
-echo "kalibrate-hackrf step done."
+main() {
+    echo -e "==================================================="
+    echo -e " Starting Installation for ANE2 Realtime System"
+    echo -e "==================================================="
 
-# -------------------------
-# Step 4: Python virtualenv + dependencies (recommended)
-# -------------------------
-echo "Setting up Python virtualenv at $VENV_DIR"
-cd "$PROJECT_ROOT"
-if [ ! -d "$VENV_DIR" ]; then
-    python3.13 -m venv "$VENV_DIR"
-fi
+    # 1. Verify Permissions
+    check_root
 
-if [ ! -f "$VENV_ACTIVATE" ]; then
-    echo "Virtualenv activation script not found at $VENV_ACTIVATE. Exiting."
-    exit 1
-fi
+    # 2. Update and Install System Dependencies
+    log_info "Updating package lists and installing system dependencies..."
+    apt-get update -q
+    apt-get install -y libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv
 
-# shellcheck disable=SC1090
-source "$VENV_ACTIVATE"
-echo "Virtualenv activated"
+    # 3. Setup Python Environment
+    log_info "Setting up Python virtual environment..."
+    if [ ! -d "$VENV_DIR" ]; then
+        python3 -m venv "$VENV_DIR"
+        log_success "Created virtual environment at $VENV_DIR"
+    else
+        log_info "Virtual environment already exists, skipping creation."
+    fi
 
-echo "Upgrading pip and installing build/runtime Python packages"
-pip install --upgrade pip
+    log_info "Installing Python requirements..."
+    # We call the venv pip directly to ensure packages go to the right place
+    "${VENV_DIR}/bin/pip" install --upgrade pip
+    "${VENV_DIR}/bin/pip" install -r "${PROJECT_ROOT}/requirements.txt"
+    log_success "Python dependencies installed."
 
+    # 4. Compile C Code
+    log_info "Building C binaries..."
+    if [ -f "${PROJECT_ROOT}/build.sh" ]; then
+        chmod +x "${PROJECT_ROOT}/build.sh"
+        
+        # Execute build script
+        # We assume build.sh handles its own directory context or is robust
+        (cd "${PROJECT_ROOT}" && ./build.sh)
+        
+        # Ensure the resulting binary is executable
+        if [ -f "$BINARY_PATH" ]; then
+            chmod +x "$BINARY_PATH"
+            log_success "Binary built and permissions set: $BINARY_PATH"
+        else
+            log_error "Binary not found at expected path: $BINARY_PATH"
+            exit 1
+        fi
+    else
+        log_error "build.sh not found in project root."
+        exit 1
+    fi
 
-# If you have a requirements.txt, install it (we still respect user's requirements)
-if [ -f requirements.txt ]; then
-    echo "Installing project requirements from requirements.txt"
-    pip install --no-cache-dir -r requirements.txt
-else
-    echo "requirements.txt not found; skipping pip installs"
-fi
+    # 5. Install Systemd Daemons
+    log_info "Installing systemd services..."
+    
+    SERVICE_1="orchestrator-realtime.service"
+    SERVICE_2="client-psd-gps.service"
 
-# -------------------------
-# Step 5: Call build-all.sh if present
-# -------------------------
-if [ -x "$SCRIPTS_DIR/build-all.sh" ]; then
-    echo "Running project build script: $SCRIPTS_DIR/build-all.sh"
-    "$SCRIPTS_DIR/build-all.sh"
-else
-    echo "Build script $SCRIPTS_DIR/build-all.sh not found or not executable; skipping."
-fi
+    if [ -d "$DAEMON_DIR" ]; then
+        cp "${DAEMON_DIR}/${SERVICE_1}" /etc/systemd/system/
+        cp "${DAEMON_DIR}/${SERVICE_2}" /etc/systemd/system/
+        log_success "Service files copied to /etc/systemd/system/"
+    else
+        log_error "Daemons directory not found at $DAEMON_DIR"
+        exit 1
+    fi
 
-# Deactivate venv cleanly
-deactivate || true
-echo "Virtualenv deactivated"
+    # 6. Enable and Start Services
+    log_info "Reloading systemd daemon..."
+    systemctl daemon-reload
 
-echo "All steps completed successfully."
+    log_info "Enabling and starting services..."
+    
+    # Enable
+    systemctl enable "$SERVICE_1"
+    systemctl enable "$SERVICE_2"
 
-# End of script
+    # Start (Restarting ensures they pick up changes if already running)
+    systemctl restart "$SERVICE_1"
+    systemctl restart "$SERVICE_2"
+
+    log_success "Services started."
+
+    echo -e "==================================================="
+    echo -e "${GREEN} Installation Complete! ${NC}"
+    echo -e "==================================================="
+    echo -e "Check status with:"
+    echo -e "  sudo systemctl status $SERVICE_1"
+    echo -e "  sudo systemctl status $SERVICE_2"
+}
+
+# Run Main
+main

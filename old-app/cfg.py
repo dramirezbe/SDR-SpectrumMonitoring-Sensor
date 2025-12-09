@@ -14,8 +14,9 @@ import sys
 import io
 import traceback
 from typing import Optional, Callable
-from enum import Enum, auto
+from enum import Enum, auto, IntEnum
 from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import dataclass
 
 from utils import get_persist_var
 
@@ -24,12 +25,14 @@ from utils import get_persist_var
 # =============================
 __all__ = [
     "LOG_LEVEL", "VERBOSE", "LOG_FILES_NUM", "PYTHON_EXEC",
-    "API_IP", "API_PORT", "API_URL", "RETRY_DELAY_SECONDS", "API_KEY",  "REALTIME_URL",
-    "DATA_URL", "STATUS_URL", "JOBS_URL",
+    "API_IP", "API_PORT", "API_URL", "RETRY_DELAY_SECONDS", "REALTIME_URL",
+    "DATA_URL", "STATUS_URL", "JOBS_URL", "CAMPAIGNS_INTERVAL_S", "REALTIME_INTERVAL_S",
     "APP_DIR", "PROJECT_ROOT", "SAMPLES_DIR", "QUEUE_DIR", "NTP_SERVER",
     "LOGS_DIR", "HISTORIC_DIR", "PERSIST_FILE",
     "get_time_ms", 
     "KalState",
+    "SysState",
+    "ZmqClients",
     "set_logger",
     "run_and_capture"
 ]
@@ -48,6 +51,10 @@ JOBS_URL = "/jobs"
 REALTIME_URL = "/realtime"
 NTP_SERVER = "pool.ntp.org"
 DEVELOPMENT = True
+
+
+CAMPAIGNS_INTERVAL_S = 60
+REALTIME_INTERVAL_S = 5
 
 RETRY_DELAY_SECONDS = 5
 
@@ -264,69 +271,67 @@ def run_and_capture(func: Callable[[], Optional[int]],
         
     log_file = log_dir / f"{timestamp}_{module_name}.log"
     
-    # Ensure directory exists (redundant safety check)
+    # Ensure directory exists
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    buf_out = io.StringIO()
-    buf_err = io.StringIO()
-
-    orig_stdout = sys.stdout
-    orig_stderr = sys.stderr
-
-    rc = 1
+    # --- 1. Log Rotation (Perform BEFORE execution) ---
+    # We do this first to ensure space is available
     try:
-        tee_out = Tee(orig_stdout, buf_out)
-        tee_err = Tee(orig_stderr, buf_err)
-
-        with redirect_stdout(tee_out), redirect_stderr(tee_err):
-            try:
-                logging.getLogger("SENSOR").info(f"Log file: {log_file.name}")
-                rc = func()
-            except SystemExit as e:
-                rc = e.code if isinstance(e.code, int) else 1
-            except Exception:
-                traceback.print_exc(file=sys.stderr)
-                rc = 1
-
-        out_text = buf_out.getvalue().strip()
-        err_text = buf_err.getvalue().strip()
-        total_words = len(out_text.split()) + len(err_text.split())
-
-        if rc is None:
-            rc = 0
-        elif isinstance(rc, bool):
-            rc = int(rc)
-        elif not isinstance(rc, int):
-            try:
-                rc = int(rc)
-            except Exception:
-                rc = 1
-
-        # Log Rotation
         files = [p for p in log_dir.iterdir() if p.is_file() and p.suffix == ".log"]
         files.sort(key=lambda p: p.stat().st_mtime)
 
         while len(files) >= num_files:
-            files.pop(0).unlink()
-        
-        # Write to file
-        with log_file.open("w", encoding="utf-8") as fh:
-            if total_words == 0:
-                fh.write("[[OK]]\n")
-            else:
-                if out_text:
-                    fh.write(out_text + "\n")
-                if err_text:
-                    fh.write(err_text + "\n")
+            try:
+                files.pop(0).unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-        return rc
+    orig_stdout = sys.stdout
+    orig_stderr = sys.stderr
+    rc = 1
+
+    # --- 2. Stream directly to file ---
+    # buffering=1 means line-buffered (writes to disk every newline)
+    try:
+        with log_file.open("w", encoding="utf-8", buffering=1) as f_log:
+            
+            # The Tee class now writes to Console (Primary) and File (Secondary) immediately
+            tee_out = Tee(orig_stdout, f_log)
+            tee_err = Tee(orig_stderr, f_log)
+
+            with redirect_stdout(tee_out), redirect_stderr(tee_err):
+                try:
+                    logging.getLogger("SENSOR").info(f"Log file: {log_file.name}")
+                    rc = func()
+                except SystemExit as e:
+                    rc = e.code if isinstance(e.code, int) else 1
+                except KeyboardInterrupt:
+                    # Handle Ctrl+C gracefully for infinite loops
+                    rc = 0
+                except Exception:
+                    traceback.print_exc(file=sys.stderr)
+                    rc = 1
+            
+            # --- 3. Empty Log Check ---
+            # If nothing was written (file pointer is at 0), write [[OK]]
+            if f_log.tell() == 0:
+                 f_log.write("[[OK]]\n")
 
     finally:
+        # Restore standard streams
         try:
             sys.stdout = orig_stdout
             sys.stderr = orig_stderr
         except Exception:
             pass
+            
+    # Normalize Return Code
+    if rc is None: return 0
+    if isinstance(rc, bool): return int(rc)
+    if not isinstance(rc, int): return 1
+    return rc
 
 # =============================
 # 9. ENUMS
@@ -334,6 +339,17 @@ def run_and_capture(func: Callable[[], Optional[int]],
 class KalState(Enum):
     KAL_SCANNING = auto()
     KAL_CALIBRATING = auto()
+
+class SysState(Enum):
+    IDLE = auto()
+    CAMPAIGN = auto()
+    REALTIME = auto()
+
+@dataclass
+class ZmqClients:
+    antenna_mux: str = "antenna_mux"
+    realtime: str = "realtime"       
+
 
 
 # =============================

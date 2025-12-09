@@ -47,75 +47,6 @@ def atomic_write_bytes(target_path: Path, data: bytes) -> None:
                 log.warning("Failed to clean up temporary file %s after error: %s", tmp_name, e)
         raise
 
-def get_persist_var(key: str, path: Path) -> Optional[Any]:
-    """
-    Read a variable from the JSON variables file at `path`.
-    Returns the stored value or None if file/key not present or on error.
-    Safe: will create parent directories if missing but will NOT create the file.
-    """
-    try:
-        # Ensure parent dir exists
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        if not path.exists():
-            return None
-
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not isinstance(data, dict):
-            # Log non-dict content and treat as "no value found"
-            log.debug("get_persist_var: file %s exists but is not a JSON object (got %s)", path, type(data).__name__)
-            return None
-
-        return data.get(key)
-
-    except Exception:
-        # Be conservative: don't raise; return None to signal "no value"
-        log.debug("get_persist_var: exception reading %s", path, exc_info=True)
-        return None
-
-
-def modify_persist(key: str, value: Any, path: Path) -> int:
-    """
-    Atomically set `key` to `value` inside JSON file at `path`.
-    - Ensures parent directories exist.
-    - If file doesn't exist, creates it and writes a JSON object with only the provided key.
-    - Does not raise on failure; logs and returns 0 to match 'no error required' policy.
-    """
-    try:
-        # Ensure parent directories exist
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        data = {}
-        if path.exists():
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    data = json.load(f) or {}
-                if not isinstance(data, dict):
-                    # If file exists but isn't a JSON object, start fresh
-                    log.warning("modify_persist: existing file %s is not a JSON object, starting fresh.", path)
-                    data = {}
-            except Exception:
-                # If reading/parsing fails, log and start fresh (we will overwrite file)
-                log.warning("modify_persist: failed to read/parse existing JSON at %s, overwriting.", path, exc_info=True)
-                data = {}
-
-        # Set/replace key
-        data[key] = value
-
-        # Serialize and write atomically
-        payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
-        atomic_write_bytes(path, payload)
-
-        # Always return 0 per policy
-        return 0
-
-    except Exception:
-        # Log the exception but do not propagate error to caller
-        log.exception("modify_persist: unexpected error writing %s", path)
-        return 0
-
 
 @dataclass
 class CronHandler:
@@ -216,9 +147,6 @@ class CronHandler:
 
         return 0
     
-
-
-
 class ElapsedTimer:
     def __init__(self):
         self.end_time = 0

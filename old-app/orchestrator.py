@@ -1,268 +1,195 @@
-#!/usr/bin/env python3
-"""
-@file orchestrator.py
-@brief Retrieves campaign configurations from API and synchronizes them with cron.
-"""
-from __future__ import annotations
+import cfg
+log = cfg.set_logger()
+from utils import ZmqPub, RequestClient, ElapsedTimer
+
 import sys
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+from crontab import CronTab
+from typing import Optional, List
+import time
 
-import cfg
-from utils import RequestClient, CronHandler, modify_persist, get_persist_var
+state = cfg.SysState.IDLE
 
-log = cfg.set_logger()
-RUNNER_PATH = (cfg.APP_DIR / "campaign_runner.py").resolve()
+@dataclass
+class Timeframe:
+    start: int
+    end: int
 
+@dataclass
+class FilterConfig:
+    type: str
+    filter_bw_hz: int
+    order_filter: int
 
 @dataclass
 class Campaign:
     campaign_id: int
     status: str
-    start_freq_hz: int
-    end_freq_hz: int
-    resolution_hz: int
+    center_freq_hz: int
+    rbw_hz: int
+    sample_rate_hz: int
     antenna_port: int
     acquisition_period_s: int
-    timeframe: Dict[str, Any]
-    start: int
-    end: int
-    
-    # New fields
+    span: int
+    scale: str
     window: str
     overlap: float
-    sample_rate_hz: int
     lna_gain: int
     vga_gain: int
     antenna_amp: bool
+    timeframe: Timeframe
+    # Optional field (defaults to None if missing or null)
+    filter: Optional[FilterConfig] = None 
 
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "Campaign":
-        cid = d.get("campaign_id")
-        status = d.get("status")
-        if cid is None or status is None:
-            raise ValueError("Campaign ID and Status are required")
-
-        def req(key: str, type_cast=int):
-            v = d.get(key)
-            if v is None:
-                raise ValueError(f"{key} is required")
-            return type_cast(v)
-
-        # Parse basic params
-        start_freq_hz = req("start_freq_hz")
-        end_freq_hz = req("end_freq_hz")
-        resolution_hz = req("resolution_hz")
-        antenna_port = req("antenna_port")
-        acquisition_period_s = req("acquisition_period_s")
-
-        # Parse detailed stats
-        window = str(d.get("window", "hamming"))
-        overlap = float(d.get("overlap", 0.5))
-        sample_rate_hz = int(d.get("sample_rate_hz", 20000000))
-        lna_gain = int(d.get("lna_gain", 0))
-        vga_gain = int(d.get("vga_gain", 0))
-        antenna_amp = bool(d.get("antenna_amp", False))
-
-        # Parse timeframe
-        timeframe = d.get("timeframe")
-        if not isinstance(timeframe, dict):
-            raise ValueError("Timeframe must be a dictionary")
-        
-        start = int(timeframe.get("start", 0))
-        end = int(timeframe.get("end", 0))
-        if start == 0 or end == 0:
-            raise ValueError("Valid start and end timestamps are required")
-
-        return cls(
-            campaign_id=int(cid),
-            status=str(status),
-            start_freq_hz=start_freq_hz,
-            end_freq_hz=end_freq_hz,
-            resolution_hz=resolution_hz,
-            antenna_port=antenna_port,
-            acquisition_period_s=acquisition_period_s,
-            timeframe=timeframe,
-            start=start,
-            end=end,
-            window=window,
-            overlap=overlap,
-            sample_rate_hz=sample_rate_hz,
-            lna_gain=lna_gain,
-            vga_gain=vga_gain,
-            antenna_amp=antenna_amp,
-        )
-
+    def __post_init__(self):
+        # Auto-convert nested dicts to classes
+        if isinstance(self.timeframe, dict):
+            self.timeframe = Timeframe(**self.timeframe)
+        if isinstance(self.filter, dict):
+            self.filter = FilterConfig(**self.filter)
 
 @dataclass
-class JobsOrchestrator:
-    client: RequestClient
-    _log: Any = log
-    jobs_ep: str = cfg.JOBS_URL
+class JobResponse:
+    campaigns: List[Campaign]
 
-    def fetch_campaigns(self) -> Optional[List[Dict[str, Any]]]:
-        """Fetches the campaigns list from the API."""
-        rc, resp = self.client.get(self.jobs_ep)
-        if rc != 0 or resp is None:
-            self._log.error(f"Failed to fetch jobs: rc={rc}")
-            return None
+    def __post_init__(self):
+        # Auto-convert list of dicts to list of Campaign objects
+        if self.campaigns:
+            self.campaigns = [Campaign(**c) if isinstance(c, dict) else c for c in self.campaigns]
 
-        try:
-            payload = resp.json()
-            self._log.info("Received payload: %s", payload)
-            return payload.get("campaigns", [])
-        except Exception:
-            self._log.exception("Failed to parse JSON response")
-            return None
 
-    def orchestrate(self) -> int:
-        """Main execution flow."""
-        campaign_list = self.fetch_campaigns()
+class CrontabUtil:
+    def __init__(self):
+        self.cron = CronTab(user=True)
+        self.crontab_changed = False
+        self.now = cfg.get_time_ms() #now ms unix
+
+    def _add_job(self, comment, command, minutes):
+        job = self.cron.new(command=command, comment=comment)
+
+        job.minute.every(minutes)
+        job.enable()
+        self._write_crontab()
+        log.info(f"[Crontab] saved job with comment: {comment}")
+
+    def _delete_job(self, comment:str):
+        self.cron.remove_all(comment=comment)
+        self._write_crontab()
+        log.info(f"[Crontab] deleted job with comment: {comment}")
+
+    def _write_crontab(self):
+        if self.crontab_changed:
+            self.cron.write()
+            self.crontab_changed = False
+
+    def is_active_window(self, timeframe_dict:dict) -> bool:
+        # 5 mins (300,000ms) - 10 secs (10,000ms) = 290,000ms
+        offset = 290000
         
-        # If API failure (None), exit with error
-        if campaign_list is None:
-            return 1
-            
-        # If list is empty, treat as empty list to ensure IDLE logic runs
-        if not campaign_list:
-            self._log.info("IDLE: No campaigns found in API.")
-            return self.sync_campaigns([])
-
-        return self.sync_campaigns(campaign_list)
-
-    def sync_campaigns(self, campaigns_data: List[Dict[str, Any]]) -> int:
-        """
-        Syncs the valid campaigns with the CronHandler.
-        Updates persistent mode based on scheduled jobs.
-        """
-        cron = CronHandler(
-            logger=self._log,
-            verbose=cfg.VERBOSE,
-            get_time_ms=cfg.get_time_ms
-        )
-        
-        if cron.cron is None:
-            self._log.error("Failed to load Crontab")
-            return 1
-
-        # Check Global Mode
-        mode_str = get_persist_var("current_mode", cfg.PERSIST_FILE)
-        in_realtime = (mode_str == "realtime")
-        
-        scheduled_count = 0
-        error_count = 0
-
-        for camp_dict in campaigns_data:
-            try:
-                campaign = Campaign.from_dict(camp_dict)
-                scheduled = self._process_single_campaign(campaign, cron, in_realtime)
-                if scheduled:
-                    scheduled_count += 1
-            except ValueError as e:
-                self._log.error(f"Skipping invalid campaign data: {e}")
-                error_count += 1
-                continue
-
-        # Save changes to disk
-        save_rc = cron.save()
-        if save_rc != 0:
-            return save_rc
-
-        # Update System Mode based on outcomes
-        # Logic: "if the sensor is idle and cron add command, so force campaign mode."
-        if not in_realtime:
-            if scheduled_count > 0:
-                # If we scheduled at least one campaign, we force CAMPAIGN mode.
-                # This covers switching from IDLE -> CAMPAIGN.
-                self._log.info(f"Setting mode to CAMPAIGN ({scheduled_count} active)")
-                modify_persist("current_mode", "campaign", cfg.PERSIST_FILE)
-            else:
-                # Logic: "if all status of campaigns are in cancelled or programmed, the sensor must be idle."
-                # If scheduled_count is 0, it means no campaigns were active/in-timeframe.
-                self._log.info("Setting mode to IDLE (No active campaigns)")
-                modify_persist("current_mode", "idle", cfg.PERSIST_FILE)
-
-        return 1 if error_count == len(campaigns_data) and len(campaigns_data) > 0 else 0
-
-    def _process_single_campaign(self, campaign: Campaign, cron: CronHandler, in_realtime: bool) -> bool:
-        """
-        Decides whether to add or erase a specific campaign from cron.
-        Returns True if the campaign was successfully added to cron.
-        """
-        id_val = campaign.campaign_id
-        id_str = str(id_val)
-        
-        # 1. Clean State: Always erase first to ensure clean update or removal
-        # This handles removing campaigns that became 'programmed', 'canceled', or entered 'realtime' mode.
-        cron.erase(comment=id_str)
-
-        # 2. Strict Status Check
-        # Only "active" campaigns are candidates for execution.
-        # "programmed", "canceled", "finished", "error" are all ignored.
-        if campaign.status != "active":
-            self._log.info(f"[SKIP] Campaign {id_str} is '{campaign.status}' (not active)")
-            return False
-
-        # 3. Time Check
-        # "if are campaigns in timeframe interval"
-        if not cron.is_in_activate_time(start=campaign.start, end=campaign.end):
-            self._log.info(f"[SKIP] Campaign {id_str} is not in active time window")
-            return False
-
-        # 4. Realtime Guard
-        # Logic: "are programmed if mode is idle or campaign"
-        # If current_mode is 'realtime', we simply skip scheduling.
-        if in_realtime:
-            self._log.info(f"[SKIP] Campaign {id_str} ignored due to REALTIME mode")
-            return False
-
-        # 5. Generate and Add Command
-        # If we reach here, we are IDLE or CAMPAIGN, and the campaign is ACTIVE and IN TIME.
-        cmd = (
-            f"{cfg.PYTHON_EXEC} "
-            f"{RUNNER_PATH} "
-            f"-f1 {campaign.start_freq_hz} "
-            f"-f2 {campaign.end_freq_hz} "
-            f"-w {campaign.resolution_hz} "
-            f"-p {campaign.antenna_port} "
-            f"-wi {campaign.window} "
-            f"-o {campaign.overlap} "
-            f"-fs {campaign.sample_rate_hz} "
-            f"-l {campaign.lna_gain} "
-            f"-g {campaign.vga_gain} "
-            f"-a {campaign.antenna_amp}"
-        )
-        
-        minutes = int(campaign.acquisition_period_s / 60)
-        if minutes < 1: 
-            minutes = 1 # safety for cron
-
-        self._log.info(f"[ADD] Scheduling active campaign {id_str}")
-        cron.add(command=cmd, comment=id_str, minutes=minutes)
-        
-        # Update persistent ID only if we are actually scheduling it
-        modify_persist("campaign_id", id_val, cfg.PERSIST_FILE)
-        
-        return True
-
-
-def main():
-    # Initialize client
-    client = RequestClient(
-        cfg.API_URL, 
-        timeout=(5, 15), 
-        verbose=cfg.VERBOSE, 
-        logger=log, 
-        api_key=cfg.get_mac()
-    )
+        # Pads the start and end inwards by the offset
+        return (timeframe_dict.start - offset) <= self.now <= (timeframe_dict.end - offset)
     
-    orch_obj = JobsOrchestrator(client=client, _log=log, jobs_ep=cfg.JOBS_URL)
 
-    rc = orch_obj.orchestrate()
-    if rc != 0:
-        log.error(f"Orchestration finished with errors: rc={rc}")
-    return rc
+    def sync_campaigns(self, camp_dict:dict):
+        for c in camp_dict.campaigns:
+            comment = c.campaign_id
+            minutes = int(c.acquisition_period_s / 60)
 
+            delete_reason = ["canceled", "finished", "error"]
+            add_reason = ["active", "scheduled"]
+
+            # Delete job if:
+            if c.status in delete_reason or not self.is_active_window(c.timeframe):
+                self.crontab_changed = True
+                self._delete_job(comment=comment)
+
+            # Add job if:
+            if c.status in add_reason and self.is_active_window(c.timeframe):
+                self.crontab_changed = True
+                self._add_job(comment=comment, command=, minutes=minutes)
+
+
+def send_select_antenna(pub_obj:ZmqPub, num_antenna:int) -> None:
+    pub_obj.public_client(cfg.ZmqClients.antenna_mux, {"select_antenna": num_antenna})
+
+def resend_realtime(pub_obj:ZmqPub, resp):
+    dict_resp = resp.json()
+    pub_obj.public_client(cfg.ZmqClients.realtime, dict_resp)
+
+
+def main() -> int:
+    pub = None
+    client = None
+    state = cfg.SysState.IDLE
+    try:
+        pub = ZmqPub(verbose=cfg.VERBOSE, log=log)
+        client = RequestClient(cfg.API_URL, timeout=(5, 15), verbose=cfg.VERBOSE, logger=log, api_key=cfg.get_mac())
+
+        tim_jobs = ElapsedTimer()
+        tim_jobs.init_count(cfg.CAMPAIGNS_INTERVAL_S)
+
+        tim_realtime = ElapsedTimer()
+        tim_realtime.init_count(cfg.REALTIME_INTERVAL_S)
+
+        while True:
+            try:
+                if tim_realtime.time_elapsed():
+                    tim_realtime.init_count(cfg.REALTIME_INTERVAL_S) # Reset timer immediately
+                    
+                    err, resp = client.get(cfg.REALTIME_URL)
+                    
+                    # 1. Error handling
+                    if err != 0:
+                        log.error(f"Failed to fetch realtime data. rc={err}")
+                        continue
+
+                    # 2. Priority Guard: Do not interrupt if we are busy with a Campaign
+                    if state == cfg.SysState.CAMPAIGN:
+                        if resp:
+                            log.info("Received realtime response while in campaign state, ignoring...")
+                        continue 
+
+                    # 3. Handle Realtime Logic
+                    if resp:
+                        # Server sent data: Switch to Realtime and forward data
+                        state = cfg.SysState.REALTIME
+                        resend_realtime(pub, resp)
+                    else:
+                        # Server sent nothing: Stop Realtime if active, then idle
+                        if state == cfg.SysState.REALTIME:
+                            pub.public_client(cfg.ZmqClients.realtime, {"stop_realtime": True})
+                        state = cfg.SysState.IDLE
+
+                # Job fetching logic remains the same
+                if tim_jobs.time_elapsed():
+                    tim_jobs.init_count(cfg.CAMPAIGNS_INTERVAL_S) # Reset timer immediately
+
+                    err, resp = client.get(cfg.JOBS_URL)
+                    
+                    # 1. Error handling
+                    if err != 0:
+                        log.error(f"Failed to fetch jobs data. rc={err}")
+                        continue
+                    if resp:
+                        jobs_dict = resp.json()
+                        jobs_resp = JobResponse(**jobs_dict)
+                        #Do logic of crontab
+                    
+                time.sleep(0.01)
+
+            except Exception as e:
+                log.error(f"Iteration error: {e}")
+                time.sleep(1) # Prevent CPU spin if constant error
+            except KeyboardInterrupt:
+                log.info("Received KeyboardInterrupt, exiting...")
+
+    except Exception as e:
+        log.error("Failed to start Zmq Pub or RequestClient: %s", e)
+    
+    finally:
+        if pub:
+            pub.close()
+        return 0
 
 if __name__ == "__main__":
     rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
