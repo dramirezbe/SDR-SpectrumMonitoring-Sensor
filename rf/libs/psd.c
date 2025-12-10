@@ -256,6 +256,97 @@ static void fftshift(double* data, int n) {
     memcpy(&data[n - half], temp, half * sizeof(double));
 }
 
+// ======================================================================
+// DC SPIKE REMOVAL HELPERS
+// ======================================================================
+
+static int compare_doubles(const void* a, const void* b) {
+    double arg1 = *(const double*)a;
+    double arg2 = *(const double*)b;
+    if (arg1 < arg2) return -1;
+    if (arg1 > arg2) return 1;
+    return 0;
+}
+
+// Simple pseudo-random number generator (0.0 to 1.0) for noise generation
+// We avoid rand() sometimes to keep it self-contained or reproducible
+static double get_random_uniform() {
+    return (double)rand() / (double)RAND_MAX;
+}
+
+/**
+ * @brief Removes DC spike by replacing it with synthesized noise.
+ * 1. Calculates Median of immediate neighbors (5 left, 5 right).
+ * 2. Calculates the variance (amplitude range) of those neighbors.
+ * 3. Fills the spike gap with Median + Random_Noise.
+ */
+static void remove_dc_spike(double* p_out, int nfft) {
+    if (!p_out || nfft < 64) return; 
+
+    int index_dc = nfft / 2;
+    // The gap to fill (the spike itself)
+    int spike_width = 5; 
+    
+    // The reference window size (how many neighbors to analyze)
+    // You requested "take 5 values left and right"
+    int ref_width = 5; 
+
+    // Indices for the "Gap" (The part we overwrite)
+    int gap_start = index_dc - spike_width;
+    int gap_end   = index_dc + spike_width + 1;
+
+    // Indices for the "Reference" (The neighbors we analyze)
+    int left_ref_start  = gap_start - ref_width;
+    int right_ref_end   = gap_end + ref_width;
+
+    // Bounds checking
+    if (left_ref_start < 0 || right_ref_end > nfft) return;
+
+    // Collect reference samples to find median and noise range
+    int ref_count = ref_width * 2;
+    double* ref_samples = (double*)alloca(ref_count * sizeof(double));
+    
+    int k = 0;
+    // Left neighbors
+    for (int i = left_ref_start; i < gap_start; i++) {
+        ref_samples[k++] = p_out[i];
+    }
+    // Right neighbors
+    for (int i = gap_end; i < right_ref_end; i++) {
+        ref_samples[k++] = p_out[i];
+    }
+
+    // 1. Calculate Median (Base level)
+    // We sort the reference samples to find the median
+    // (We duplicate the array first if we want to preserve order for variance calc, 
+    // but here order doesn't matter for variance of the set).
+    qsort(ref_samples, ref_count, sizeof(double), compare_doubles);
+    
+    double median_val;
+    if (ref_count % 2 == 0) {
+        median_val = (ref_samples[ref_count/2 - 1] + ref_samples[ref_count/2]) / 2.0;
+    } else {
+        median_val = ref_samples[ref_count/2];
+    }
+
+    // 2. Estimate Noise Amplitude (Range)
+    // A simple way to estimate noise "fuzziness" is Interquartile Range or Min/Max.
+    // Let's use the range of the reference samples we just sorted.
+    // To be safe against outliers, we can take the difference between the 
+    // 80th percentile and 20th percentile, or just Max - Min if n is small (10 samples).
+    double min_ref = ref_samples[0];
+    double max_ref = ref_samples[ref_count - 1];
+    double noise_range = max_ref - min_ref;
+
+    // 3. Fill the Gap with "Textured" Noise
+    // We replace the spike with: Median + (Random(-0.5 to 0.5) * NoiseRange)
+    // This reconstructs the noise floor visually.
+    for (int i = gap_start; i < gap_end; i++) {
+        double random_factor = get_random_uniform() - 0.5; // Range -0.5 to 0.5
+        p_out[i] = median_val + (random_factor * noise_range);
+    }
+}
+
 void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, double* f_out, double* p_out) {
     double complex* signal = signal_data->signal_iq;
     size_t n_signal = signal_data->n_signal;
@@ -300,16 +391,9 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
 
     fftshift(p_out, nfft);
 
-    // --- DC SPIKE REMOVAL ---
-    // Flatten center 7 bins (indices -3 to +3 relative to DC)
-    // Replace them with the average of the neighbors at -4 and +4
-    int c = nfft / 2; 
-    if (nfft > 8) {
-        double neighbor_mean = (p_out[c - 4] + p_out[c + 4]) / 2.0;
-        for (int i = -3; i <= 3; i++) {
-            p_out[c + i] = neighbor_mean;
-        }
-    }
+    // --- UPDATED DC SPIKE REMOVAL ---
+    remove_dc_spike(p_out, nfft);
+    // --------------------------------
 
     double df = fs / nfft;
     for (int i = 0; i < nfft; i++) {
