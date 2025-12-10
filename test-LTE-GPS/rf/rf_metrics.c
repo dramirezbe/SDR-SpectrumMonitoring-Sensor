@@ -30,7 +30,7 @@
 #include "ring_buffer.h" 
 #include "zmqsub.h"
 #include "zmqpub.h"
-#include "bacn_gpio.h"
+
 
 // =========================================================
 // METRICS DEFINITIONS & GLOBALS
@@ -229,73 +229,13 @@ void log_to_csv(SystemMetrics_t *m, DesiredCfg_t *cfg, int psd_len) {
 // CONFIG LOGIC & PARSING
 // =========================================================
 
+
 void print_desired(const DesiredCfg_t *cfg) {
     printf("  [CFG] Freq: %" PRIu64 " | RBW: %d | Scale: %s\n", 
            cfg->center_freq, cfg->rbw, cfg->scale ? cfg->scale : "dBm");
 }
 
-int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
-    if (json_string == NULL || target == NULL) return -1;
 
-    cJSON *root = cJSON_Parse(json_string);
-    if (root == NULL) {
-        const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL) fprintf(stderr, "Error before: %s\n", error_ptr);
-        return -1;
-    }
-
-    // 1. Center Freq
-    cJSON *cf = cJSON_GetObjectItemCaseSensitive(root, "center_freq_hz");
-    if (cJSON_IsNumber(cf)) target->center_freq = (uint64_t)cf->valuedouble;
-    else target->center_freq = 0;
-
-    // 2. RBW
-    cJSON *rbw = cJSON_GetObjectItemCaseSensitive(root, "rbw_hz");
-    if (cJSON_IsNumber(rbw)) target->rbw = (int)rbw->valuedouble;
-
-    // 3. Sample Rate
-    cJSON *sample_rate_json = cJSON_GetObjectItemCaseSensitive(root, "sample_rate_hz");
-    if (cJSON_IsNumber(sample_rate_json)) target->sample_rate = sample_rate_json->valuedouble;
-
-    // 4. Span
-    cJSON *span_json = cJSON_GetObjectItemCaseSensitive(root, "span");
-    if (cJSON_IsNumber(span_json)) target->span = span_json->valuedouble;
-
-    // 5. Overlap
-    cJSON *overlap_json = cJSON_GetObjectItemCaseSensitive(root, "overlap");
-    if (cJSON_IsNumber(overlap_json)) target->overlap = overlap_json->valuedouble;
-
-    // 6. Scale
-    cJSON *scale = cJSON_GetObjectItemCaseSensitive(root, "scale");
-    if (cJSON_IsString(scale) && (scale->valuestring != NULL)) {
-        target->scale = strdup(scale->valuestring);
-    } else {
-        target->scale = NULL;
-    }
-
-    // 7. Window
-    cJSON *win = cJSON_GetObjectItemCaseSensitive(root, "window");
-    if (cJSON_IsString(win)) {
-        target->window_type = get_window_type_from_string(win->valuestring);
-    } else {
-        target->window_type = RECTANGULAR_TYPE;
-    }
-
-    // 8. Gains
-    cJSON *lna = cJSON_GetObjectItemCaseSensitive(root, "lna_gain");
-    if (cJSON_IsNumber(lna)) target->lna_gain = (int)lna->valuedouble;
-
-    cJSON *vga = cJSON_GetObjectItemCaseSensitive(root, "vga_gain");
-    if (cJSON_IsNumber(vga)) target->vga_gain = (int)vga->valuedouble;
-
-    // 9. Amp
-    cJSON *amp = cJSON_GetObjectItemCaseSensitive(root, "antenna_amp");
-    if (cJSON_IsBool(amp)) target->amp_enabled = cJSON_IsTrue(amp);
-
-    target->ppm_error = 0;
-    cJSON_Delete(root);
-    return 0;
-}
 
 int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg) {
     double enbw_factor = get_window_enbw_factor(desired.window_type);
@@ -408,7 +348,6 @@ int main() {
         fprintf(stderr, "[SYSTEM] Warning: Initial Open failed. Will retry in loop.\n");
     }
 
-    select_ANTENNA(1);
 
     // 3. Continuous Loop
     bool needs_recovery = false; 

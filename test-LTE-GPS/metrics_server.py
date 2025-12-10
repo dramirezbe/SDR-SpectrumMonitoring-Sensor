@@ -162,59 +162,91 @@ async def run_server():
 
     await asyncio.sleep(0.5)
     client = RequestClient(cfg.API_URL, verbose=True, logger=log)
-    
+
+    # >>>  estado de streaming <<<
+    current_cfg = None         # última configuración válida recibida del API
+    streaming_enabled = False  # indica si debemos seguir adquiriendo en loop
+
     while True:
         try:
             log.info("Fetching job configuration...")
-            
-            # 1. Fetch Job (Returns dict, response object, and duration)
+
+            # 1. Intentar traer configuración del API
             json_dict, resp, fetch_time_ms = fetch_job(client)
 
             if resp is None or resp.status_code != 200 or not json_dict:
-                log.warning("Fetch failed or empty. Retrying in 5s...")
-                await asyncio.sleep(5)
+                # No hay configuración nueva o hubo error HTTP.
+                # NO cambiamos el estado de streaming, solo lo reportamos.
+                log.warning(
+                    f"Fetch failed or empty (rc={getattr(resp, 'status_code', None)}). "
+                    f"Streaming enabled: {streaming_enabled}"
+                )
+            else:
+                # Hay alguna configuración. Revisamos el span.
+                desired_span = int(json_dict.get("span", 0))
+
+                if desired_span <= 0:
+                    # Interpretamos esto como: "STOP"
+                    if streaming_enabled:
+                        log.info("Received STOP config (span<=0). Stopping streaming.")
+                    streaming_enabled = False
+                    current_cfg = None
+                else:
+                    # Configuración válida -> actualizar y habilitar streaming
+                    current_cfg = json_dict
+                    streaming_enabled = True
+                    log.info("Received VALID config. Streaming enabled with new parameters.")
+
+            # Si no hay streaming habilitado o no hay config válida, dormir un poco y seguir
+            if not streaming_enabled or current_cfg is None:
+                await asyncio.sleep(1.0)  # pequeño delay para no saturar el API
                 continue
 
-            # Calculate Server Package Weight (Incoming Config)
-            config_size_metrics = metrics_mgr.get_size_metrics(json_dict, prefix="server_pkg")
+            # A partir de aquí: tenemos current_cfg válido y streaming_enabled = True
+            cfg_to_use = current_cfg
+
+            # Calcular métricas de tamaño de paquete de configuración (última válida)
+            config_size_metrics = metrics_mgr.get_size_metrics(cfg_to_use, prefix="server_pkg")
 
             # --- LOGGING REQ 1: SERVER PARAMS ---
             log.info("----SERVER PARAMS-----")
-            for key, val in json_dict.items():
+            for key, val in cfg_to_use.items():
                 log.info(f"{key:<18}: {val}")
             # ------------------------------------
 
-            # --- FIX 2: Variable Naming & Logic ---
-            desired_span = int(json_dict.get("span", 0))
-            
+            desired_span = int(cfg_to_use.get("span", 0))
+
+            # (Ya validamos desired_span > 0 más arriba, pero lo dejamos por seguridad)
             if desired_span <= 0:
-                log.warning(f"Invalid span received ({desired_span}). Skipping cycle.")
-                await asyncio.sleep(5)
+                log.warning(f"Span invalid in current_cfg ({desired_span}). Stopping streaming.")
+                streaming_enabled = False
+                current_cfg = None
+                await asyncio.sleep(1.0)
                 continue
 
-            # 2. Send Petition to ZMQ
+            # 2. Enviar petición al motor C por ZMQ
             t_before_zmq = time.perf_counter()
-            pub.public_client(topic_sub, json_dict)
-            t_after_zmq = time.perf_counter() # Time when petition sent
-            
+            pub.public_client(topic_sub, cfg_to_use)
+            t_after_zmq = time.perf_counter()  # Time when petition sent
+
             log.info("Waiting for PSD data from C engine (5s Timeout)...")
 
             try:
-                # 3. Wait for C-Engine Response
+                # 3. Esperar respuesta del motor C
                 raw_data = await asyncio.wait_for(sub.wait_msg(), timeout=5)
-                t_zmq_response = time.perf_counter() # Time when data received
+                t_zmq_response = time.perf_counter()  # Time when data received
 
-                # 4. Format into Dictionary
+                # 4. Formatear en diccionario
                 data_dict = fetch_data(raw_data)
-                
+
                 # --- SPAN LOGIC START ---
                 raw_pxx = data_dict.get('Pxx')
-                
+
                 if raw_pxx and len(raw_pxx) > 0:
                     current_start = float(data_dict.get('start_freq_hz'))
                     current_end = float(data_dict.get('end_freq_hz'))
                     current_bw = current_end - current_start
-                    
+
                     len_Pxx = len(raw_pxx)
 
                     if current_bw > 0 and desired_span < current_bw:
@@ -222,14 +254,16 @@ async def run_server():
                         ratio = desired_span / current_bw
                         bins_to_keep = int(len_Pxx * ratio)
 
-                        if bins_to_keep > len_Pxx: bins_to_keep = len_Pxx
-                        if bins_to_keep < 1: bins_to_keep = 1
+                        if bins_to_keep > len_Pxx:
+                            bins_to_keep = len_Pxx
+                        if bins_to_keep < 1:
+                            bins_to_keep = 1
 
                         start_idx = int((len_Pxx - bins_to_keep) // 2)
                         end_idx = start_idx + bins_to_keep
 
-                        data_dict['Pxx'] = raw_pxx[start_idx : end_idx]
-                        
+                        data_dict['Pxx'] = raw_pxx[start_idx: end_idx]
+
                         data_dict['start_freq_hz'] = center_freq - (desired_span / 2)
                         data_dict['end_freq_hz'] = center_freq + (desired_span / 2)
 
@@ -238,15 +272,12 @@ async def run_server():
 
                 # --- METRICS COLLECTION ---
                 final_pxx = data_dict.get('Pxx', [])
-                
-                # Calculate Outgoing Package Weight
+
+                # Tamaño del paquete saliente (hacia API /data)
                 outgoing_size_metrics = metrics_mgr.get_size_metrics(data_dict, prefix="outgoing_pkg")
 
-                # Timing Calculations
-                # ZMQ Send Duration: t_after_zmq - t_before_zmq
+                # Tiempos
                 zmq_send_duration_ms = (t_after_zmq - t_before_zmq) * 1000
-                
-                # Client Response Time (C-Engine): t_zmq_response - t_after_zmq
                 c_engine_response_ms = (t_zmq_response - t_after_zmq) * 1000
 
                 metrics_snapshot = {
@@ -256,8 +287,7 @@ async def run_server():
                     "pxx_len": len(final_pxx) if isinstance(final_pxx, list) else 0,
                     "pxx_type": type(final_pxx).__name__,
                 }
-                
-                # Add Size Metrics
+
                 metrics_snapshot.update(config_size_metrics)
                 metrics_snapshot.update(outgoing_size_metrics)
                 # ---------------------------
@@ -266,31 +296,43 @@ async def run_server():
                 log.info("----DATATOSEND--------")
                 pxx_preview = final_pxx[:5] if isinstance(final_pxx, list) else []
                 log.info(f"Pxx (First 5)     : {pxx_preview}")
-                
+
                 for key, val in data_dict.items():
                     if key != "Pxx":
                         log.info(f"{key:<18}: {val}")
                 log.info("----------------------")
                 # ----------------------------------
 
-                # 5. POST to Server
+                # 5. POST de la PSD al API
                 t_post_start = time.perf_counter()
                 client.post_json("/data", data_dict)
                 t_post_end = time.perf_counter()
-                
-                # Add final metric
-                metrics_snapshot["upload_duration_ms"] = round((t_post_end - t_post_start) * 1000, 2)
 
-                # SAVE TO CSV
-                metrics_mgr.save_metrics(json_dict, data_dict, metrics_snapshot)
+                metrics_snapshot["upload_duration_ms"] = round(
+                    (t_post_end - t_post_start) * 1000, 2
+                )
+
+                # 6. Guardar CSV de métricas
+                metrics_mgr.save_metrics(cfg_to_use, data_dict, metrics_snapshot)
+
+                # 🔁 IMPORTANTE:
+                # No hay sleep obligado aquí → si quieres puedes poner un pequeño
+                # delay para no saturar (por ejemplo 100 ms).
+                # await asyncio.sleep(0.1)
 
             except asyncio.TimeoutError:
-                log.warning("TIMEOUT: No data received.")
-                continue 
-            
+                log.warning("TIMEOUT: No data received from C engine.")
+                # Aquí podrías decidir:
+                # - seguir intentando con la misma config
+                # - o deshabilitar streaming
+                # Por ahora solo seguimos.
+                await asyncio.sleep(1.0)
+                continue
+
         except Exception as e:
-            log.error(f"Unexpected error: {e}")
+            log.error(f"Unexpected error in run_server loop: {e}")
             await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     try:
