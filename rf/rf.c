@@ -25,7 +25,10 @@
 #include "ring_buffer.h" 
 #include "zmqsub.h"
 #include "zmqpub.h"
-#include "bacn_gpio.h"
+
+#ifndef NO_COMMON_LIBS
+    #include "bacn_gpio.h"
+#endif
 
 // =========================================================
 // GLOBAL VARIABLES
@@ -167,8 +170,9 @@ int main() {
     if (hackrf_open(&device) != HACKRF_SUCCESS) {
         fprintf(stderr, "[SYSTEM] Warning: Initial Open failed. Will retry in loop.\n");
     }
-
-    select_ANTENNA(1);
+    #ifndef NO_COMMON_LIBS
+        select_ANTENNA(1);
+    #endif
 
     // 5. Continuous Loop
     bool needs_recovery = false; 

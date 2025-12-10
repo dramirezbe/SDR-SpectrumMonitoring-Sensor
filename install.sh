@@ -1,134 +1,117 @@
 #!/bin/bash
 
-# ==============================================================================
-# ANE2 Realtime - Installation Script
-# Target: Raspberry Pi 5 (Debian/Bookworm)
-# ==============================================================================
+# Exit immediately if a command exits with a non-zero status
+set -e
 
-set -e  # Exit immediately if a command exits with a non-zero status
+# Variable for the project directory
+PROJECT_DIR="/home/anepi/SDR-SpectrumMonitoring-Sensor"
 
-# --- Configuration ---
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV_DIR="${PROJECT_ROOT}/venv"
-BINARY_PATH="${PROJECT_ROOT}/main"
-DAEMON_DIR="${PROJECT_ROOT}/daemons"
-
-# --- Colors for Output ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# --- Helper Functions ---
-log_info() {
-    echo -e "${YELLOW}[INFO]${NC} $1"
+# Helper function for printing status
+log() {
+    echo -e "\n\033[1;32m[INSTALL] $1\033[0m"
 }
 
-log_success() {
-    echo -e "${GREEN}[OK]${NC} $1"
-}
+log "Starting installation..."
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+# ---------------------------------------------------------
+# 1. Install Build Dependencies
+# ---------------------------------------------------------
+log "Installing system dependencies..."
+sudo apt update
+sudo apt install -y libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv \
+    autoconf automake libtool pkg-config git autoconf-archive
 
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        log_error "Please run this script as root (sudo ./install.sh)"
-        exit 1
-    fi
-}
+# ---------------------------------------------------------
+# 2. Install libgpiod v2 from source
+# ---------------------------------------------------------
+log "Building and installing libgpiod v2..."
+cd ~
 
-# --- Main Execution ---
+# Check if directory exists to avoid git errors
+if [ -d "libgpiod" ]; then
+    echo "libgpiod directory exists, pulling latest changes..."
+    cd libgpiod
+    git pull
+else
+    git clone https://git.kernel.org/pub/scm/libs/libgpiod/libgpiod.git
+    cd libgpiod
+fi
 
-main() {
-    echo -e "==================================================="
-    echo -e " Starting Installation for ANE2 Realtime System"
-    echo -e "==================================================="
+./autogen.sh
+./configure
+make
+sudo make install
+sudo ldconfig  # Refresh shared library cache
 
-    # 1. Verify Permissions
-    check_root
+# ---------------------------------------------------------
+# 3. Install venv and project
+# ---------------------------------------------------------
+log "Setting up Python environment and compiling project C code..."
 
-    # 2. Update and Install System Dependencies
-    log_info "Updating package lists and installing system dependencies..."
-    apt-get update -q
-    apt-get install -y libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv
+if [ ! -d "$PROJECT_DIR" ]; then
+    echo "Error: Project directory $PROJECT_DIR not found!"
+    exit 1
+fi
 
-    # 3. Setup Python Environment
-    log_info "Setting up Python virtual environment..."
-    if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv "$VENV_DIR"
-        log_success "Created virtual environment at $VENV_DIR"
-    else
-        log_info "Virtual environment already exists, skipping creation."
-    fi
+cd "$PROJECT_DIR"
 
-    log_info "Installing Python requirements..."
-    # We call the venv pip directly to ensure packages go to the right place
-    "${VENV_DIR}/bin/pip" install --upgrade pip
-    "${VENV_DIR}/bin/pip" install -r "${PROJECT_ROOT}/requirements.txt"
-    log_success "Python dependencies installed."
+# Create venv if it doesn't exist
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
 
-    # 4. Compile C Code
-    log_info "Building C binaries..."
-    if [ -f "${PROJECT_ROOT}/build.sh" ]; then
-        chmod +x "${PROJECT_ROOT}/build.sh"
-        
-        # Execute build script
-        # We assume build.sh handles its own directory context or is robust
-        (cd "${PROJECT_ROOT}" && ./build.sh)
-        
-        # Ensure the resulting binary is executable
-        if [ -f "$BINARY_PATH" ]; then
-            chmod +x "$BINARY_PATH"
-            log_success "Binary built and permissions set: $BINARY_PATH"
-        else
-            log_error "Binary not found at expected path: $BINARY_PATH"
-            exit 1
-        fi
-    else
-        log_error "build.sh not found in project root."
-        exit 1
-    fi
+# Activate venv, install requirements, and deactivate
+source venv/bin/activate
+pip install --upgrade pip
+if [ -f "requirements.txt" ]; then
+    pip install -r requirements.txt
+else
+    echo "Warning: requirements.txt not found."
+fi
+deactivate
 
-    # 5. Install Systemd Daemons
-    log_info "Installing systemd services..."
+# Run build script
+if [ -f "build.sh" ]; then
+    chmod +x build.sh
+    ./build.sh
+else
+    echo "Error: build.sh not found in $PROJECT_DIR"
+    exit 1
+fi
+
+# Set executable permissions for apps
+chmod +x "$PROJECT_DIR/rf_app"
+chmod +x "$PROJECT_DIR/ltegps_app"
+
+# ---------------------------------------------------------
+# 4. Install Daemons (Systemd)
+# ---------------------------------------------------------
+log "Installing and enabling systemd services..."
+
+# Navigate to daemons folder
+if [ -d "$PROJECT_DIR/daemons" ]; then
+    cd "$PROJECT_DIR/daemons"
     
-    SERVICE_1="orchestrator-realtime.service"
-    SERVICE_2="client-psd-gps.service"
+    # Copy service files
+    sudo cp lte-gps-client.service /etc/systemd/system/
+    sudo cp rf-client.service /etc/systemd/system/
+    sudo cp orchestrator.service /etc/systemd/system/
 
-    if [ -d "$DAEMON_DIR" ]; then
-        cp "${DAEMON_DIR}/${SERVICE_1}" /etc/systemd/system/
-        cp "${DAEMON_DIR}/${SERVICE_2}" /etc/systemd/system/
-        log_success "Service files copied to /etc/systemd/system/"
-    else
-        log_error "Daemons directory not found at $DAEMON_DIR"
-        exit 1
-    fi
+    # Reload systemd
+    sudo systemctl daemon-reload
 
-    # 6. Enable and Start Services
-    log_info "Reloading systemd daemon..."
-    systemctl daemon-reload
+    # Enable services
+    sudo systemctl enable lte-gps-client.service
+    sudo systemctl enable rf-client.service
+    sudo systemctl enable orchestrator.service
 
-    log_info "Enabling and starting services..."
-    
-    # Enable
-    systemctl enable "$SERVICE_1"
-    systemctl enable "$SERVICE_2"
+    # Start services
+    sudo systemctl start lte-gps-client.service
+    sudo systemctl start rf-client.service
+    sudo systemctl start orchestrator.service
+else
+    echo "Error: 'daemons' directory not found inside $PROJECT_DIR"
+    exit 1
+fi
 
-    # Start (Restarting ensures they pick up changes if already running)
-    systemctl restart "$SERVICE_1"
-    systemctl restart "$SERVICE_2"
-
-    log_success "Services started."
-
-    echo -e "==================================================="
-    echo -e "${GREEN} Installation Complete! ${NC}"
-    echo -e "==================================================="
-    echo -e "Check status with:"
-    echo -e "  sudo systemctl status $SERVICE_1"
-    echo -e "  sudo systemctl status $SERVICE_2"
-}
-
-# Run Main
-main
+log "Installation complete! All services have been started."

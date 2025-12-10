@@ -1,28 +1,56 @@
 #!/bin/bash
 
-# Stop the script if any command fails (compilation errors)
+# Exit immediately if a command exits with a non-zero status
 set -e
 
-# 1. Clean previous build artifacts
-echo "Cleaning build directory..."
-rm -rf build
-rm -f rf_app
-rm -f gps_lte_app
+# 1. Argument Parsing & Configuration
+if [ -z "$1" ]; then
+    echo ">> Mode: Standard Build (All Targets)"
+    # Standard: No special flags, builds everything defined in 'else' block
+    CMAKE_ARGS=""
+    BUILD_TARGET="all"
+elif [ "$1" == "-dev" ]; then
+    echo ">> Mode: Standalone Build (RF Only)"
+    # Dev: Sets the flag to trigger the 'if(BUILD_STANDALONE)' block
+    CMAKE_ARGS="-DBUILD_STANDALONE=ON"
+    BUILD_TARGET="rf_app"
+else
+    echo "Error: Invalid parameter."
+    echo "Usage: ./build.sh [-dev]"
+    exit 1
+fi
 
-# 2. Create and enter build directory
+# 2. Setup Build Directory
+# Clean slate
+rm -rf build
 mkdir build
 cd build
 
-# 3. Generate Makefiles and Compile
-echo "Configuring CMake..."
-cmake ..
+# 3. Configure CMake
+echo ">> Configuring CMake..."
+cmake $CMAKE_ARGS .. > /dev/null
 
-echo "Compiling..."
-make
+# 4. Compile
+echo ">> Compiling..."
+cmake --build . --target $BUILD_TARGET
 
-# 4. Move the new executables to the root directory
-echo "Moving executables to project root..."
-mv rf_app ..
-mv gps_lte_app ..
+# 5. Move Binaries & Cleanup
+echo ">> Moving binaries to root and cleaning up..."
+cd ..
 
-echo "Build Success! Created: ./rf_app and ./gps_lte_app"
+# Move the resulting files based on the mode
+if [ "$1" == "-dev" ]; then
+    # Standalone mode only creates rf_app
+    [ -f build/rf_app ] && mv build/rf_app .
+    echo ">> artifacts: ./rf_app (Standalone)"
+else
+    # Standard mode creates both
+    [ -f build/rf_app ] && mv build/rf_app .
+    [ -f build/ltegps_app ] && mv build/ltegps_app .
+    echo ">> artifacts: ./rf_app, ./ltegps_app (Standard)"
+fi
+
+# 6. Erase Build Folder
+rm -rf build
+
+echo ">> Done."

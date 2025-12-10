@@ -6,9 +6,9 @@ After=network.target
 
 User=anepi
 
-WorkingDirectory=/home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/
+WorkingDirectory=/home/anepi/SDR-SpectrumMonitoring-Sensor/
 
-ExecStart=/home/anepi/ANE2-realtime/SDR-SpectrumMonitoring-Sensor/LTE-GPS/rf_app
+ExecStart=/home/anepi/SDR-SpectrumMonitoring-Sensor/rf_app
 
 
 Restart=always

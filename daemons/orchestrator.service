@@ -1,23 +1,21 @@
 [Unit]
-Description=LTE/GPS C Main Executable Service 
+Description=Orchestrator Service ANE2
 After=network.target
 
 [Service]
-
 User=anepi
 
 WorkingDirectory=/home/anepi/SDR-SpectrumMonitoring-Sensor/
 
-ExecStart=/home/anepi/SDR-SpectrumMonitoring-Sensor/ltegps_app
-
+ExecStart=/home/anepi/SDR-SpectrumMonitoring-Sensor/venv/bin/python3 orchestrator.py
 
 Restart=always
-RestartSec=5
 
+RestartSec=5
 
 StandardOutput=syslog
 StandardError=syslog
-SyslogIdentifier=gps_lte_logic_ane2
+SyslogIdentifier=orchestrator-ane2
 
 [Install]
 WantedBy=multi-user.target
