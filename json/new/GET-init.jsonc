@@ -1,0 +1,44 @@
+//GET /init
+{
+    "device_id": 10,
+    //---Env Sensor Params---
+    "api_ip": "127.0.0.1",
+    "api_port": 9000,
+    "jobs_ep": "/jobs",
+    "init_ep": "/init",
+    "data_ep": "/data",
+    "status_ep": "/status",
+    "realtime_ep": "/realtime",
+    "verbose": true,
+
+    //always in /init endpoint
+    "daemons": {
+        "ntp_sync": {
+            "interval_s": 900,
+            "enabled": true
+        },
+        "kal_sync": {
+            "enabled": true
+        },
+        "gps": {
+            "interval_s": 10,
+            "enabled": true
+        },
+        "status_device": {
+            "interval_s": 30,
+            "enabled": true
+        },
+        "campaigns": {
+            "interval_s": 300,
+            "enabled": true
+        },
+        "realtime_runner": {
+            "interval_s": 5,
+            "enabled": true
+        },
+        "retry_queue": {
+            "interval_s": 300,
+            "enabled": true
+        }
+    }
+}

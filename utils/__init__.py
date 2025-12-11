@@ -5,6 +5,7 @@
 
 from .io_util import atomic_write_bytes, CronHandler, ElapsedTimer
 from .request_util import RequestClient, ZmqPub, ZmqSub
+from .status_util import StatusDevice
 
 __all__ = ["atomic_write_bytes", "RequestClient",  
-           "ZmqPub", "ZmqSub", "CronHandler", "ElapsedTimer"]
+           "ZmqPub", "ZmqSub", "CronHandler", "ElapsedTimer", "StatusDevice"]

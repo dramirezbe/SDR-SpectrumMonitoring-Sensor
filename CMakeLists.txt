@@ -10,7 +10,7 @@ include_directories(common)
 # ==========================================
 # Libraries
 # ==========================================
-set(LIBS_CORE zmq hackrf fftw3 m cjson)
+set(LIBS_CORE zmq hackrf fftw3 m cjson curl)
 set(LIBS_FULL ${LIBS_CORE} gpiod)
 
 # ==========================================
