@@ -24,8 +24,6 @@ def fetch_job(client):
     if not json_payload:
         return {}, resp
 
-    # --- FIX 1: Safety Wrappers ---
-    # We use ( .get() or 0 ) to ensure we don't try to int(None)
     center = int(json_payload.get("center_frequency") or 0)
     span = int(json_payload.get("span") or 0)
     # ------------------------------------------
@@ -40,7 +38,7 @@ def fetch_job(client):
         "lna_gain": json_payload.get("lna_gain"),
         "vga_gain": json_payload.get("vga_gain"),
         "antenna_amp": json_payload.get("antenna_amp"),
-        "span": span  # mapped correctly now
+        "span": span
     }, resp
 
 def fetch_data(payload):

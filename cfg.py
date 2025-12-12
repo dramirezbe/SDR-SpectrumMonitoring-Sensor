@@ -61,7 +61,24 @@ def get_time_ms() -> int:
     return int(time.time() * 1000)
 
 def get_mac() -> str:
-    return "d8:3a:dd:f4:4e:26"
+    # 1. Try Environment Variable
+    if mac := os.getenv("MAC_ADDRESS"):
+        if mac != "00:00:00:00:00:00": return mac
+
+    # 2. Fallback to System Files
+    try:
+        # Sort to prioritize eth0 over eth1, etc.
+        for iface in sorted(os.listdir("/sys/class/net")):
+            if iface.startswith(("lo", "sit", "docker", "veth", "vir", "br", "tun")):
+                continue
+            try:
+                with open(f"/sys/class/net/{iface}/address") as f:
+                    mac = f.read().strip()
+                if mac and mac != "00:00:00:00:00:00": return mac
+            except OSError: continue
+    except Exception: pass
+
+    return "00:00:00:00:00:00"
 
 # =============================
 # 4. LOGGING IMPLEMENTATION (Robust V2)
