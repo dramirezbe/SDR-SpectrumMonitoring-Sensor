@@ -1,6 +1,4 @@
-/**
- * @file Drivers/ring_buffer.h
- */
+//libs/ring_buffer.h
 #ifndef RING_BUFFER_H
 #define RING_BUFFER_H
 

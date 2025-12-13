@@ -1,6 +1,4 @@
-/**
- * @file Drivers/sdr_HAL.h
- */
+//libs/sdr_HAL.h
 #ifndef SDR_HAL_H
 #define SDR_HAL_H
 

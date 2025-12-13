@@ -1,11 +1,8 @@
+//libs/pfb.c
 #include "pfb.h"
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 // --- Helper: Kaiser Window Design (Double Precision) ---
 // Modified Bessel function of the first kind, order 0

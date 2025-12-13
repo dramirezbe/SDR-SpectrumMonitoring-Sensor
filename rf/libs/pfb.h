@@ -1,6 +1,8 @@
+//libs/pfb.h
 #ifndef PFB_H
 #define PFB_H
 
+#include "datatypes.h"
 #include <complex.h>
 #include <fftw3.h>
 #include <stdint.h>

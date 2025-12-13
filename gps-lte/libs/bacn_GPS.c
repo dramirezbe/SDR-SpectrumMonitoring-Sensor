@@ -17,7 +17,7 @@ const char g[3] = "$,";
 extern GPSCommand GPSInfo;
 
 bool GPS_run = false;
-bool GPSRDY = false;
+extern bool GPSRDY;
 extern bool GPS_open;
 
 int8_t init_usart1(gp_uart *s_uart)

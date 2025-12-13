@@ -1,7 +1,4 @@
-/**
- * @file Modules/psd.c
- */
-
+//libs/psd.c
 #include "psd.h"
 #include <stdlib.h>
 #include <string.h>
@@ -10,9 +7,9 @@
 #include <alloca.h>
 #include <complex.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+// =========================================================
+// IQ & Memory
+// =========================================================
 
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size) {
     size_t n_samples = buffer_size / 2;
@@ -35,21 +32,146 @@ void free_signal_iq(signal_iq_t* signal) {
     }
 }
 
+// =========================================================
+// Configuration & Parsing
+// =========================================================
 
-// ----------------------------------------------------------------------
-// Scaling Logic (Modified to match your reference)
-// ----------------------------------------------------------------------
+static PsdWindowType_t get_window_type_from_string(const char *window_str) {
+    if (window_str == NULL) return HAMMING_TYPE;
+    
+    if (strcasecmp(window_str, "hann") == 0) return HANN_TYPE;
+    if (strcasecmp(window_str, "rectangular") == 0) return RECTANGULAR_TYPE;
+    if (strcasecmp(window_str, "blackman") == 0) return BLACKMAN_TYPE;
+    if (strcasecmp(window_str, "hamming") == 0) return HAMMING_TYPE;
+    if (strcasecmp(window_str, "flattop") == 0) return FLAT_TOP_TYPE;
+    if (strcasecmp(window_str, "kaiser") == 0) return KAISER_TYPE;
+    if (strcasecmp(window_str, "tukey") == 0) return TUKEY_TYPE;
+    if (strcasecmp(window_str, "bartlett") == 0) return BARTLETT_TYPE;
 
-/**
- * @brief Scales PSD. 
- * CRITICAL: This uses the user's formula P = PSD[i] / 50.
- * It does NOT multiply by RBW, ensuring the noise floor stays at ~-70dBm.
- */
+    return HAMMING_TYPE;
+}
+
+int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
+    if (json_string == NULL || target == NULL) return -1;
+
+    memset(target, 0, sizeof(DesiredCfg_t));
+    target->window_type = HAMMING_TYPE;
+    target->antenna_port = 1;
+
+    cJSON *root = cJSON_Parse(json_string);
+    if (root == NULL) return -1;
+
+    // 1. RF Mode
+    cJSON *rf_mode = cJSON_GetObjectItemCaseSensitive(root, "rf_mode");
+    if (cJSON_IsString(rf_mode)) {
+        if(strcmp(rf_mode->valuestring, "realtime") == 0) target->rf_mode = REALTIME_MODE;
+        else if(strcmp(rf_mode->valuestring, "campaign") == 0) target->rf_mode = CAMPAIGN_MODE;
+        else if(strcmp(rf_mode->valuestring, "demodulate") == 0) target->rf_mode = DEMODE_MODE;
+        else target->rf_mode = REALTIME_MODE;
+    }
+
+    // 2. Numeric params
+    cJSON *cf = cJSON_GetObjectItemCaseSensitive(root, "center_freq_hz");
+    if (cJSON_IsNumber(cf)) target->center_freq = (uint64_t)cf->valuedouble;
+
+    cJSON *span = cJSON_GetObjectItemCaseSensitive(root, "span");
+    if (cJSON_IsNumber(span)) target->span = span->valuedouble;
+
+    cJSON *sr = cJSON_GetObjectItemCaseSensitive(root, "sample_rate_hz");
+    if (cJSON_IsNumber(sr)) target->sample_rate = sr->valuedouble;
+
+    cJSON *rbw = cJSON_GetObjectItemCaseSensitive(root, "rbw_hz");
+    if (cJSON_IsNumber(rbw)) target->rbw = (int)rbw->valuedouble;
+
+    cJSON *ov = cJSON_GetObjectItemCaseSensitive(root, "overlap");
+    if (cJSON_IsNumber(ov)) target->overlap = ov->valuedouble;
+
+    // 3. Window
+    cJSON *win = cJSON_GetObjectItemCaseSensitive(root, "window");
+    if (cJSON_IsString(win)) target->window_type = get_window_type_from_string(win->valuestring);
+
+    // 4. Scale
+    cJSON *sc = cJSON_GetObjectItemCaseSensitive(root, "scale");
+    if (cJSON_IsString(sc) && (sc->valuestring != NULL)) target->scale = strdup(sc->valuestring);
+
+    // 5. Gains
+    cJSON *lna = cJSON_GetObjectItemCaseSensitive(root, "lna_gain");
+    if (cJSON_IsNumber(lna)) target->lna_gain = (int)lna->valuedouble;
+
+    cJSON *vga = cJSON_GetObjectItemCaseSensitive(root, "vga_gain");
+    if (cJSON_IsNumber(vga)) target->vga_gain = (int)vga->valuedouble;
+
+    // 6. Antenna
+    cJSON *amp = cJSON_GetObjectItemCaseSensitive(root, "antenna_amp");
+    if (cJSON_IsBool(amp)) target->amp_enabled = cJSON_IsTrue(amp);
+
+    cJSON *port = cJSON_GetObjectItemCaseSensitive(root, "antenna_port");
+    if (cJSON_IsNumber(port)) target->antenna_port = (int)port->valuedouble;
+
+    cJSON_Delete(root);
+    return 0;
+}
+
+int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg) {
+    double enbw_factor = get_window_enbw_factor(desired.window_type);
+    double required_nperseg_val = enbw_factor * (double)desired.sample_rate / (double)desired.rbw;
+    int exponent = (int)ceil(log2(required_nperseg_val));
+    
+    psd_cfg->nperseg = (int)pow(2, exponent);
+    psd_cfg->noverlap = psd_cfg->nperseg * desired.overlap;
+    psd_cfg->window_type = desired.window_type;
+    psd_cfg->sample_rate = desired.sample_rate;
+
+    hack_cfg->sample_rate = desired.sample_rate;
+    hack_cfg->center_freq = desired.center_freq;
+    hack_cfg->amp_enabled = desired.amp_enabled;
+    hack_cfg->lna_gain = desired.lna_gain;
+    hack_cfg->vga_gain = desired.vga_gain;
+    hack_cfg->ppm_error = desired.ppm_error;
+
+    // Default to ~1 second of data if not specified
+    rb_cfg->total_bytes = (size_t)(desired.sample_rate * 2);
+    return 0;
+}
+
+void print_config_summary(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *psd, RB_cfg_t *rb) {
+    double capture_duration = (double)rb->total_bytes / 2.0 / hw->sample_rate;
+
+    printf("\n================ [ CONFIGURATION SUMMARY ] ================\n");
+    printf("--- ACQUISITION (Hardware) ---\n");
+    printf("Center Freq : %lu Hz\n", hw->center_freq);
+    printf("Sample Rate : %.2f MS/s\n", hw->sample_rate / 1e6);
+    printf("LNA / VGA   : %d dB / %d dB\n", hw->lna_gain, hw->vga_gain);
+    printf("Amp / Port  : %s / %d\n", hw->amp_enabled ? "ON" : "OFF", des->antenna_port);
+    printf("Buffer Req  : %zu bytes (~%.4f sec)\n", rb->total_bytes, capture_duration);
+
+    printf("\n--- PSD PROCESS (DSP) ---\n");
+    printf("Window      : %d (Enum)\n", psd->window_type);
+    printf("FFT Size    : %d bins\n", psd->nperseg);
+    printf("Overlap     : %d bins\n", psd->noverlap);
+    printf("Scale Unit  : %s\n", des->scale ? des->scale : "dBm (Default)");
+    printf("===========================================================\n\n");
+}
+
+void free_desired_psd(DesiredCfg_t *target) {
+    if (target) {
+        if (target->scale) {
+            free(target->scale);
+            target->scale = NULL;
+        }
+        // If rf_mode was allocated dynamically, free it here. 
+        // In current struct it looks like an enum, but check if struct changed.
+    }
+}
+
+// =========================================================
+// DSP Logic
+// =========================================================
+
 int scale_psd(double* psd, int nperseg, const char* scale_str) {
     if (!psd) return -1;
     
-    const double Z = 50.0; // Impedance
-    
+    const double Z = 50.0; 
     typedef enum { UNIT_DBM, UNIT_DBUV, UNIT_DBMV, UNIT_WATTS, UNIT_VOLTS } Unit_t;
     Unit_t unit = UNIT_DBM;
     
@@ -61,39 +183,18 @@ int scale_psd(double* psd, int nperseg, const char* scale_str) {
     }
 
     for (int i = 0; i < nperseg; i++) {
-        
-        // 1. YOUR BASE FORMULA (Direct V^2 to Watts)
-        // We assume psd[i] is already V^2 magnitude, not density.
         double p_watts = psd[i] / Z;
-
-        // Safety for log10
         if (p_watts < 1.0e-20) p_watts = 1.0e-20; 
 
-        // 2. CALCULATE dBm (The Anchor)
-        // Formula: 10 * log10(Watts * 1000)
         double val_dbm = 10.0 * log10(p_watts * 1000.0);
 
-        // 3. CONVERT TO TARGET (Relative to your dBm)
         switch (unit) {
-            case UNIT_DBUV:
-                // dBuV = dBm + 107
-                psd[i] = val_dbm + 107.0;
-                break;
-            case UNIT_DBMV:
-                // dBmV = dBm + 47
-                psd[i] = val_dbm + 47.0;
-                break;
-            case UNIT_WATTS:
-                psd[i] = p_watts;
-                break;
-            case UNIT_VOLTS:
-                // V = sqrt(P * R)
-                psd[i] = sqrt(p_watts * Z);
-                break;
+            case UNIT_DBUV: psd[i] = val_dbm + 107.0; break;
+            case UNIT_DBMV: psd[i] = val_dbm + 47.0; break;
+            case UNIT_WATTS: psd[i] = p_watts; break;
+            case UNIT_VOLTS: psd[i] = sqrt(p_watts * Z); break;
             case UNIT_DBM:
-            default:
-                psd[i] = val_dbm;
-                break;
+            default: psd[i] = val_dbm; break;
         }
     }
     return 0;
@@ -129,222 +230,12 @@ static void generate_window(PsdWindowType_t window_type, double* window_buffer, 
     }
 }
 
-static PsdWindowType_t get_window_type_from_string(const char *window_str) {
-    if (window_str == NULL) return HAMMING_TYPE; // Default
-    
-    if (strcasecmp(window_str, "hamming") == 0) return HAMMING_TYPE;
-    if (strcasecmp(window_str, "hann") == 0) return HANN_TYPE;
-    if (strcasecmp(window_str, "blackman") == 0) return BLACKMAN_TYPE;
-    if (strcasecmp(window_str, "rectangular") == 0) return RECTANGULAR_TYPE;
-
-    printf("[PSD]ERROR: Window does not exist, returning rectangular");
-
-    return RECTANGULAR_TYPE;
-}
-
-/**
- * Parses JSON string and fills the DesiredCfg_t struct.
- * Returns 0 on success, -1 on failure.
- */
-int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
-    if (json_string == NULL || target == NULL) {
-        return -1;
-    }
-
-    // Parse the JSON string
-    cJSON *root = cJSON_Parse(json_string);
-    if (root == NULL) {
-        const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL) {
-            fprintf(stderr, "Error before: %s\n", error_ptr);
-        }
-        return -1;
-    }
-
-    // 1. Center Freq (uint64_t)
-    cJSON *cf = cJSON_GetObjectItemCaseSensitive(root, "center_freq_hz");
-    if (cJSON_IsNumber(cf)) {
-        target->center_freq = (uint64_t)cf->valuedouble;
-    } else {
-        target->center_freq = 0; // Default or Error handling
-    }
-
-    // 2. RBW (int)
-    cJSON *rbw = cJSON_GetObjectItemCaseSensitive(root, "rbw_hz");
-    if (cJSON_IsNumber(rbw)) {
-        target->rbw = (int)rbw->valuedouble;
-    }
-
-    // 3. Sample Rate (double)
-    // RENAMED from 'sr' to 'sample_rate_json'
-    cJSON *sample_rate_json = cJSON_GetObjectItemCaseSensitive(root, "sample_rate_hz");
-    if (cJSON_IsNumber(sample_rate_json)) {
-        target->sample_rate = sample_rate_json->valuedouble;
-    }
-
-    // 4. span (double)
-    // RENAMED from 'sr' to 'span_json'
-    cJSON *span_json = cJSON_GetObjectItemCaseSensitive(root, "span");
-    if (cJSON_IsNumber(span_json)) {
-        target->span = span_json->valuedouble;
-    }
-
-    // 5. overlap (double)
-    // RENAMED from 'sr' to 'overlap_json'
-    cJSON *overlap_json = cJSON_GetObjectItemCaseSensitive(root, "overlap");
-    if (cJSON_IsNumber(overlap_json)) {
-        target->overlap = overlap_json->valuedouble;
-    }
-
-    // 4. Scale (char*) - Deep Copy
-    cJSON *scale = cJSON_GetObjectItemCaseSensitive(root, "scale");
-    if (cJSON_IsString(scale) && (scale->valuestring != NULL)) {
-        // We use strdup to give the struct ownership of the string
-        // Remember to free(target->scale) later!
-        target->scale = strdup(scale->valuestring);
-    } else {
-        target->scale = NULL;
-    }
-
-    // 5. Window (Enum)
-    cJSON *win = cJSON_GetObjectItemCaseSensitive(root, "window");
-    if (cJSON_IsString(win)) {
-        target->window_type = get_window_type_from_string(win->valuestring);
-    } else {
-        target->window_type = RECTANGULAR_TYPE; // Default
-    }
-
-    // 6. LNA Gain (int)
-    cJSON *lna = cJSON_GetObjectItemCaseSensitive(root, "lna_gain");
-    if (cJSON_IsNumber(lna)) {
-        target->lna_gain = (int)lna->valuedouble;
-    }
-
-    // 7. VGA Gain (int)
-    cJSON *vga = cJSON_GetObjectItemCaseSensitive(root, "vga_gain");
-    if (cJSON_IsNumber(vga)) {
-        target->vga_gain = (int)vga->valuedouble;
-    }
-
-    // 8. Antenna Amp (bool)
-    cJSON *amp = cJSON_GetObjectItemCaseSensitive(root, "antenna_amp");
-    if (cJSON_IsBool(amp)) {
-        target->amp_enabled = cJSON_IsTrue(amp);
-    }
-
-    // 9. PPM Error (Not in JSON, set default)
-    target->ppm_error = 0;
-
-    // Clean up cJSON object
-    cJSON_Delete(root);
-    return 0;
-}
-
-// Helper function to free the memory allocated inside parse_psd_config
-void free_desired_psd(DesiredCfg_t *target) {
-    if (target && target->scale) {
-        free(target->scale);
-        target->scale = NULL;
-    }
-}
-
 static void fftshift(double* data, int n) {
     int half = n / 2;
     double* temp = (double*)alloca(half * sizeof(double));
     memcpy(temp, data, half * sizeof(double));
     memcpy(data, &data[half], (n - half) * sizeof(double));
     memcpy(&data[n - half], temp, half * sizeof(double));
-}
-
-// ======================================================================
-// DC SPIKE REMOVAL HELPERS
-// ======================================================================
-
-static int compare_doubles(const void* a, const void* b) {
-    double arg1 = *(const double*)a;
-    double arg2 = *(const double*)b;
-    if (arg1 < arg2) return -1;
-    if (arg1 > arg2) return 1;
-    return 0;
-}
-
-// Simple pseudo-random number generator (0.0 to 1.0) for noise generation
-// We avoid rand() sometimes to keep it self-contained or reproducible
-static double get_random_uniform() {
-    return (double)rand() / (double)RAND_MAX;
-}
-
-/**
- * @brief Removes DC spike by replacing it with synthesized noise.
- * 1. Calculates Median of immediate neighbors (5 left, 5 right).
- * 2. Calculates the variance (amplitude range) of those neighbors.
- * 3. Fills the spike gap with Median + Random_Noise.
- */
-static void remove_dc_spike(double* p_out, int nfft) {
-    if (!p_out || nfft < 64) return; 
-
-    int index_dc = nfft / 2;
-    // The gap to fill (the spike itself)
-    int spike_width = 5; 
-    
-    // The reference window size (how many neighbors to analyze)
-    // You requested "take 5 values left and right"
-    int ref_width = 5; 
-
-    // Indices for the "Gap" (The part we overwrite)
-    int gap_start = index_dc - spike_width;
-    int gap_end   = index_dc + spike_width + 1;
-
-    // Indices for the "Reference" (The neighbors we analyze)
-    int left_ref_start  = gap_start - ref_width;
-    int right_ref_end   = gap_end + ref_width;
-
-    // Bounds checking
-    if (left_ref_start < 0 || right_ref_end > nfft) return;
-
-    // Collect reference samples to find median and noise range
-    int ref_count = ref_width * 2;
-    double* ref_samples = (double*)alloca(ref_count * sizeof(double));
-    
-    int k = 0;
-    // Left neighbors
-    for (int i = left_ref_start; i < gap_start; i++) {
-        ref_samples[k++] = p_out[i];
-    }
-    // Right neighbors
-    for (int i = gap_end; i < right_ref_end; i++) {
-        ref_samples[k++] = p_out[i];
-    }
-
-    // 1. Calculate Median (Base level)
-    // We sort the reference samples to find the median
-    // (We duplicate the array first if we want to preserve order for variance calc, 
-    // but here order doesn't matter for variance of the set).
-    qsort(ref_samples, ref_count, sizeof(double), compare_doubles);
-    
-    double median_val;
-    if (ref_count % 2 == 0) {
-        median_val = (ref_samples[ref_count/2 - 1] + ref_samples[ref_count/2]) / 2.0;
-    } else {
-        median_val = ref_samples[ref_count/2];
-    }
-
-    // 2. Estimate Noise Amplitude (Range)
-    // A simple way to estimate noise "fuzziness" is Interquartile Range or Min/Max.
-    // Let's use the range of the reference samples we just sorted.
-    // To be safe against outliers, we can take the difference between the 
-    // 80th percentile and 20th percentile, or just Max - Min if n is small (10 samples).
-    double min_ref = ref_samples[0];
-    double max_ref = ref_samples[ref_count - 1];
-    double noise_range = max_ref - min_ref;
-
-    // 3. Fill the Gap with "Textured" Noise
-    // We replace the spike with: Median + (Random(-0.5 to 0.5) * NoiseRange)
-    // This reconstructs the noise floor visually.
-    for (int i = gap_start; i < gap_end; i++) {
-        double random_factor = get_random_uniform() - 0.5; // Range -0.5 to 0.5
-        p_out[i] = median_val + (random_factor * noise_range);
-    }
 }
 
 void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, double* f_out, double* p_out) {
@@ -390,10 +281,6 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     for (int i = 0; i < nfft; i++) p_out[i] *= scale;
 
     fftshift(p_out, nfft);
-
-    // --- UPDATED DC SPIKE REMOVAL ---
-    remove_dc_spike(p_out, nfft);
-    // --------------------------------
 
     double df = fs / nfft;
     for (int i = 0; i < nfft; i++) {

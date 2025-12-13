@@ -85,7 +85,13 @@ int get_wlan0_mac(char *mac_out) {
     return -1;
 }
 
-// --- HTTP POST Helper ---
+// --- 1. Nueva función auxiliar para convertir DDM a DD ---
+// Convierte 501.7238 -> 5.02873
+double nmea_to_decimal(double raw_coord) {
+    double degrees = floor(raw_coord / 100.0);
+    double minutes = raw_coord - (degrees * 100.0);
+    return degrees + (minutes / 60.0);
+}
 
 int post_gps_data(
     const char *base_api_url,
@@ -99,32 +105,51 @@ int post_gps_data(
     char json_payload[MAX_JSON_LENGTH];
     char mac_address[MAC_ADDR_LENGTH];
 
-    // 1. Get MAC
+    // Obtener MAC
     if (get_wlan0_mac(mac_address) != 0) {
         fprintf(stderr, "[UTILS] Error: Could not retrieve wlan0 MAC address.\n");
         return 1; 
     }
 
-    // 2. Parse Floats
-    float alt = (float)atof(altitude_str);
-    float lat = (float)atof(latitude_str);
-    float lng = (float)atof(longitude_str);
+    // --- 2. Parseo y Conversión ---
+    
+    // Convertimos el string a double crudo (ej: 501.7238)
+    double raw_lat = atof(latitude_str);
+    double raw_lng = atof(longitude_str);
+    double alt = atof(altitude_str); // La altitud no necesita conversión de minutos
 
-    // 3. Format JSON
+    // Aplicamos la fórmula matemática
+    double final_lat = nmea_to_decimal(raw_lat);
+    double final_lng = nmea_to_decimal(raw_lng);
+
+    // --- 3. Corrección de Signo (Hemisferios) ---
+    // El formato NMEA puro suele ser positivo. 
+    // Si estás en Colombia (u Occidente), la Longitud debe ser negativa.
+    // Si estás al Sur del ecuador, la Latitud debe ser negativa.
+    
+    // FORZAR OESTE (W): Si la longitud es positiva, la volvemos negativa
+    if (final_lng > 0) {
+        final_lng = -final_lng; 
+    }
+    
+    // Opcional: Si estuvieras al sur (ej. Leticia), descomenta esto:
+    // if (strcmp(lat_direction, "S") == 0) final_lat = -final_lat;
+
+    // --- 4. Formatear JSON ---
+    // Usamos %.6f para tener suficiente precisión en coordenadas GPS
     int written = snprintf(json_payload, MAX_JSON_LENGTH, 
-        "{\"mac\": \"%s\", \"lat\": %.4f, \"lng\": %.4f, \"alt\": %.1f}",
-        mac_address, lat, lng, alt);
+        "{\"mac\": \"%s\", \"lat\": %.6f, \"lng\": %.6f, \"alt\": %.1f}",
+        mac_address, final_lat, final_lng, alt);
 
     if (written < 0 || written >= MAX_JSON_LENGTH) {
         fprintf(stderr, "[UTILS] Error: JSON buffer overflow.\n");
         return 2;
     }
 
-    // 4. Construct URL
-    // Ensure we don't overflow the URL buffer
+    // Construir URL
     snprintf(full_url, sizeof(full_url), "%s/gps", base_api_url);
 
-    // 5. Send Request
+    // --- 5. Enviar Request (CURL) ---
     curl = curl_easy_init();
     if(curl) {
         curl_easy_setopt(curl, CURLOPT_URL, full_url);
@@ -135,7 +160,6 @@ int post_gps_data(
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-        // Perform
         res = curl_easy_perform(curl);
 
         if(res != CURLE_OK) {

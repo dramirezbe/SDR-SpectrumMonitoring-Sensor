@@ -1,6 +1,7 @@
 /**
  * @file gps-lte.c
- * @brief GPS handler, sends gps from /gps endopoint each 10 secs. Handle priority of internet interfaces.
+ * @brief GPS handler. Sends gps from /gps endpoint every 10 cycles. 
+ * Handles priority of internet interfaces and monitors connectivity.
  */
 
 #define _GNU_SOURCE 
@@ -10,9 +11,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <math.h>
 #include <string.h>
+// Note: pthread.h removed as requested
 
 // --- CUSTOM MODULES & DRIVERS ---
 #include "utils.h"       
@@ -38,14 +39,16 @@ GPSCommand GPSInfo;
 // State Flags
 bool LTE_open = false;
 bool GPS_open = false;
-volatile bool stop_streaming = false; // Controls thread lifecycles
+bool GPSRDY = false;
 
 // =========================================================
 // FUNCTION PROTOTYPES
 // =========================================================
 void run_cmd(const char *cmd);
 bool is_valid_gps_data(const char* lat_str, const char* lon_str);
-void* gps_monitor_thread(void *arg);
+int get_wlan_ip(char *ip);
+int get_eth_ip(char *ip);
+int get_ppp_ip(char *ip);
 
 // =========================================================
 // HELPER IMPLEMENTATIONS
@@ -136,31 +139,6 @@ bool is_valid_gps_data(const char* lat_str, const char* lon_str) {
     return true;
 }
 
-void *gps_monitor_thread(void *arg) {
-    char *api_url = (char *)arg;
-    printf("[GPS-THREAD] Started. Reporting to: %s\n", api_url ? api_url : "NULL");
-
-    while (!stop_streaming) {
-        // 1. Read/Refresh GPS Data from Hardware
-        //GPS_Read(&GPS); 
-
-        // 2. Validate and Send
-        if (api_url != NULL) {
-            if (is_valid_gps_data(GPSInfo.Latitude, GPSInfo.Longitude)) {
-                printf("[GPS-THREAD] Sending Fix: %s, %s\n", GPSInfo.Latitude, GPSInfo.Longitude);
-                post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
-            } else {
-                // Optional: print only occasionally to avoid log spam
-                // printf("[GPS-THREAD] No valid fix yet.\n");
-            }
-        }
-        
-        // 3. Wait 10 seconds before next cycle
-        sleep(10);
-    }
-    return NULL;
-}
-
 // =========================================================
 // MAIN ORCHESTRATION
 // =========================================================
@@ -204,32 +182,68 @@ int main() {
         }
     }
 
-    // 3. Environment & Threading
+    // 3. Environment Setup
     char *api_url = getenv_c("API_URL"); 
-    pthread_t gps_tid;
-    
-    if (api_url != NULL) {
-        printf("API URL found: %s. Starting GPS thread.\n", api_url);
-        int err = pthread_create(&gps_tid, NULL, gps_monitor_thread, (void *)api_url);
-        if (err != 0) {
-             fprintf(stderr, "Failed to create GPS thread\n");
-        }
+    if (api_url == NULL) {
+        printf("WARN: API_URL not set. Data sending will be skipped.\n");
     } else {
-        printf("WARN: API_URL not set. GPS thread will not start.\n");
+        printf("API URL found: %s\n", api_url);
     }
 
-    // 4. Main Loop
+    // 4. Main Loop Variables
+    const char *ip_address = "8.8.8.8";
+    char ping_cmd[100];
+    snprintf(ping_cmd, sizeof(ping_cmd), "ping -c 1 -W 1 %s", ip_address);
+    
+    int count = 0;
+    int tryRB = 0;
+    int status = 0;
+    int ping_result = 0;
     printf("System Running. Press Ctrl+C to exit.\n");
-    
+
     while (1) {
-        // Adjusted the label 'Longitude' -> 'Altitude' for the 3rd parameter
-        printf("Latitude: %s, Longitude: %s, Altitude: %s\n", GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
-        sleep(1); 
+        // Assume GPSRDY is set by an Interrupt Service Routine (ISR) or separate RX handler
+        if(GPSRDY) {
+            GPSRDY = false;
+            count++;
+
+            // Trigger every 10 GPS updates
+            if(count >= 10) { 
+                count = 0; // Reset counter
+		printf("Latitude: %s, Longitude: %s, Altitude: %s\n", GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
+                // --- A. SEND DATA ---
+                status = post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
+
+                if (status == 0) {
+                        printf("Success: Data posted to %s\n", api_url);
+                } else {
+                	fprintf(stderr, "Failed with error code: %d\n", status);
+                }
+
+                // --- B. CHECK CONNECTIVITY ---
+                // We run the ping command HERE to get the current status
+                ping_result = system(ping_cmd); 
+
+                if (ping_result == 0) {
+                    // Success (0 return code)
+                    printf("Ping to %s successful.\n", ip_address);
+                    tryRB = 0;
+                } else {
+                    // Failure
+                    printf("Ping to %s failed. Retry count: %d\n", ip_address, tryRB + 1);
+                    tryRB++;
+                    
+                    if(tryRB >= 6) {
+                        printf("CRITICAL: Network down for too long. Rebooting...\n");
+                        system("sudo reboot");
+                    }
+                }
+            } 
+        }
+        
+        // Slight delay to prevent 100% CPU usage if GPSRDY is polling based
+        usleep(1000); 
     }
 
-    // Cleanup
-    stop_streaming = true;
-    if (api_url) pthread_join(gps_tid, NULL);
-    
     return 0;
 }

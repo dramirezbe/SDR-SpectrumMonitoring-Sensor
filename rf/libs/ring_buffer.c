@@ -1,6 +1,4 @@
-/**
- * @file Drivers/ring_buffer.c
- */
+//libs/ring_buffer.c
 #include "ring_buffer.h"
 #include <stdlib.h>
 #include <string.h>

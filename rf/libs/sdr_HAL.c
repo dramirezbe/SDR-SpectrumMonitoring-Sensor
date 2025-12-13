@@ -1,6 +1,4 @@
-/**
- * @file Drivers/sdr_HAL.c
- */
+//libs/sdr_HAL.c
 #include "sdr_HAL.h"
 #include <stdio.h>
 
