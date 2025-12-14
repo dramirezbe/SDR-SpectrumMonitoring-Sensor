@@ -11,7 +11,7 @@ def fetch_job(client):
     Fetches job configuration.
     Includes safety checks to prevent int(None) crashes.
     """
-    rc_returned, resp = client.get(f"/{cfg.get_mac()}/configuration")
+    rc_returned, resp = client.get("/configuration")
     
     json_payload = {}
     
@@ -63,7 +63,7 @@ async def run_server():
     sub = ZmqSub(addr=cfg.IPC_DATA_ADDR, topic=topic_data)
 
     await asyncio.sleep(0.5)
-    client = RequestClient(cfg.API_URL, verbose=True, logger=log)
+    client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
     
     while True:
         try:

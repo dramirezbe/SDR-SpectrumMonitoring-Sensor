@@ -1,6 +1,6 @@
 {
-    //int
-    "device_id": 10,
+    //str
+    "mac": "00:00:00:00:00:00",
     // (float) (degrees)
     "lat": 5.0741,
     "lng": -75.5169,

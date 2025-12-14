@@ -1,7 +1,7 @@
 // Data post request
 {
-    //int
-    "device_id": 10,
+    //str
+    "mac": "00:00:00:00:00:00",
     //Optional, only If is a campaign medition, if real time it will do not appear
     "campaign_id": 123,
     // Array of Power Spectral Density data in dBm/Hz (float32)

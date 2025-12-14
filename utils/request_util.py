@@ -4,11 +4,160 @@
 """
 
 import requests
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 import zmq
 import zmq.asyncio
 import json
 import logging
+import re
+from dataclasses import dataclass, field
+
+# -------------------------
+# Shared / Nested Objects
+# -------------------------
+
+@dataclass
+class Timeframe:
+    start: int  # Unix ms
+    end: int    # Unix ms
+
+@dataclass
+class Filter:
+    type: str
+    filter_bw_hz: int
+    order_filter: int
+
+@dataclass
+class Demodulation:
+    type: str
+    with_metrics: bool
+    bw_hz: int
+    center_freq_hz: int
+    port_socket: str
+
+@dataclass
+class ExcursionObj:
+    unit: str
+    peak_to_peak_hz: float
+    peak_deviation_hz: float
+    rms_deviation_hz: float
+
+@dataclass
+class DepthObj:
+    unit: str
+    peak_to_peak: float
+    peak_deviation: float
+    rms_deviation: float
+
+# -------------------------
+# Base Configuration
+# -------------------------
+@dataclass(kw_only=True)  # <--- ADD kw_only=True HERE
+class SpectrumConfig:
+    """
+    Base parameters shared between Campaign and Realtime.
+    """
+    center_freq_hz: int
+    rbw_hz: int
+    sample_rate_hz: int
+    span: int
+    scale: str
+    window: str
+    overlap: float
+    lna_gain: int
+    vga_gain: int
+    antenna_amp: bool
+    # antenna_port has a default, so it "poisoned" the inheritance order for subclasses
+    antenna_port: Optional[int] = None 
+
+# -------------------------
+# GET: Responses
+# -------------------------
+
+@dataclass(kw_only=True) # <--- ADD kw_only=True HERE
+class Campaign(SpectrumConfig):
+    campaign_id: int
+    status: str
+    acquisition_period_s: int
+    timeframe: Timeframe
+    filter: Optional[Filter] = None
+
+@dataclass(kw_only=True) # <--- ADD kw_only=True HERE
+class Realtime(SpectrumConfig):
+    demodulation: Optional[Demodulation] = None
+    filter: Optional[Filter] = None
+
+@dataclass
+class CampaignListResponse:
+    campaigns: List[Campaign]
+
+# -------------------------
+# POST: Requests
+# -------------------------
+
+@dataclass
+class DataPost:
+    mac: str
+    Pxx: List[float]
+    start_freq_hz: int
+    end_freq_hz: int
+    timestamp: int  # Unix ms
+    campaign_id: Optional[int] = None
+    excursion: Optional[ExcursionObj] = None
+    depth: Optional[DepthObj] = None
+
+@dataclass
+class StatusPost:
+    mac: str
+    ram_mb: int
+    swap_mb: int
+    disk_mb: int
+    temp_c: float
+    total_ram_mb: int
+    total_swap_mb: int
+    total_disk_mb: int
+    delta_t_ms: int
+    ping_ms: float
+    timestamp_ms: int
+    last_kal_ms: int
+    last_ntp_ms: int
+    logs: str
+    
+    # We don't define cpu_0, cpu_1 here.
+    # We store them in a list after processing.
+    cpu_loads: List[float] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]):
+        """
+        Custom constructor to handle dynamic flat keys.
+        """
+        # 1. Separate known fields from dynamic CPU fields
+        known_fields = {
+            "mac", "ram_mb", "swap_mb", "disk_mb", "temp_c",
+            "total_ram_mb", "total_swap_mb", "total_disk_mb",
+            "delta_t_ms", "ping_ms", "timestamp_ms",
+            "last_kal_ms", "last_ntp_ms", "logs"
+        }
+        
+        # Filter for the arguments that match our dataclass fields
+        init_args = {k: v for k, v in data.items() if k in known_fields}
+        
+        # 2. Instantiate the class
+        obj = cls(**init_args)
+        
+        # 3. Dynamically find and sort CPU keys (cpu_0, cpu_1, ..., cpu_N)
+        # We look for keys starting with 'cpu_' and followed by an integer
+        cpu_keys = [k for k in data.keys() if k.startswith("cpu_") and k[4:].isdigit()]
+        
+        # Sort them numerically by the index (the part after 'cpu_')
+        cpu_keys.sort(key=lambda x: int(x.split('_')[1]))
+        
+        # 4. Populate the cpu_loads list
+        obj.cpu_loads = [data[k] for k in cpu_keys]
+        
+        return obj
+
 
 class RequestClient:
     """
@@ -23,12 +172,14 @@ class RequestClient:
     def __init__(
         self,
         base_url: str,
+        mac_wifi: str = "",
         timeout: Tuple[float, float] = (5, 15),
         verbose: bool = False,
         logger=None,
     ):
         # Removed api_key argument
         self.base_url = base_url.rstrip("/")
+        self.mac_wifi = mac_wifi
         self.timeout = timeout
         self.verbose = verbose
         self._log = logger
@@ -44,6 +195,11 @@ class RequestClient:
     ) -> Tuple[int, Optional[requests.Response]]:
         # Add default Accept header for GET
         hdrs = {"Accept": "application/json"}
+        if self._is_valid_mac():
+            endpoint = f"/{self.mac_wifi}{endpoint}"
+        else:
+            if self._log:
+                self._log.warning(f"Invalid MAC address {self.mac_wifi}")
         if headers:
             hdrs.update(headers)
         return self._send_request("GET", endpoint, headers=hdrs, params=params)
@@ -136,6 +292,13 @@ class RequestClient:
             if self._log:
                 self._log.error(f"[HTTP] unexpected error: {e}")
             return 2, None
+        
+    def _is_valid_mac(self):
+        pattern = r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$"
+        
+        if re.match(pattern, self.mac_wifi):
+            return True
+        return False
 
 class ZmqPub:
     def __init__(self, addr, verbose=False, log=logging.getLogger(__name__)):

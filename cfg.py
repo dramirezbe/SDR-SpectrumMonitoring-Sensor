@@ -16,7 +16,6 @@ import os
 from typing import Optional, Callable
 from enum import Enum, auto
 from contextlib import redirect_stdout, redirect_stderr
-from dataclasses import dataclass
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,12 +41,16 @@ IPC_DATA_ADDR = os.getenv("IPC_DATA_ADDR", "ipc:///tmp/zmq_data")
 INTERVAL_REQUEST_CAMPAIGNS_S = int(os.getenv("INTERVAL_REQUEST_CAMPAIGNS_S", "60"))
 INTERVAL_REQUEST_REALTIME_S = int(os.getenv("INTERVAL_REQUEST_REALTIME_S", "5"))
 
+
+
 # Paths
 _THIS_FILE = pathlib.Path(__file__).resolve()
 PROJECT_ROOT = _THIS_FILE.parent
 QUEUE_DIR = PROJECT_ROOT / "Queue"
 LOGS_DIR = PROJECT_ROOT / "Logs"
 HISTORIC_DIR = PROJECT_ROOT / "Historic"
+
+FILE_CAMPAIGN_PARAMS = PROJECT_ROOT / "campaign_params.json"
 
 # Ensure critical directories exist
 for p in [QUEUE_DIR, LOGS_DIR, HISTORIC_DIR]:
