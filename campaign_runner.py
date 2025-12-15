@@ -7,6 +7,7 @@
 import cfg
 log = cfg.set_logger()
 from utils import atomic_write_bytes, RequestClient, StatusDevice, ShmStore, ZmqPairController
+from functions import format_data_for_upload
 
 import sys
 import json
@@ -70,21 +71,6 @@ def get_rf_params(store):
         rf_dict = {}
 
     return rf_dict
-
-def format_data_for_upload(payload):
-    Pxx = payload.get("Pxx", [])
-    start_freq_hz = payload.get("start_freq_hz")
-    end_freq_hz = payload.get("end_freq_hz")
-    timestamp = cfg.get_time_ms()
-    mac = cfg.get_mac()
-
-    return {
-        "Pxx": Pxx,
-        "start_freq_hz": start_freq_hz,
-        "end_freq_hz": end_freq_hz,
-        "timestamp": timestamp,
-        "mac": mac
-    }
 
 
 def _delete_oldest_files(dir_path: Path, to_delete: int) -> int:
@@ -150,7 +136,7 @@ async def main() -> int:
         
         # 3. Format
         data_dict = format_data_for_upload(raw_payload)
-        data_dict["campaign_id"] = campaign_id
+        data_dict["campaign_id"] = 5
         
         # --- LOGGING DATA ---
         log.info("----DATATOSEND--------")
@@ -166,9 +152,12 @@ async def main() -> int:
     # 4. Upload
 
     start_delta_t = time.perf_counter()
-    rc, _ = cli.post_json("/data", data_dict)
+    rc, resp = cli.post_json("/data", data_dict)
     end_delta_t = time.perf_counter()
     delta_t_ms = int((end_delta_t - start_delta_t) * 1000)
+
+    log.info(f"rc={rc} resp={resp}")
+    log.info(f"string json={resp.text}")
 
     # save to queue
     if rc != 0:

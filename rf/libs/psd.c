@@ -438,6 +438,25 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     // Shift zero frequency to center
     fftshift(p_out, nfft);
 
+    // --- DC SPIKE REMOVAL (Dynamic 0.5%) ---
+    int c = nfft / 2; 
+    
+    // Calculate 0.5% width in bins (0.25% radius on each side)
+    // We enforce a minimum radius of 1 bin to ensure at least DC is covered
+    int half_width = (int)(nfft * 0.0025); 
+    if (half_width < 1) half_width = 1;
+
+    // Boundary check to ensure we have valid neighbors for averaging
+    // Indices used: c - half_width - 1 (Left Neighbor) AND c + half_width + 1 (Right Neighbor)
+    if (c - half_width - 1 >= 0 && c + half_width + 1 < nfft) {
+        double neighbor_mean = (p_out[c - half_width - 1] + p_out[c + half_width + 1]) / 2.0;
+        
+        // Flatten the center spike area with the mean of the neighbors
+        for (int i = -half_width; i <= half_width; i++) {
+            p_out[c + i] = neighbor_mean;
+        }
+    }
+
     // Generate Frequency Axis
     double df = fs / nfft;
     for (int i = 0; i < nfft; i++) {

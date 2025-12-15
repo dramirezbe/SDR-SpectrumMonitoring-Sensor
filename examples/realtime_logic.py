@@ -1,6 +1,6 @@
 import cfg
 log = cfg.set_logger()
-from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, ShmStore,ElapsedTimer
+from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, ShmStore
 from functions import format_data_for_upload
 
 import asyncio
@@ -22,7 +22,7 @@ def fetch_realtime_config(client):
 
     try:
         start_delta_t = time.perf_counter()
-        rc_returned, resp = client.get(cfg.REALTIME_URL)
+        rc_returned, resp = client.get("/realtime")
         end_delta_t = time.perf_counter()
         delta_t_ms = int((end_delta_t - start_delta_t) * 1000)
         
@@ -69,67 +69,13 @@ def fetch_realtime_config(client):
     except Exception as e:
         log.error(f"Error fetching config: {e}")
         return {}, None, 0
-    
-async def run_realtime_logic(client, store, zmq_ctrl)->int:
-    try:
-        log.info("Fetching realtime configuration...")
-        c_config, _, delta_t_ms = fetch_realtime_config(client)
-        store.add_to_persistent("delta_t_ms", delta_t_ms)
 
-        # --- CHECK: If validation failed or HTTP failed ---
-        if not c_config:
-            log.warning("Bad Config or Connection Error. Skipping realtime...")
-            return 1
 
-        # --- LOGGING PARAMS ---
-        log.info("----SERVER PARAMS-----")
-        for key, val in c_config.items():
-            log.info(f"{key:<18}: {val}")
-        
-        # 1. Send Command
-        await zmq_ctrl.send_command(c_config)
-        
-        log.info("Waiting for PSD data from C engine...")
-
-        try:
-            # 2. Wait for Data
-            raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
-            
-            # 3. Format
-            data_dict = format_data_for_upload(raw_payload)
-            
-            # --- LOGGING DATA ---
-            log.info("----DATATOSEND--------")
-            final_pxx = data_dict.get('Pxx', [])
-            pxx_preview = final_pxx[:5] if isinstance(final_pxx, list) else []
-            log.info(f"Pxx (First 5)     : {pxx_preview}")
-            log.info("----------------------")
-
-            # 4. Upload
-            client.post_json("/data", data_dict)
-
-        except asyncio.TimeoutError:
-            log.warning("TIMEOUT: No data from C-Engine. Skipping...")
-            return 1 
-            
-    except Exception as e:
-        log.error(f"CRITICAL LOOP ERROR: {e}")
-        log.info("Sleeping 5s to recover...")
-        await asyncio.sleep(5)
-
-async def run_campaigns_logic(client, store)->int:
-    rc, resp = client.get(cfg.CAMPAIGN_URL)
-    return 0
 
 # --- 3. Main Server Loop ---
 async def run_server():
-    time.sleep(5) # Wait for init_system (blocking)
+    log.info("Starting ZmqPairController server loop...")
     store = ShmStore()
-    tim_realtime = ElapsedTimer()
-    tim_campaigns = ElapsedTimer()
-
-    tim_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
-    tim_campaigns.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
     
     zmq_ctrl = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
     await asyncio.sleep(0.5)
@@ -138,17 +84,53 @@ async def run_server():
     
     # "Never Die" Loop
     while True:
-        if tim_realtime.time_elapsed():
-            rc = await run_realtime_logic(client, store, zmq_ctrl)
-            if rc != 0:
-                log.info("Skipping realtime...")
-                tim_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
-        if tim_campaigns.time_elapsed():
-            rc = await run_campaigns_logic(client, store)
-            if rc != 0:
-                log.info("Skipping campaigns...")
-                tim_campaigns.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
-        
+        try:
+            log.info("Fetching job configuration...")
+            c_config, _, delta_t_ms = fetch_realtime_config(client)
+            store.add_to_persistent("delta_t_ms", delta_t_ms)
+
+            # --- CHECK: If validation failed or HTTP failed ---
+            if not c_config:
+                log.warning("Bad Config or Connection Error. Sleeping 5s before retrying...")
+                await asyncio.sleep(5)
+                continue # Jumps back to 'while True'
+
+            # --- LOGGING PARAMS ---
+            log.info("----SERVER PARAMS-----")
+            for key, val in c_config.items():
+                log.info(f"{key:<18}: {val}")
+            
+            # 1. Send Command
+            await zmq_ctrl.send_command(c_config)
+            
+            log.info("Waiting for PSD data from C engine...")
+
+            try:
+                # 2. Wait for Data
+                raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
+                
+                # 3. Format
+                data_dict = format_data_for_upload(raw_payload)
+                
+                # --- LOGGING DATA ---
+                log.info("----DATATOSEND--------")
+                final_pxx = data_dict.get('Pxx', [])
+                pxx_preview = final_pxx[:5] if isinstance(final_pxx, list) else []
+                log.info(f"Pxx (First 5)     : {pxx_preview}")
+                log.info("----------------------")
+
+                # 4. Upload
+                client.post_json("/data", data_dict)
+
+            except asyncio.TimeoutError:
+                log.warning("TIMEOUT: No data from C-Engine. Retrying...")
+                continue 
+            
+        except Exception as e:
+            # BROAD SAFETY NET: Catches anything else to prevent script death
+            log.error(f"CRITICAL LOOP ERROR: {e}")
+            log.info("Sleeping 5s to recover...")
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     try:

@@ -10,7 +10,6 @@ import json
 import time
 import sys
 from pathlib import Path
-from typing import Optional
 
 import cfg
 from utils import RequestClient

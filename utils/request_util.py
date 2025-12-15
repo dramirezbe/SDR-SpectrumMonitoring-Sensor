@@ -16,20 +16,21 @@ from dataclasses import dataclass
 class ServerRealtimeConfig:
     """
     Validates and holds the configuration for the C-Engine.
+    All fields are mandatory; no default values are provided.
     """
-    rf_mode: str = "realtime"
-    center_freq_hz: int = 98_000_000
-    sample_rate_hz: int = 20_000_000
-    rbw_hz: int = 10_000
-    window: str = "hamming"
-    scale: str = "dBm"
-    overlap: float = 0.5
-    lna_gain: int = 0
-    vga_gain: int = 0
-    antenna_amp: bool = False
-    antenna_port: int = 2
-    span: int = 20_000_000
-    ppm_error: int = 0
+    rf_mode: str
+    center_freq_hz: int
+    sample_rate_hz: int
+    rbw_hz: int
+    window: str
+    scale: str
+    overlap: float
+    lna_gain: int
+    vga_gain: int
+    antenna_amp: bool
+    antenna_port: int
+    span: int
+    ppm_error: int
 
     def __post_init__(self):
         """
@@ -48,8 +49,8 @@ class ServerRealtimeConfig:
         if not (0.0 <= self.overlap < 1.0):
             raise ValueError(f"Overlap {self.overlap} is invalid. Must be >= 0.0 and < 1.0.")
 
-        # 4. Validate Antenna Port (1, 2, or 3)
-        if self.antenna_port not in [1, 2, 3]:
+        # 4. Validate Antenna Port
+        if self.antenna_port not in [1, 2, 3, 4]:
             raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1, 2, or 3.")
 
         # 5. Sanity Check Span

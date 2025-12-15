@@ -40,7 +40,7 @@ def main()->int:
         log.error(f"Error building final payload: {e}")
         return 1
     
-    rc, resp = cli.post_json(cfg.STATUS_URL, metrics_dict)
+    rc, _ = cli.post_json(cfg.STATUS_URL, metrics_dict)
     if rc != 0:
         log.error(f"Error sending status: {rc}")
         return 1
