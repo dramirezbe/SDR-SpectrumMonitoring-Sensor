@@ -2,26 +2,13 @@
     //---Env Sensor Params---
     "api_ip": "127.0.0.1",
     "api_port": 9000,
-    "jobs_ep": "/jobs",
+    "campaigns_ep": "/campaigns",
     "init_ep": "/init",
     "data_ep": "/data",
     "status_ep": "/status",
     "realtime_ep": "/realtime",
-    "verbose": true, 
-
-    //---Acquisition Params---
-    //int
-    "order_filter":2,
-    //str
-    "window": "hamming",
-    //float
-    "overlap": 0.5,  
-    //int  
-    "lna_gain": 0,
-    //int
-    "vga_gain": 0,
-    //bool
-    "antenna_amp": true,
+    "gps_ep": "/gps",
+    "verbose": true,
 
     //always in /init endpoint
     "daemons": {

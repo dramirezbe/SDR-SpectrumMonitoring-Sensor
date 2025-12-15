@@ -19,5 +19,6 @@ void rb_free(ring_buffer_t *rb);
 size_t rb_write(ring_buffer_t *rb, const void *data, size_t len);
 size_t rb_read(ring_buffer_t *rb, void *data, size_t len);
 size_t rb_available(ring_buffer_t *rb);
+void rb_reset(ring_buffer_t *rb);
 
 #endif

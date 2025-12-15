@@ -1,6 +1,6 @@
-// Data post request
+//POST data
 {
-    //str
+  //str
     "mac": "00:00:00:00:00:00",
     //Optional, only If is a campaign medition, if real time it will do not appear
     "campaign_id": 123,
@@ -11,7 +11,6 @@
     "end_freq_hz": 2000,
     // Timestamp of the moment the acquisition was performed (unix ms)
     "timestamp": 1758435092721,
-
 
     //None if not available(with_metrics)
     "excursion": {

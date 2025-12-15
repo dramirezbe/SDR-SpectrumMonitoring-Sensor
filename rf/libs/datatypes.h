@@ -37,12 +37,19 @@ typedef struct {
 typedef enum {
     REALTIME_MODE,
     CAMPAIGN_MODE,
-    DEMODE_MODE
-}rf_mode_t;
+    FM_MODE,
+    AM_MODE
+} rf_mode_t;
+
+typedef struct {
+    double center_freq;
+    double bw_hz;
+    bool with_metrics;
+} DemodeConfig_t;
 
 typedef struct {
     rf_mode_t rf_mode;
-    bool with_metrics;
+    DemodeConfig_t demode_config;
     uint64_t center_freq;
     double sample_rate;
     double span;
@@ -50,7 +57,6 @@ typedef struct {
     int vga_gain;
     bool amp_enabled;
     int antenna_port;       // New: 1 or 2
-    
     // PSD Processing Config
     int rbw;
     double overlap;

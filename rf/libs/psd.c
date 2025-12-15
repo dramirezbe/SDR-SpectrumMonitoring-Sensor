@@ -1,4 +1,3 @@
-//libs/psd.c
 #include "psd.h"
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +5,13 @@
 #include <fftw3.h>
 #include <alloca.h>
 #include <complex.h>
+#include <ctype.h>
+
+// Helper to ensure case-insensitivity
+static void to_lowercase(char *str) {
+    if (!str) return;
+    for (; *str; ++str) *str = tolower((unsigned char)*str);
+}
 
 // =========================================================
 // IQ & Memory
@@ -14,11 +20,18 @@
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size) {
     size_t n_samples = buffer_size / 2;
     signal_iq_t* signal_data = (signal_iq_t*)malloc(sizeof(signal_iq_t));
+    if (!signal_data) return NULL;
     
     signal_data->n_signal = n_samples;
     signal_data->signal_iq = (double complex*)malloc(n_samples * sizeof(double complex));
+    if (!signal_data->signal_iq) {
+        free(signal_data);
+        return NULL;
+    }
 
     for (size_t i = 0; i < n_samples; i++) {
+        // Convert interleaved 8-bit I/Q to complex double
+        // Buffer is [I0, Q0, I1, Q1, ...]
         signal_data->signal_iq[i] = (double)buffer[2 * i] + (double)buffer[2 * i + 1] * I;
     }
 
@@ -38,36 +51,54 @@ void free_signal_iq(signal_iq_t* signal) {
 
 static PsdWindowType_t get_window_type_from_string(const char *window_str) {
     if (window_str == NULL) return HAMMING_TYPE;
-    
-    if (strcasecmp(window_str, "hann") == 0) return HANN_TYPE;
-    if (strcasecmp(window_str, "rectangular") == 0) return RECTANGULAR_TYPE;
-    if (strcasecmp(window_str, "blackman") == 0) return BLACKMAN_TYPE;
-    if (strcasecmp(window_str, "hamming") == 0) return HAMMING_TYPE;
-    if (strcasecmp(window_str, "flattop") == 0) return FLAT_TOP_TYPE;
-    if (strcasecmp(window_str, "kaiser") == 0) return KAISER_TYPE;
-    if (strcasecmp(window_str, "tukey") == 0) return TUKEY_TYPE;
-    if (strcasecmp(window_str, "bartlett") == 0) return BARTLETT_TYPE;
 
-    return HAMMING_TYPE;
+    // Create a local copy to lowercase it safely
+    char *temp = strdup(window_str);
+    if (!temp) return HAMMING_TYPE;
+    to_lowercase(temp);
+    
+    PsdWindowType_t type = HAMMING_TYPE;
+    
+    if (strcmp(temp, "hann") == 0) type = HANN_TYPE;
+    else if (strcmp(temp, "rectangular") == 0) type = RECTANGULAR_TYPE;
+    else if (strcmp(temp, "blackman") == 0) type = BLACKMAN_TYPE;
+    else if (strcmp(temp, "hamming") == 0) type = HAMMING_TYPE;
+    else if (strcmp(temp, "flattop") == 0) type = FLAT_TOP_TYPE;
+    else if (strcmp(temp, "kaiser") == 0) type = KAISER_TYPE;
+    else if (strcmp(temp, "tukey") == 0) type = TUKEY_TYPE;
+    else if (strcmp(temp, "bartlett") == 0) type = BARTLETT_TYPE;
+
+    free(temp);
+    return type;
 }
 
-int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
+int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
     if (json_string == NULL || target == NULL) return -1;
 
+    // Ensure target is clean
+    // NOTE: Caller must call free_desired_psd if reusing struct
     memset(target, 0, sizeof(DesiredCfg_t));
+    
+    // Set defaults
     target->window_type = HAMMING_TYPE;
     target->antenna_port = 1;
+    target->rf_mode = REALTIME_MODE;
 
     cJSON *root = cJSON_Parse(json_string);
     if (root == NULL) return -1;
 
-    // 1. RF Mode
+    // 1. RF Mode (Case Insensitive)
     cJSON *rf_mode = cJSON_GetObjectItemCaseSensitive(root, "rf_mode");
-    if (cJSON_IsString(rf_mode)) {
-        if(strcmp(rf_mode->valuestring, "realtime") == 0) target->rf_mode = REALTIME_MODE;
-        else if(strcmp(rf_mode->valuestring, "campaign") == 0) target->rf_mode = CAMPAIGN_MODE;
-        else if(strcmp(rf_mode->valuestring, "demodulate") == 0) target->rf_mode = DEMODE_MODE;
-        else target->rf_mode = REALTIME_MODE;
+    if (cJSON_IsString(rf_mode) && rf_mode->valuestring) {
+        char *mode_str = strdup(rf_mode->valuestring);
+        to_lowercase(mode_str);
+
+        if(strcmp(mode_str, "realtime") == 0) target->rf_mode = REALTIME_MODE;
+        else if(strcmp(mode_str, "campaign") == 0) target->rf_mode = CAMPAIGN_MODE;
+        else if(strcmp(mode_str, "fm") == 0) target->rf_mode = FM_MODE;
+        else if(strcmp(mode_str, "am") == 0) target->rf_mode = AM_MODE;
+        
+        free(mode_str);
     }
 
     // 2. Numeric params
@@ -86,13 +117,17 @@ int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
     cJSON *ov = cJSON_GetObjectItemCaseSensitive(root, "overlap");
     if (cJSON_IsNumber(ov)) target->overlap = ov->valuedouble;
 
-    // 3. Window
+    // 3. Window (handled by helper)
     cJSON *win = cJSON_GetObjectItemCaseSensitive(root, "window");
     if (cJSON_IsString(win)) target->window_type = get_window_type_from_string(win->valuestring);
 
     // 4. Scale
     cJSON *sc = cJSON_GetObjectItemCaseSensitive(root, "scale");
-    if (cJSON_IsString(sc) && (sc->valuestring != NULL)) target->scale = strdup(sc->valuestring);
+    if (cJSON_IsString(sc) && (sc->valuestring != NULL)) {
+        target->scale = strdup(sc->valuestring);
+        // We do NOT lowercase here because we want to preserve user string,
+        // but scale_psd() will handle case-insensitive comparison.
+    }
 
     // 5. Gains
     cJSON *lna = cJSON_GetObjectItemCaseSensitive(root, "lna_gain");
@@ -107,6 +142,12 @@ int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
 
     cJSON *port = cJSON_GetObjectItemCaseSensitive(root, "antenna_port");
     if (cJSON_IsNumber(port)) target->antenna_port = (int)port->valuedouble;
+    
+    // Fallback error handling if center freq is 0 (invalid config usually)
+    if (target->center_freq == 0 && target->sample_rate == 0) {
+        cJSON_Delete(root);
+        return -1;
+    }
 
     cJSON_Delete(root);
     return 0;
@@ -114,11 +155,22 @@ int parse_psd_config(const char *json_string, DesiredCfg_t *target) {
 
 int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg) {
     double enbw_factor = get_window_enbw_factor(desired.window_type);
-    double required_nperseg_val = enbw_factor * (double)desired.sample_rate / (double)desired.rbw;
+    
+    // Avoid division by zero
+    double safe_rbw = (desired.rbw > 0) ? (double)desired.rbw : 1000.0;
+    
+    double required_nperseg_val = enbw_factor * (double)desired.sample_rate / safe_rbw;
     int exponent = (int)ceil(log2(required_nperseg_val));
     
     psd_cfg->nperseg = (int)pow(2, exponent);
-    psd_cfg->noverlap = psd_cfg->nperseg * desired.overlap;
+    // Ensure nperseg is reasonable
+    if (psd_cfg->nperseg < 256) psd_cfg->nperseg = 256; 
+
+    psd_cfg->noverlap = (int)(psd_cfg->nperseg * desired.overlap);
+    if (psd_cfg->noverlap >= psd_cfg->nperseg) {
+        psd_cfg->noverlap = psd_cfg->nperseg - 1;
+    }
+
     psd_cfg->window_type = desired.window_type;
     psd_cfg->sample_rate = desired.sample_rate;
 
@@ -129,17 +181,20 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
     hack_cfg->vga_gain = desired.vga_gain;
     hack_cfg->ppm_error = desired.ppm_error;
 
-    // Default to ~1 second of data if not specified
+    // Default to ~1 second of data
     rb_cfg->total_bytes = (size_t)(desired.sample_rate * 2);
     return 0;
 }
 
 void print_config_summary(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *psd, RB_cfg_t *rb) {
-    double capture_duration = (double)rb->total_bytes / 2.0 / hw->sample_rate;
+    double capture_duration = 0.0;
+    if (hw->sample_rate > 0) {
+        capture_duration = (double)rb->total_bytes / 2.0 / hw->sample_rate;
+    }
 
     printf("\n================ [ CONFIGURATION SUMMARY ] ================\n");
     printf("--- ACQUISITION (Hardware) ---\n");
-    printf("Center Freq : %lu Hz\n", hw->center_freq);
+    printf("Center Freq : %" PRIu64 " Hz\n", hw->center_freq);
     printf("Sample Rate : %.2f MS/s\n", hw->sample_rate / 1e6);
     printf("LNA / VGA   : %d dB / %d dB\n", hw->lna_gain, hw->vga_gain);
     printf("Amp / Port  : %s / %d\n", hw->amp_enabled ? "ON" : "OFF", des->antenna_port);
@@ -159,8 +214,6 @@ void free_desired_psd(DesiredCfg_t *target) {
             free(target->scale);
             target->scale = NULL;
         }
-        // If rf_mode was allocated dynamically, free it here. 
-        // In current struct it looks like an enum, but check if struct changed.
     }
 }
 
@@ -175,11 +228,17 @@ int scale_psd(double* psd, int nperseg, const char* scale_str) {
     typedef enum { UNIT_DBM, UNIT_DBUV, UNIT_DBMV, UNIT_WATTS, UNIT_VOLTS } Unit_t;
     Unit_t unit = UNIT_DBM;
     
+    // Local copy for case insensitivity check
     if (scale_str) {
-        if (strcmp(scale_str, "dBuV") == 0) unit = UNIT_DBUV;
-        else if (strcmp(scale_str, "dBmV") == 0) unit = UNIT_DBMV;
-        else if (strcmp(scale_str, "W") == 0)    unit = UNIT_WATTS;
-        else if (strcmp(scale_str, "V") == 0)    unit = UNIT_VOLTS;
+        char *temp_scale = strdup(scale_str);
+        to_lowercase(temp_scale);
+        
+        if (strcmp(temp_scale, "dbuv") == 0) unit = UNIT_DBUV;
+        else if (strcmp(temp_scale, "dbmv") == 0) unit = UNIT_DBMV;
+        else if (strcmp(temp_scale, "w") == 0)    unit = UNIT_WATTS;
+        else if (strcmp(temp_scale, "v") == 0)    unit = UNIT_VOLTS;
+        
+        free(temp_scale);
     }
 
     for (int i = 0; i < nperseg; i++) {
@@ -206,7 +265,7 @@ double get_window_enbw_factor(PsdWindowType_t type) {
         case HAMMING_TYPE:     return 1.363;
         case HANN_TYPE:        return 1.500;
         case BLACKMAN_TYPE:    return 1.730;
-        default:               return 1.0;
+        default:               return 1.363;
     }
 }
 
@@ -247,9 +306,14 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     
     int nfft = nperseg;
     int step = nperseg - noverlap;
-    int k_segments = (n_signal - noverlap) / step;
+    if (step < 1) step = 1;
+    
+    int k_segments = (int)((n_signal - noverlap) / step); // Cast to int explicitly
+    if (k_segments < 1) k_segments = 0;
 
     double* window = (double*)malloc(nperseg * sizeof(double));
+    if (!window) return; 
+    
     generate_window(config->window_type, window, nperseg);
 
     double u_norm = 0.0;
@@ -266,7 +330,12 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
         int start = k * step;
         
         for (int i = 0; i < nperseg; i++) {
-            fft_in[i] = signal[start + i] * window[i];
+            // FIX: Cast (start + i) to size_t to match n_signal type
+            if ((size_t)(start + i) < n_signal) {
+                fft_in[i] = signal[start + i] * window[i];
+            } else {
+                fft_in[i] = 0;
+            }
         }
 
         fftw_execute(plan);
@@ -277,8 +346,10 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
         }
     }
 
-    double scale = 1.0 / (fs * u_norm * k_segments * nperseg);
-    for (int i = 0; i < nfft; i++) p_out[i] *= scale;
+    if (k_segments > 0 && u_norm > 0) {
+        double scale = 1.0 / (fs * u_norm * k_segments * nperseg);
+        for (int i = 0; i < nfft; i++) p_out[i] *= scale;
+    }
 
     fftshift(p_out, nfft);
 

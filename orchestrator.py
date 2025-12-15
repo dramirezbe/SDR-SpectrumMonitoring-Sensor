@@ -29,6 +29,8 @@ def fetch_job(client):
     # ------------------------------------------
         
     return {
+        "rf_mode": "realtime",
+        "antenna_port": json_payload.get("antenna_port", 1),
         "center_freq_hz": center,
         "rbw_hz": json_payload.get("resolution_hz"),
         "port": json_payload.get("antenna_port"),

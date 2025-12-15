@@ -1,14 +1,14 @@
 //GET /init
 {
-    "device_id": 10,
     //---Env Sensor Params---
     "api_ip": "127.0.0.1",
     "api_port": 9000,
-    "jobs_ep": "/jobs",
+    "campaigns_ep": "/campaigns",
     "init_ep": "/init",
     "data_ep": "/data",
     "status_ep": "/status",
     "realtime_ep": "/realtime",
+    "gps_ep": "/gps",
     "verbose": true,
 
     //always in /init endpoint

@@ -1,9 +1,8 @@
+//POST gps
 {
-    //str
-    "mac": "00:00:00:00:00:00",
-    // (float) (degrees)
-    "lat": 5.0741,
-    "lng": -75.5169,
-    // Altitude in meters
-    "alt": 2500.6
+  "mac": "00:11:22:33:44:55",
+  "lat": 4.711,
+  "lng": -74.0721,
+  "alt": 2640.5,
+  "timestamp": 1638316800000
 }

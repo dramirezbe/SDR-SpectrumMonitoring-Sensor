@@ -1,4 +1,4 @@
-//GET realtime endpoint (defalult always capture spectrum)
+//GET realtime
 {
     /// Central spectral analysis frequency (Hz).
     "center_freq_hz": 9800000,
@@ -24,6 +24,7 @@
     "vga_gain": 0,
     //bool
     "antenna_amp": false,
+    "antenna_port": 1,
 
     //Can be null if no demodulation is required
     "demodulation": {
@@ -31,17 +32,8 @@
         // Type of demodulation (AM/FM). (str)
         "type": "FM",
 
-        //Calculate excursion, and depth (bool)
-        "with_metrics": true,
-
         // Bandwidth of the demodulated channel (Hz).
-        "bw_hz": 250000,
-
-        // Center frequency of the dem
-        // odulated channel (Hz).
-        "center_freq_hz": 95500000,
-
-        "port_socket": "/1234"
+        "bw_hz": 250000
     },
     //None if not needed
     "filter":{
