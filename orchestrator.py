@@ -1,50 +1,83 @@
 import cfg
 log = cfg.set_logger()
-from utils import ZmqPub, ZmqSub, RequestClient 
+from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, ShmStore
+
 import asyncio
+from dataclasses import asdict
+from enum import Enum, auto
+import time
 
-topic_data = "data"
-topic_sub = "acquire"
+class SysState(Enum):
+    IDLE = auto()
+    CAMPAIGN = auto()
+    REALTIME = auto()
+    CALIBRATING = auto()
 
-def fetch_job(client):
+def fetch_realtime_config(client):
     """
-    Fetches job configuration.
-    Includes safety checks to prevent int(None) crashes.
+    Fetches job configuration from /realtime and validates it using ServerJobConfig.
+    
+    Returns:
+        c_engine_config (dict): The validated dict for C-Engine, or {} on failure.
+        resp (Response): The HTTP response object.
     """
-    rc_returned, resp = client.get("/configuration")
-    
-    json_payload = {}
-    
-    if resp is not None and resp.status_code == 200:
+    try:
+        start_delta_t = time.perf_counter()
+        rc_returned, resp = client.get("/realtime")
+        end_delta_t = time.perf_counter()
+        delta_t_ms = int((end_delta_t - start_delta_t) * 1000)
+        
+        json_payload = {}
+        
+        # Check HTTP Status
+        if resp is None or resp.status_code != 200:
+            return {}, resp
+        
         try:
             json_payload = resp.json()
         except Exception:
-            json_payload = {}
-    
-    if not json_payload:
-        return {}, resp
-
-    center = int(json_payload.get("center_frequency") or 0)
-    span = int(json_payload.get("span") or 0)
-    # ------------------------------------------
+            # JSON decode error
+            return {}, resp
         
-    return {
-        "rf_mode": "realtime",
-        "antenna_port": json_payload.get("antenna_port", 1),
-        "center_freq_hz": center,
-        "rbw_hz": json_payload.get("resolution_hz"),
-        "port": json_payload.get("antenna_port"),
-        "win": json_payload.get("window"),
-        "overlap": json_payload.get("overlap"),
-        "sample_rate_hz": json_payload.get("sample_rate_hz"),
-        "lna_gain": json_payload.get("lna_gain"),
-        "vga_gain": json_payload.get("vga_gain"),
-        "antenna_amp": json_payload.get("antenna_amp"),
-        "span": span
-    }, resp
+        if not json_payload:
+            return {}, resp
 
-def fetch_data(payload):
-    # Extract raw data from C-Engine
+        # --- VALIDATION STEP ---
+        try:
+            # Handle dynamic span logic
+            start_sample_rate = int(json_payload.get("sample_rate_hz", 20_000_000))
+            calculated_span = int(json_payload.get("span", start_sample_rate))
+
+            # Instantiate Dataclass (Triggers __post_init__ validation)
+            config_obj = ServerRealtimeConfig(
+                rf_mode="realtime",
+                center_freq_hz=int(json_payload.get("center_frequency_hz", 98_000_000)),
+                sample_rate_hz=start_sample_rate,
+                rbw_hz=int(json_payload.get("rbw_hz", 10_000)),
+                window=json_payload.get("window", "hamming"),
+                scale=json_payload.get("scale", "dBm"),
+                overlap=float(json_payload.get("overlap", 0.5)),
+                lna_gain=int(json_payload.get("lna_gain", 0)),
+                vga_gain=int(json_payload.get("vga_gain", 0)),
+                antenna_amp=bool(json_payload.get("antenna_amp", False)),
+                antenna_port=int(json_payload.get("antenna_port", 2)),
+                span=calculated_span,
+                ppm_error=0
+            )
+
+            # Return valid dictionary
+            return asdict(config_obj), resp, delta_t_ms
+
+        except (ValueError, TypeError) as val_err:
+            # LOGGING: This is where we catch validation errors (e.g., negative freq)
+            log.error(f"VALIDATION ERROR: {val_err}")
+            return {}, resp
+
+    except Exception as e:
+        log.error(f"Error fetching config: {e}")
+        return {}, None
+
+def format_data_for_upload(payload):
     Pxx = payload.get("Pxx", [])
     start_freq_hz = payload.get("start_freq_hz")
     end_freq_hz = payload.get("end_freq_hz")
@@ -59,106 +92,64 @@ def fetch_data(payload):
         "mac": mac
     }
 
+# --- 3. Main Server Loop ---
 async def run_server():
-    log.info("Starting server loop...")
-    pub = ZmqPub(addr=cfg.IPC_CMD_ADDR)
-    sub = ZmqSub(addr=cfg.IPC_DATA_ADDR, topic=topic_data)
-
+    log.info("Starting ZmqPairController server loop...")
+    store = ShmStore()
+    
+    zmq_ctrl = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
     await asyncio.sleep(0.5)
+    
     client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
     
+    # "Never Die" Loop
     while True:
         try:
             log.info("Fetching job configuration...")
-            json_dict, resp = fetch_job(client)
+            c_config, resp, delta_t_ms = fetch_realtime_config(client)
+            store.add_to_persistent("delta_t_ms", delta_t_ms)
 
-            if resp is None or resp.status_code != 200 or not json_dict:
-                log.warning("Fetch failed or empty. Retrying in 5s...")
+            # --- CHECK: If validation failed or HTTP failed ---
+            if not c_config:
+                log.warning("Bad Config or Connection Error. Sleeping 5s before retrying...")
                 await asyncio.sleep(5)
-                continue
+                continue # Jumps back to 'while True'
 
-            # --- LOGGING REQ 1: SERVER PARAMS ---
+            # --- LOGGING PARAMS ---
             log.info("----SERVER PARAMS-----")
-            for key, val in json_dict.items():
+            for key, val in c_config.items():
                 log.info(f"{key:<18}: {val}")
-            # ------------------------------------
-
-            # --- FIX 2: Variable Naming & Logic ---
-            # Use 'span' key which we ensured exists in fetch_job
-            desired_span = int(json_dict.get("span", 0))
             
-            if desired_span <= 0:
-                log.warning(f"Invalid span received ({desired_span}). Skipping cycle.")
-                await asyncio.sleep(5)
-                continue
-
-            pub.public_client(topic_sub, json_dict)
-            log.info("Waiting for PSD data from C engine (5s Timeout)...")
+            # 1. Send Command
+            await zmq_ctrl.send_command(c_config)
+            
+            log.info("Waiting for PSD data from C engine...")
 
             try:
-                # 1. Get Data from C-Engine
-                raw_data = await asyncio.wait_for(sub.wait_msg(), timeout=10)
+                # 2. Wait for Data
+                raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
                 
-                # 2. Format into Dictionary
-                data_dict = fetch_data(raw_data)
+                # 3. Format
+                data_dict = format_data_for_upload(raw_payload)
                 
-                # --- SPAN LOGIC START ---
-                raw_pxx = data_dict.get('Pxx')
-                
-                if raw_pxx and len(raw_pxx) > 0:
-                    current_start = float(data_dict.get('start_freq_hz'))
-                    current_end = float(data_dict.get('end_freq_hz'))
-                    current_bw = current_end - current_start
-                    
-                    len_Pxx = len(raw_pxx)
-
-                    # Only chop if valid bandwidths
-                    if current_bw > 0 and desired_span < current_bw:
-                        
-                        center_freq = current_start + (current_bw / 2)
-                        ratio = desired_span / current_bw
-                        bins_to_keep = int(len_Pxx * ratio)
-
-                        # Bounds check
-                        if bins_to_keep > len_Pxx: bins_to_keep = len_Pxx
-                        if bins_to_keep < 1: bins_to_keep = 1
-
-                        # Slicing
-                        start_idx = int((len_Pxx - bins_to_keep) // 2)
-                        end_idx = start_idx + bins_to_keep
-
-                        data_dict['Pxx'] = raw_pxx[start_idx : end_idx]
-                        
-                        # Update headers
-                        data_dict['start_freq_hz'] = center_freq - (desired_span / 2)
-                        data_dict['end_freq_hz'] = center_freq + (desired_span / 2)
-
-                        log.info(f"Chopped Pxx: {len_Pxx} -> {len(data_dict['Pxx'])} bins")
-                # --- SPAN LOGIC END ---
-
-                # --- LOGGING REQ 2: DATATOSEND ---
+                # --- LOGGING DATA ---
                 log.info("----DATATOSEND--------")
-                
-                # 1. Print first 5 points of Pxx
                 final_pxx = data_dict.get('Pxx', [])
                 pxx_preview = final_pxx[:5] if isinstance(final_pxx, list) else []
                 log.info(f"Pxx (First 5)     : {pxx_preview}")
-                
-                # 2. Print rest of data (excluding the full Pxx array to save space)
-                for key, val in data_dict.items():
-                    if key != "Pxx":
-                        log.info(f"{key:<18}: {val}")
                 log.info("----------------------")
-                # ----------------------------------
 
+                # 4. Upload
                 client.post_json("/data", data_dict)
 
             except asyncio.TimeoutError:
-                log.warning("TIMEOUT: No data received.")
+                log.warning("TIMEOUT: No data from C-Engine. Retrying...")
                 continue 
             
         except Exception as e:
-            log.error(f"Unexpected error: {e}")
+            # BROAD SAFETY NET: Catches anything else to prevent script death
+            log.error(f"CRITICAL LOOP ERROR: {e}")
+            log.info("Sleeping 5s to recover...")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":

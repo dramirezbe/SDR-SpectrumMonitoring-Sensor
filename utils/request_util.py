@@ -4,160 +4,57 @@
 """
 
 import requests
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any
 import zmq
 import zmq.asyncio
 import json
-import logging
 import re
-from dataclasses import dataclass, field
-
-# -------------------------
-# Shared / Nested Objects
-# -------------------------
+import os
+from dataclasses import dataclass
 
 @dataclass
-class Timeframe:
-    start: int  # Unix ms
-    end: int    # Unix ms
-
-@dataclass
-class Filter:
-    type: str
-    filter_bw_hz: int
-    order_filter: int
-
-@dataclass
-class Demodulation:
-    type: str
-    with_metrics: bool
-    bw_hz: int
-    center_freq_hz: int
-    port_socket: str
-
-@dataclass
-class ExcursionObj:
-    unit: str
-    peak_to_peak_hz: float
-    peak_deviation_hz: float
-    rms_deviation_hz: float
-
-@dataclass
-class DepthObj:
-    unit: str
-    peak_to_peak: float
-    peak_deviation: float
-    rms_deviation: float
-
-# -------------------------
-# Base Configuration
-# -------------------------
-@dataclass(kw_only=True)  # <--- ADD kw_only=True HERE
-class SpectrumConfig:
+class ServerRealtimeConfig:
     """
-    Base parameters shared between Campaign and Realtime.
+    Validates and holds the configuration for the C-Engine.
     """
-    center_freq_hz: int
-    rbw_hz: int
-    sample_rate_hz: int
-    span: int
-    scale: str
-    window: str
-    overlap: float
-    lna_gain: int
-    vga_gain: int
-    antenna_amp: bool
-    # antenna_port has a default, so it "poisoned" the inheritance order for subclasses
-    antenna_port: Optional[int] = None 
+    rf_mode: str = "realtime"
+    center_freq_hz: int = 98_000_000
+    sample_rate_hz: int = 20_000_000
+    rbw_hz: int = 10_000
+    window: str = "hamming"
+    scale: str = "dBm"
+    overlap: float = 0.5
+    lna_gain: int = 0
+    vga_gain: int = 0
+    antenna_amp: bool = False
+    antenna_port: int = 2
+    span: int = 20_000_000
+    ppm_error: int = 0
 
-# -------------------------
-# GET: Responses
-# -------------------------
-
-@dataclass(kw_only=True) # <--- ADD kw_only=True HERE
-class Campaign(SpectrumConfig):
-    campaign_id: int
-    status: str
-    acquisition_period_s: int
-    timeframe: Timeframe
-    filter: Optional[Filter] = None
-
-@dataclass(kw_only=True) # <--- ADD kw_only=True HERE
-class Realtime(SpectrumConfig):
-    demodulation: Optional[Demodulation] = None
-    filter: Optional[Filter] = None
-
-@dataclass
-class CampaignListResponse:
-    campaigns: List[Campaign]
-
-# -------------------------
-# POST: Requests
-# -------------------------
-
-@dataclass
-class DataPost:
-    mac: str
-    Pxx: List[float]
-    start_freq_hz: int
-    end_freq_hz: int
-    timestamp: int  # Unix ms
-    campaign_id: Optional[int] = None
-    excursion: Optional[ExcursionObj] = None
-    depth: Optional[DepthObj] = None
-
-@dataclass
-class StatusPost:
-    mac: str
-    ram_mb: int
-    swap_mb: int
-    disk_mb: int
-    temp_c: float
-    total_ram_mb: int
-    total_swap_mb: int
-    total_disk_mb: int
-    delta_t_ms: int
-    ping_ms: float
-    timestamp_ms: int
-    last_kal_ms: int
-    last_ntp_ms: int
-    logs: str
-    
-    # We don't define cpu_0, cpu_1 here.
-    # We store them in a list after processing.
-    cpu_loads: List[float] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]):
+    def __post_init__(self):
         """
-        Custom constructor to handle dynamic flat keys.
+        Runs automatically after initialization to validate ranges.
+        Raises ValueError if any parameter is invalid.
         """
-        # 1. Separate known fields from dynamic CPU fields
-        known_fields = {
-            "mac", "ram_mb", "swap_mb", "disk_mb", "temp_c",
-            "total_ram_mb", "total_swap_mb", "total_disk_mb",
-            "delta_t_ms", "ping_ms", "timestamp_ms",
-            "last_kal_ms", "last_ntp_ms", "logs"
-        }
-        
-        # Filter for the arguments that match our dataclass fields
-        init_args = {k: v for k, v in data.items() if k in known_fields}
-        
-        # 2. Instantiate the class
-        obj = cls(**init_args)
-        
-        # 3. Dynamically find and sort CPU keys (cpu_0, cpu_1, ..., cpu_N)
-        # We look for keys starting with 'cpu_' and followed by an integer
-        cpu_keys = [k for k in data.keys() if k.startswith("cpu_") and k[4:].isdigit()]
-        
-        # Sort them numerically by the index (the part after 'cpu_')
-        cpu_keys.sort(key=lambda x: int(x.split('_')[1]))
-        
-        # 4. Populate the cpu_loads list
-        obj.cpu_loads = [data[k] for k in cpu_keys]
-        
-        return obj
+        # 1. Validate Center Frequency (8 MHz - 6 GHz)
+        if not (8_000_000 <= self.center_freq_hz <= 6_000_000_000):
+            raise ValueError(f"Center frequency {self.center_freq_hz} Hz is out of range (8MHz - 6GHz).")
 
+        # 2. Validate Sample Rate (1.5 MHz - 2 GHz)
+        if not (1_500_000 <= self.sample_rate_hz <= 2_000_000_000):
+            raise ValueError(f"Sample rate {self.sample_rate_hz} Hz is out of range (1.5MHz - 2GHz).")
+
+        # 3. Validate Overlap (0.0 to 0.99)
+        if not (0.0 <= self.overlap < 1.0):
+            raise ValueError(f"Overlap {self.overlap} is invalid. Must be >= 0.0 and < 1.0.")
+
+        # 4. Validate Antenna Port (1, 2, or 3)
+        if self.antenna_port not in [1, 2, 3]:
+            raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1, 2, or 3.")
+
+        # 5. Sanity Check Span
+        if self.span <= 0:
+            raise ValueError(f"Span {self.span} must be positive.")
 
 class RequestClient:
     """
@@ -300,53 +197,31 @@ class RequestClient:
             return True
         return False
 
-class ZmqPub:
-    def __init__(self, addr, verbose=False, log=logging.getLogger(__name__)):
+class ZmqPairController:
+    def __init__(self, addr, is_server=True, verbose=False):
         self.verbose = verbose
-        self._log = log
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.PUB)
-        # Bind to IPC address
-        self.socket.bind(addr)
-
-        self._log.info(f"ZmqPub initialized at {addr}")
-        
-
-    def public_client(self, topic: str, payload: dict):
-        json_msg = json.dumps(payload)
-        full_msg = f"{topic} {json_msg}"
-        self.socket.send_string(full_msg)
-        if self.verbose:
-            self._log.info(f"[ZmqPub]Sent: {full_msg}")
-
-    def close(self):
-        self.socket.close()
-        self.context.term()
-
-class ZmqSub:
-    def __init__(self, addr, topic: str, verbose=False, log=logging.getLogger(__name__)):
-        self.verbose = verbose
-        self.topic = topic
-        self._log = log
         self.context = zmq.asyncio.Context()
-        self.socket = self.context.socket(zmq.SUB)
-        # Connect to IPC address
-        self.socket.connect(addr)
-        self.socket.subscribe(self.topic.encode('utf-8'))
+        self.socket = self.context.socket(zmq.PAIR)
+        if is_server:
+            # Clean up previous socket file if it exists (Linux specific)
+            if addr.startswith("ipc://"):
+                path = addr.replace("ipc://", "")
+                if os.path.exists(path):
+                    os.remove(path)
+            
+            self.socket.bind(addr)
+        else:
+            self.socket.connect(addr)
 
-        self._log.info(f"ZmqPub initialized at {addr} with topic {self.topic}")
+    async def send_command(self, payload: dict):
+        msg = json.dumps(payload)
+        await self.socket.send_string(msg)
+        if self.verbose:
+            print(f"[PY] >> Sent CMD")
 
-    async def wait_msg(self):
-        while True:
-            full_msg = await self.socket.recv_string()
-            pub_topic, json_msg = full_msg.split(" ", 1)
-
-            if pub_topic == self.topic:
-                if self.verbose:
-                    print(f"[ZmqSub-{self.topic}] Received: {json_msg}")
-                return json.loads(json_msg)
-
-    def close(self):
-        self.socket.close()
-        self.context.term()
-
+    async def wait_for_data(self):
+        # This awaits until C actually sends something back
+        msg = await self.socket.recv_string()
+        if self.verbose:
+            print(f"[PY] << Received Payload")
+        return json.loads(msg)

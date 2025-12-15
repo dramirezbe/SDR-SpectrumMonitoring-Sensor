@@ -13,7 +13,9 @@ import time
 import sys
 import traceback
 import os
-from typing import Optional, Callable
+import asyncio # <--- ADDED
+import inspect # <--- ADDED
+from typing import Optional, Callable, Union, Coroutine, Any
 from enum import Enum, auto
 from contextlib import redirect_stdout, redirect_stderr
 from dotenv import load_dotenv
@@ -23,7 +25,6 @@ load_dotenv()
 # =============================
 # 2. CONFIGURATION (Safe Defaults)
 # =============================
-# Defaults matching your provided .env for robustness
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/sensor/")
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
@@ -31,16 +32,15 @@ LOG_FILES_NUM = int(os.getenv("LOG_FILES_NUM", "10"))
 
 DATA_URL = os.getenv("DATA_URL", "/data")
 STATUS_URL = os.getenv("STATUS_URL", "/status")
-JOBS_URL = os.getenv("JOBS_URL", "/jobs")
+CAMPAIGN_URL = os.getenv("CAMPAIGN_URL", "/campaigns")
 REALTIME_URL = os.getenv("REALTIME_URL", "/realtime")
+GPS_URL = os.getenv("GPS_URL", "/gps")
 NTP_SERVER = os.getenv("NTP_SERVER", "pool.ntp.org")
 
 IPC_ADDR = os.getenv("IPC_ADDR", "ipc:///tmp/rf_engine")
 
 INTERVAL_REQUEST_CAMPAIGNS_S = int(os.getenv("INTERVAL_REQUEST_CAMPAIGNS_S", "60"))
 INTERVAL_REQUEST_REALTIME_S = int(os.getenv("INTERVAL_REQUEST_REALTIME_S", "5"))
-
-
 
 # Paths
 _THIS_FILE = pathlib.Path(__file__).resolve()
@@ -51,7 +51,6 @@ HISTORIC_DIR = PROJECT_ROOT / "Historic"
 
 FILE_CAMPAIGN_PARAMS = PROJECT_ROOT / "campaign_params.json"
 
-# Ensure critical directories exist
 for p in [QUEUE_DIR, LOGS_DIR, HISTORIC_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -59,19 +58,16 @@ for p in [QUEUE_DIR, LOGS_DIR, HISTORIC_DIR]:
 # 3. HELPERS
 # =============================
 def get_time_ms() -> int:
-    """Returns current time in milliseconds since epoch."""
     return int(time.time() * 1000)
 
 def get_mac() -> str:
-    # 1. Try Environment Variable
     if mac := os.getenv("MAC_ADDRESS"):
         if mac != "00:00:00:00:00:00": return mac
-
-    # 2. Fallback to System Files
     try:
-        # Sort to prioritize eth0 over eth1, etc.
-        for iface in sorted(os.listdir("/sys/class/net")):
-            if iface.startswith(("lo", "sit", "docker", "veth", "vir", "br", "tun")):
+        interfaces = os.listdir("/sys/class/net")
+        interfaces.sort(key=lambda x: (not x.startswith("wlan"), x))
+        for iface in interfaces:
+            if iface.startswith(("lo", "sit", "docker", "veth", "vir", "br", "tun", "wg")):
                 continue
             try:
                 with open(f"/sys/class/net/{iface}/address") as f:
@@ -79,7 +75,6 @@ def get_mac() -> str:
                 if mac and mac != "00:00:00:00:00:00": return mac
             except OSError: continue
     except Exception: pass
-
     return "00:00:00:00:00:00"
 
 # =============================
@@ -87,24 +82,20 @@ def get_mac() -> str:
 # =============================
 
 class _CurrentStreamProxy:
-    """Delegates to the *current* sys.stdout/stderr to handle redirection gracefully."""
     def __init__(self, stream_name: str):
         self._stream_name = stream_name
-
     def _get_current_stream(self):
         return getattr(sys, self._stream_name)
-
     def write(self, data):
         return self._get_current_stream().write(data)
-
     def flush(self):
         return self._get_current_stream().flush()
-
     def __getattr__(self, name):
         return getattr(self._get_current_stream(), name)
 
 class Tee:
-    """Writes to file and stdout simultaneously, supporting fileno/isatty."""
+    """Writes to file and stdout simultaneously.
+    Updated to support aggressive flushing for real-time logging."""
     def __init__(self, primary, secondary):
         self.primary = primary
         self.secondary = secondary
@@ -115,7 +106,11 @@ class Tee:
         s = str(data)
         try: self.primary.write(s)
         except: pass
-        try: self.secondary.write(s)
+        try: 
+            self.secondary.write(s)
+            # FORCE FLUSH: Critical for "Real Time" in infinite loops
+            # This ensures logs appear in the file immediately, not just when buffer fills.
+            self.secondary.flush() 
         except: pass
         return len(s)
 
@@ -138,34 +133,37 @@ class SimpleFormatter(logging.Formatter):
         return super().format(record)
 
 def set_logger() -> logging.Logger:
-    try:
-        name = pathlib.Path(sys.argv[0]).stem.upper()
-    except:
-        name = "SENSOR"
+    try: name = pathlib.Path(sys.argv[0]).stem.upper()
+    except: name = "SENSOR"
 
     logger = logging.getLogger(name)
     if logger.hasHandlers(): return logger
 
     logger.setLevel(logging.DEBUG)
-    
     formatter = SimpleFormatter(
         "%(asctime)s[%(name)s]%(levelname)s %(message)s", 
         datefmt="%d-%b-%y(%H:%M:%S)"
     )
 
-    # Use Proxy to ensure it keeps working even if we redirect stdout later
     stdout_proxy = _CurrentStreamProxy('stdout')
     handler = logging.StreamHandler(stdout_proxy)
     handler.setLevel(logging.INFO if VERBOSE else logging.WARNING)
     handler.setFormatter(formatter)
-    
     logger.addHandler(handler)
     return logger
 
 # =============================
-# 5. EXECUTION CAPTURE (Robust V2)
+# 5. EXECUTION CAPTURE (Async + Sync Support)
 # =============================
-def run_and_capture(func: Callable[[], Optional[int]], num_files=LOG_FILES_NUM) -> int:
+
+# Type definition for generic Sync or Async functions
+TargetFunc = Union[Callable[[], int], Callable[[], Coroutine[Any, Any, int]]]
+
+def run_and_capture(func: TargetFunc, num_files=LOG_FILES_NUM) -> int:
+    """
+    Executes a function (sync or async) and captures stdout/stderr to a log file.
+    Handles infinite loops and KeyboardInterrupts gracefully.
+    """
     timestamp = get_time_ms()
     try: module = pathlib.Path(sys.argv[0]).stem
     except: module = "app"
@@ -179,46 +177,47 @@ def run_and_capture(func: Callable[[], Optional[int]], num_files=LOG_FILES_NUM) 
             logs.pop(0).unlink(missing_ok=True)
     except Exception: pass
 
-    # Execution
     rc = 1
     orig_out, orig_err = sys.stdout, sys.stderr
     
     try:
-        # buffering=1 ensures lines are written immediately
+        # buffering=1 ensures line buffering.
+        # Combined with Tee.flush(), this guarantees real-time updates.
         with log_file.open("w", encoding="utf-8", buffering=1) as f:
             tee_out = Tee(orig_out, f)
             tee_err = Tee(orig_err, f)
             
-            # Context manager redirection (Safer)
             with redirect_stdout(tee_out), redirect_stderr(tee_err):
                 logging.getLogger().info(f"Log started: {log_file.name}")
+                
                 try:
-                    rc = func()
+                    # SMART EXECUTION: Detect if func is Async or Sync
+                    if inspect.iscoroutinefunction(func):
+                        rc = asyncio.run(func())
+                    else:
+                        rc = func()
+                        
                 except KeyboardInterrupt:
+                    logging.getLogger().warning("Received KeyboardInterrupt. Exiting...")
                     rc = 0
                 except SystemExit as e:
                     rc = e.code if isinstance(e.code, int) else 1
+                except asyncio.CancelledError:
+                    logging.getLogger().warning("Async task cancelled.")
+                    rc = 1
                 except Exception:
                     traceback.print_exc()
                     rc = 1
             
-            if f.tell() == 0: f.write("[[OK]]\n")
+            # Final status write
+            if f.tell() > 0: f.write("\n[[FINISHED]]\n")
+            
     finally:
         sys.stdout, sys.stderr = orig_out, orig_err
 
-    # Normalize RC
     if rc is None: return 0
     if isinstance(rc, bool): return int(rc)
     return int(rc)
-
-# =============================
-# 6. ENUMS
-# =============================
-class SysState(Enum):
-    IDLE = auto()
-    CAMPAIGN = auto()
-    REALTIME = auto()
-    CALIBRATING = auto()
 
 def debug()->int:
     log = set_logger()

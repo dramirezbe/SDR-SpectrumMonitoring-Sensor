@@ -75,7 +75,7 @@ int zpair_send(zpair_t *pair, const char *json_payload) {
     int bytes_sent = zmq_send(pair->socket, json_payload, len, 0);
 
     if (pair->verbose && bytes_sent > 0) {
-        printf("[C-PAIR] >> SENT to Py: %s\n", json_payload);
+        printf("[C-PAIR] >> SENT to Py\n");
     }
 
     return bytes_sent;
