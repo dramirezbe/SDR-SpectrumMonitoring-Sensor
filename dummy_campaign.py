@@ -7,6 +7,7 @@ import asyncio
 from dataclasses import asdict
 from enum import Enum, auto
 import time
+import datetime
 
 class SysState(Enum):
     IDLE = auto()
@@ -30,7 +31,7 @@ def fetch_realtime_config(client):
         
         try:
             json_payload = resp.json()
-            json_payload = json_payload.get("campaigns")[0]
+            json_payload = json_payload.get("campaigns")[-1]
             log.info(f"json_payload: {json_payload}")
         except Exception:
             return {}, resp, delta_t_ms, None 
@@ -41,7 +42,23 @@ def fetch_realtime_config(client):
         # --- VALIDATION STEP ---
         try:
             # Instantiate Dataclass
+            # Instantiate Dataclass
             camp_id = int(json_payload.get("campaign_id"))
+            log.info(f"CAMP_ID: {camp_id}")
+            
+            # FIX: Do not cast this dict to int()
+            timeframe = json_payload.get("timeframe") 
+            
+            # Now access the keys inside the dict
+            local_dt_start = datetime.datetime.fromtimestamp(int(timeframe.get("start")) / 1000)
+            local_dt_end = datetime.datetime.fromtimestamp(int(timeframe.get("end")) / 1000)
+            
+            human_time_start = local_dt_start.strftime('%Y-%m-%d %H:%M:%S')
+            human_time_end = local_dt_end.strftime('%Y-%m-%d %H:%M:%S')
+
+            log.info(f"TIME START: {human_time_start}")
+            log.info(f"TIME END: {human_time_end}")
+
             config_obj = {
                 "rf_mode": "campaign",
                 "center_freq_hz": int(json_payload.get("center_freq_hz")),
@@ -98,7 +115,7 @@ async def run_server():
                 log.info(f"{key:<18}: {val}")
             
             # 1. Send Command
-            time.sleep(300) #5 mins blocked
+            time.sleep(60) #1 min blocked
             await zmq_ctrl.send_command(c_config)
             
             log.info("Waiting for PSD data from C engine...")
@@ -110,6 +127,7 @@ async def run_server():
                 # 3. Format
                 data_dict = format_data_for_upload(raw_payload)
                 data_dict['campaign_id'] = camp_id
+                
                 
                 # --- LOGGING DATA ---
                 log.info("----DATATOSEND--------")
