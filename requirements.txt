@@ -6,6 +6,7 @@ dotenv==0.9.9
 fonttools==4.61.0
 idna==3.11
 kiwisolver==1.4.9
+ntplib==0.4.0
 numpy==2.3.5
 packaging==25.0
 pillow==12.0.0

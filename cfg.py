@@ -28,6 +28,7 @@ load_dotenv()
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/sensor/")
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
+DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
 LOG_FILES_NUM = int(os.getenv("LOG_FILES_NUM", "10"))
 
 DATA_URL = os.getenv("DATA_URL", "/data")
@@ -48,6 +49,9 @@ PROJECT_ROOT = _THIS_FILE.parent
 QUEUE_DIR = PROJECT_ROOT / "Queue"
 LOGS_DIR = PROJECT_ROOT / "Logs"
 HISTORIC_DIR = PROJECT_ROOT / "Historic"
+
+PYTHON_ENV = (PROJECT_ROOT / "venv"/ "bin"/ "python3").absolute()
+PYTHON_ENV_STR = str(PYTHON_ENV)
 
 FILE_CAMPAIGN_PARAMS = PROJECT_ROOT / "campaign_params.json"
 
@@ -224,6 +228,9 @@ def debug()->int:
     log.info("--- cfg.py debug ---")
     log.info(f"PROJECT_ROOT: {PROJECT_ROOT}")
     log.info(f"LOGS_DIR: {LOGS_DIR}")
+    log.info(f"QUEUE_DIR: {QUEUE_DIR}")
+    log.info(f"HISTORIC_DIR: {HISTORIC_DIR}")
+    log.info(f"PYTHON_ENV: {PYTHON_ENV}")
     log.info(f"VERBOSE: {VERBOSE}")
     log.info(f"API_URL: {API_URL}")
     log.info(f"MAC_ADDRESS: {get_mac()}")

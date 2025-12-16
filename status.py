@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+#status.py
+
 import cfg
 import sys
 log = cfg.set_logger()

@@ -223,3 +223,8 @@ __marimo__/
 *.dvi
 *.lof
 *.lot
+
+
+#executables
+rf_app
+ltegps_app

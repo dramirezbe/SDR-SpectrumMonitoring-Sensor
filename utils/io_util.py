@@ -1,6 +1,5 @@
-"""@file utils/io_util.py
-@brief Utility functions for file I/O.
-"""
+#!/usr/bin/env python3
+#utils/io_util.py
 from __future__ import annotations
 from pathlib import Path
 import tempfile
@@ -108,11 +107,20 @@ class ShmStore:
         current_data = self._read_file()
         return current_data.get(key, None)
     
-
-class CronHandler:
-    def __init__(self):
-        self.cron = CronTab(user=True)
-        self.crontab_changed = False
+    def update_from_dict(self, data_dict):
+        """
+        Updates multiple values at once using a dictionary.
+        This is more efficient/atomic than calling add_to_persistent in a loop.
+        """
+        # 1. Load current full state
+        current_data = self._read_file()
+        
+        # 2. Update with the new dictionary (merges/overwrites keys)
+        if isinstance(data_dict, dict):
+            current_data.update(data_dict)
+        
+        # 3. Save full state back
+        self._write_file(current_data)
 
 
 class ElapsedTimer:

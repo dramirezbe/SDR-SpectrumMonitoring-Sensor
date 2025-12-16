@@ -78,4 +78,20 @@ typedef struct {
     int rb_size;    
 } RB_cfg_t;
 
+typedef enum {
+    LOWPASS_TYPE,
+    HIGHPASS_TYPE,
+    BANDPASS_TYPE
+}type_filter_t;
+
+
+typedef struct {
+    float bw_filter_hz;
+    type_filter_t type_filter;
+    int order_fliter'
+    
+}filter_t;
+
+void filter_iq(signal_iq_t *signal_iq, filter_t *filter_cfg);
+
 #endif

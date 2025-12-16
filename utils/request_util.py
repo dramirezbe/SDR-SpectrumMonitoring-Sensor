@@ -1,7 +1,4 @@
-"""
-@file utils/request_util.py
-@brief Simple reusable HTTP client helper with rc codes and print-based logging.
-"""
+#utils/request_util.py
 
 import requests
 from typing import Optional, Tuple, Dict, Any

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-@file retry_queue.py
-@brief Utility functions for retry queue files.
-"""
+#retry_queue.py
 
 from __future__ import annotations
 
