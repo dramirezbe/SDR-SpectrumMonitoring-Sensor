@@ -1,23 +1,18 @@
 [Unit]
-Description=SDR PSD C service  
+Description=RF service ANE2
 After=network.target
 
 [Service]
-
 User=anepi
-
-WorkingDirectory=/home/anepi/SDR-SpectrumMonitoring-Sensor/
-
+WorkingDirectory=/home/anepi/SDR-SpectrumMonitoring-Sensor
 ExecStart=/home/anepi/SDR-SpectrumMonitoring-Sensor/rf_app
-
 
 Restart=always
 RestartSec=5
 
-
 StandardOutput=syslog
 StandardError=syslog
-SyslogIdentifier=rf_logic_ane2
+SyslogIdentifier=rf-ane2
 
 [Install]
 WantedBy=multi-user.target

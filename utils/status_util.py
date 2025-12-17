@@ -306,32 +306,61 @@ class StatusDevice:
         return err_dict
 
     def get_logs(self):
+        """
+        Retrieves the last 10 lines of logs from the logs directory.
+        Iterates files from newest to oldest, filtering out '[[OK]]' flags.
+        """
         result_logs = "System running normally"
         max_lines = 10
-        logs_lines: List[str] = []
+        collected_lines: List[str] = []
 
         if not self.logs_dir.exists() or not self.logs_dir.is_dir():
             return None, None, result_logs
 
-        # Sort logs by modification time if needed, currently iterating randomly
-        for p in self.logs_dir.iterdir():
-            if not p.is_file() or p.suffix != ".log":
+        # 1. Identify and sort log files by timestamp (Newest First)
+        # format: <timestamp>_<module>.log
+        log_files = []
+        for p in self.logs_dir.glob("*.log"):
+            try:
+                # Extract timestamp from filename stem
+                ts_part = p.stem.split('_')[0]
+                if ts_part.isdigit():
+                    log_files.append((int(ts_part), p))
+            except Exception:
                 continue
+        
+        # Sort descending (Newest -> Oldest)
+        log_files.sort(key=lambda x: x[0], reverse=True)
 
+        # 2. Collect lines
+        for _, p in log_files:
             try:
                 text = p.read_text(encoding="utf-8", errors="ignore")
+                lines = text.splitlines()
+
+                # Filter out lines containing [[OK]], keep the rest
+                valid_lines = [line for line in lines if "[[OK]]" not in line]
+
+                if not valid_lines:
+                    continue
+
+                # Prepend the valid lines from this file to our collection.
+                # Since we are iterating New->Old files, the current file's lines 
+                # come *after* whatever we process next (which is older).
+                # Example state: collected = [NewFileLines] -> [OldFileLines + NewFileLines]
+                collected_lines = valid_lines + collected_lines
+
+                # If we have gathered enough lines, trim and stop
+                if len(collected_lines) >= max_lines:
+                    collected_lines = collected_lines[-max_lines:]
+                    break
+
             except Exception as e:
                 self._log.error(f"Error reading log file {p}: {e}")
                 continue
 
-            if "[[OK]]" in text:
-                continue
+        if collected_lines:
+            result_logs = "\n".join(collected_lines)
 
-            file_lines = text.splitlines()
-            logs_lines.extend(file_lines)
-
-        if logs_lines:
-            logs_lines = logs_lines[-max_lines:]
-            result_logs = "\n".join(logs_lines)
-
+        # Returns None, None, str to match expected signature in get_status_snapshot
         return None, None, result_logs

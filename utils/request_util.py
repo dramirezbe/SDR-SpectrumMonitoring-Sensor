@@ -197,29 +197,90 @@ class RequestClient:
 
 class ZmqPairController:
     def __init__(self, addr, is_server=True, verbose=False):
+        self.addr = addr
+        self.is_server = is_server
         self.verbose = verbose
+        self.context = None
+        self.socket = None
+
+    def start(self):
+        """Initializes the context and binds/connects the socket."""
+        if self.socket is not None:
+            print("[PY] Socket already open.")
+            return
+
         self.context = zmq.asyncio.Context()
         self.socket = self.context.socket(zmq.PAIR)
-        if is_server:
-            # Clean up previous socket file if it exists (Linux specific)
-            if addr.startswith("ipc://"):
-                path = addr.replace("ipc://", "")
+        
+        # Set LINGER to 0 to ensure the socket closes immediately 
+        # without waiting for pending messages.
+        self.socket.setsockopt(zmq.LINGER, 0)
+
+        if self.is_server:
+            # IPC Cleanup: Remove the file if it already exists
+            if self.addr.startswith("ipc://"):
+                path = self.addr.replace("ipc://", "")
                 if os.path.exists(path):
-                    os.remove(path)
+                    try:
+                        os.remove(path)
+                    except OSError as e:
+                        print(f"[PY] Error removing IPC file: {e}")
             
-            self.socket.bind(addr)
+            try:
+                self.socket.bind(self.addr)
+            except zmq.ZMQError as e:
+                print(f"[PY] Failed to bind: {e}")
+                raise
         else:
-            self.socket.connect(addr)
+            self.socket.connect(self.addr)
+            
+        if self.verbose:
+            print(f"[PY] ZMQ Started on {self.addr}")
+
+    def close(self):
+        """Closes the socket and terminates the context cleanly."""
+        if self.socket:
+            if self.verbose:
+                print("[PY] Closing socket...")
+            self.socket.close()
+            self.socket = None
+        
+        if self.context:
+            if self.verbose:
+                print("[PY] Terminating context...")
+            self.context.term()
+            self.context = None
+
+        # Optional: Explicitly remove IPC file on close (for Server)
+        # This is polite, but the 'start' method already handles cleanup for the next run.
+        if self.is_server and self.addr.startswith("ipc://"):
+            path = self.addr.replace("ipc://", "")
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     async def send_command(self, payload: dict):
+        if not self.socket:
+            raise RuntimeError("Socket is not open. Call start() first.")
         msg = json.dumps(payload)
         await self.socket.send_string(msg)
         if self.verbose:
             print(f"[PY] >> Sent CMD")
 
     async def wait_for_data(self):
-        # This awaits until C actually sends something back
+        if not self.socket:
+            raise RuntimeError("Socket is not open. Call start() first.")
         msg = await self.socket.recv_string()
         if self.verbose:
             print(f"[PY] << Received Payload")
         return json.loads(msg)
+
+    # --- Context Manager Support (Recommended) ---
+    async def __aenter__(self):
+        self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        self.close()

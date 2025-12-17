@@ -1,23 +1,18 @@
 [Unit]
-Description=LTE/GPS C Main Executable Service 
+Description=LTE/GPS Service
 After=network.target
 
 [Service]
-
 User=anepi
-
-WorkingDirectory=/home/anepi/SDR-SpectrumMonitoring-Sensor/
-
+WorkingDirectory=/home/anepi/SDR-SpectrumMonitoring-Sensor
 ExecStart=/home/anepi/SDR-SpectrumMonitoring-Sensor/ltegps_app
-
 
 Restart=always
 RestartSec=5
 
-
 StandardOutput=syslog
 StandardError=syslog
-SyslogIdentifier=gps_lte_logic_ane2
+SyslogIdentifier=ltegps-ane2
 
 [Install]
 WantedBy=multi-user.target

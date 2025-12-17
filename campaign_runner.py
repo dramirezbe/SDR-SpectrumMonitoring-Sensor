@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-@file campaign_runner.py
-@brief Main acquisition and posting routine for RF data. Handles LTE init, PSD acquisition,
-       HTTP posting via RequestClient, and local persistence of unsent or historic data.
-"""
+#campaign_runner.py
 import cfg
 log = cfg.set_logger()
 from utils import atomic_write_bytes, RequestClient, StatusDevice, ShmStore, ZmqPairController
@@ -15,7 +11,7 @@ import asyncio
 import time
 from pathlib import Path
 
-# --- END HELPERS ---
+# --- HELPERS ---
 
 def get_disk_usage(status_obj) -> float:
     """
@@ -28,14 +24,10 @@ def get_disk_usage(status_obj) -> float:
 
     return disk_use / total_disk
 
-
-
 def save_json(current_dict: dict, target_dir: Path, timestamp) -> int:
     """
     Save plain JSON to `target_dir` atomically.
-    Returns:
-        0 -> success
-        2 -> error
+    Returns: 0 -> success, 2 -> error
     """
     try:
         json_bytes = json.dumps(current_dict, separators=(",", ":")).encode("utf-8")
@@ -52,7 +44,7 @@ def save_json(current_dict: dict, target_dir: Path, timestamp) -> int:
 def get_rf_params(store):
     try:
         rf_dict = {
-            "rf_mode": "campaign",
+            "rf_mode": store.consult_persistent("rf_mode"),
             "center_freq_hz": store.consult_persistent("center_freq_hz"),
             "span": store.consult_persistent("span"),
             "sample_rate_hz": store.consult_persistent("sample_rate_hz"),
@@ -71,7 +63,6 @@ def get_rf_params(store):
         rf_dict = {}
 
     return rf_dict
-
 
 def _delete_oldest_files(dir_path: Path, to_delete: int) -> int:
     """
@@ -108,6 +99,7 @@ def _delete_oldest_files(dir_path: Path, to_delete: int) -> int:
             # continue attempting to delete other files
     return deleted
 
+# --- MAIN ROUTINE ---
 
 async def main() -> int:
     """
@@ -116,6 +108,10 @@ async def main() -> int:
     status_obj = StatusDevice(logs_dir=cfg.LOGS_DIR, logger=log)
     cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=cfg.VERBOSE, logger=log)
     store = ShmStore()
+
+    
+    
+    # 1. Retrieve Configuration
     rf_cfg = get_rf_params(store)
     campaign_id = store.consult_persistent("campaign_id")
 
@@ -123,43 +119,66 @@ async def main() -> int:
         log.error("Error reading rf params from Shared Memory file")
         return 1
 
-    # --- 3. Main Server Loop ---
-    zmq_ctrl = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
-    await asyncio.sleep(0.5)
+    # 2. Instantiate Controller (Do not start yet)
+    controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
+    
+    data_dict = {}
 
-    await zmq_ctrl.send_command(rf_cfg)
-    log.info("Waiting for PSD data from C engine...")
-
+    # 3. ZMQ Context: Open -> Transmit -> Close
     try:
-        # 2. Wait for Data
-        raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
+        # LOCK: Signal Orchestrator to stay away
+        store.add_to_persistent("campaign_runner_running", True)   
         
-        # 3. Format
-        data_dict = format_data_for_upload(raw_payload)
-        data_dict["campaign_id"] = 5
-        
-        # --- LOGGING DATA ---
-        log.info("----DATATOSEND--------")
-        final_pxx = data_dict.get('Pxx', [])
-        pxx_preview = final_pxx[:5] if isinstance(final_pxx, list) else []
-        log.info(f"Pxx (First 5)     : {pxx_preview}")
-        log.info("----------------------")
+        async with controller as zmq_ctrl:
+            # Give slight delay for socket binding if needed
+            await asyncio.sleep(0.5)
 
-    except asyncio.TimeoutError:
-        log.warning("TIMEOUT: No data from C-Engine. Retrying...")
-        return 1
+            # Send Config
+            await zmq_ctrl.send_command(rf_cfg)
+            log.info("Waiting for PSD data from C engine...")
+
+            # Wait for Reply (with timeout)
+            raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
+            
+            # Format Data
+            data_dict = format_data_for_upload(raw_payload)
+            data_dict["campaign_id"] = campaign_id if campaign_id else 5
+            
+            # Logging Preview
+            log.info("----DATATOSEND--------")
+            final_pxx = data_dict.get('Pxx', [])
+            pxx_preview = final_pxx[:5] if isinstance(final_pxx, list) else []
+            log.info(f"Pxx (First 5)     : {pxx_preview}")
+            log.info("----------------------")
+
+    except OSError as e:
+        # Catch ZMQ "Address in use" (Collision with Realtime)
+        if "Address already in use" in str(e):
+            log.warning("⚠️ ZMQ Socket busy. Orchestrator is likely in Realtime mode. Skipping.")
+            return 0 
+        log.error(f"ZMQ Error: {e}")
+        return 1 
+    except Exception as e:
+        log.error(f"Error during ZMQ acquisition: {e}")
+        return 1 
+    finally:
+        # UNLOCK: CRITICAL - This runs no matter what happens above
+        store.add_to_persistent("campaign_runner_running", False)
+
+    # -----------------------------------------------------------
+    # Socket is now CLOSED. We proceed with Networking and Disk I/O
+    # -----------------------------------------------------------
 
     # 4. Upload
-
     start_delta_t = time.perf_counter()
     rc, resp = cli.post_json("/data", data_dict)
     end_delta_t = time.perf_counter()
     delta_t_ms = int((end_delta_t - start_delta_t) * 1000)
 
     log.info(f"rc={rc} resp={resp}")
-    log.info(f"string json={resp.text}")
+    # log.info(f"string json={resp.text}")
 
-    # save to queue
+    # 5. Queue Management (if POST failed)
     if rc != 0:
         try:
             queue_count = len(list(cfg.QUEUE_DIR.iterdir()))
@@ -210,8 +229,10 @@ async def main() -> int:
                 log.error(f"Unexpected error while managing queue files: {e}")
                 return 1
 
-    #If POST succeeded, save to historic directory
+    # 6. Historic Storage (if POST succeeded)
     store.add_to_persistent("delta_t_ms", delta_t_ms)
+    
+    # Check disk space
     if get_disk_usage(status_obj) < 0.8:
         hist_rc = save_json(data_dict, cfg.HISTORIC_DIR, cfg.get_time_ms())
         if hist_rc != 0:

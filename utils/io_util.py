@@ -122,6 +122,20 @@ class ShmStore:
         # 3. Save full state back
         self._write_file(current_data)
 
+    def clear_persistent(self):
+        """
+        Atomically clears the storage, rewriting the file to an empty JSON object {}.
+        Blocks all readers/writers during the operation.
+        """
+        with open(self.filepath, 'w') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.write("{}")
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
 
 class ElapsedTimer:
     def __init__(self):

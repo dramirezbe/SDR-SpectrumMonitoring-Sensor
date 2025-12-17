@@ -88,7 +88,7 @@ typedef enum {
 typedef struct {
     float bw_filter_hz;
     type_filter_t type_filter;
-    int order_fliter'
+    int order_fliter;
     
 }filter_t;
 

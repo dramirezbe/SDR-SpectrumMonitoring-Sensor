@@ -1,9 +1,3 @@
-# NTP
-
-Forza ntp del sistema
-15 min
-Demonio
-
 # KAL
 
 Escanea bandas GSM y sincroniza sdr, devuelve ppm offset en frecuencia

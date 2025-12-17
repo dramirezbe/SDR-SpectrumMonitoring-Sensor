@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
 import cfg
-from utils import modify_persist
+from utils import ShmStore
 
 log = cfg.set_logger()
 
@@ -185,6 +185,7 @@ class KalSync:
         return CalResult(0, offset_ppm=ppm, offset_hz=offset_hz)
 
     def run(self) -> int:
+        store = ShmStore()
         # Step 1: Scan and find FIRST peak in memory
         first_peak = self.scan_and_find_first()
         
@@ -201,18 +202,10 @@ class KalSync:
 
         # Step 3: Persist Result (Only on success)
         try:
-            if cfg.PERSIST_FILE is None:
-                log.error("cfg.PERSIST_FILE is not defined; cannot persist offset.")
-                return 1
-
             # Save PPM
-            rc_json = modify_persist("last_offset_ppm", float(res.offset_ppm), cfg.PERSIST_FILE)
-            if rc_json != 0:
-                log.error("Failed saving last_offset_ppm into vars.json.")
-                return rc_json
-
+            store.add_to_persistent("ppm_error", float(res.offset_ppm))
             # Save Timestamp
-            modify_persist("last_kal_ms", cfg.get_time_ms(), cfg.PERSIST_FILE)
+            store.add_to_persistent("last_kal_ms", cfg.get_time_ms())
             
             log.info(f"Calibration successful. Offset {res.offset_ppm:.3f} ppm saved.")
             return 0

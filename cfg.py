@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""@file cfg.py
-@brief Global configuration file - Pure Python/Docker Environment
-"""
+#cfg.py
+
 
 # =============================
 # 1. IMPORTS
@@ -13,10 +12,11 @@ import time
 import sys
 import traceback
 import os
-import asyncio # <--- ADDED
-import inspect # <--- ADDED
-from typing import Optional, Callable, Union, Coroutine, Any
-from enum import Enum, auto
+import asyncio 
+import inspect 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from typing import Callable, Union, Coroutine, Any
 from contextlib import redirect_stdout, redirect_stderr
 from dotenv import load_dotenv
 
@@ -28,20 +28,21 @@ load_dotenv()
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/sensor/")
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
-DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
 LOG_FILES_NUM = int(os.getenv("LOG_FILES_NUM", "10"))
+LOG_ROTATION_LINES = int(os.getenv("LOG_ROTATION_LINES", "50"))
 
 DATA_URL = os.getenv("DATA_URL", "/data")
 STATUS_URL = os.getenv("STATUS_URL", "/status")
 CAMPAIGN_URL = os.getenv("CAMPAIGN_URL", "/campaigns")
 REALTIME_URL = os.getenv("REALTIME_URL", "/realtime")
 GPS_URL = os.getenv("GPS_URL", "/gps")
-NTP_SERVER = os.getenv("NTP_SERVER", "pool.ntp.org")
 
 IPC_ADDR = os.getenv("IPC_ADDR", "ipc:///tmp/rf_engine")
 
 INTERVAL_REQUEST_CAMPAIGNS_S = int(os.getenv("INTERVAL_REQUEST_CAMPAIGNS_S", "60"))
 INTERVAL_REQUEST_REALTIME_S = int(os.getenv("INTERVAL_REQUEST_REALTIME_S", "5"))
+INTERVAL_STATUS_S = int(os.getenv("INTERVAL_STATUS_S", "30"))
+INTERVAL_RETRY_QUEUE_S = int(os.getenv("INTERVAL_RETRY_QUEUE_S", "300"))
 
 # Paths
 _THIS_FILE = pathlib.Path(__file__).resolve()
@@ -53,16 +54,26 @@ HISTORIC_DIR = PROJECT_ROOT / "Historic"
 PYTHON_ENV = (PROJECT_ROOT / "venv"/ "bin"/ "python3").absolute()
 PYTHON_ENV_STR = str(PYTHON_ENV)
 
-FILE_CAMPAIGN_PARAMS = PROJECT_ROOT / "campaign_params.json"
-
-for p in [QUEUE_DIR, LOGS_DIR, HISTORIC_DIR]:
-    p.mkdir(parents=True, exist_ok=True)
-
 # =============================
 # 3. HELPERS
 # =============================
 def get_time_ms() -> int:
-    return int(time.time() * 1000)
+    """Returns pure UTC timestamp in milliseconds UTC-5 (Colombia time)."""
+    return int(time.time() * 1000) - (5 * 60 * 60 * 1000)
+
+def human_readable(ts_ms, target_tz="UTC"):
+    """
+    Converts raw timestamp to a readable string in the specific timezone.
+    Does NOT rely on manual integer shifting.
+    """
+    # 1. Convert ms to seconds
+    # 2. Convert to datetime aware object in UTC
+    dt_utc = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo("UTC"))
+    
+    # 3. Convert that exact moment to the target timezone
+    dt_local = dt_utc.astimezone(ZoneInfo(target_tz))
+    
+    return dt_local.strftime('%Y-%m-%d %H:%M:%S')
 
 def get_mac() -> str:
     if mac := os.getenv("MAC_ADDRESS"):
@@ -82,7 +93,7 @@ def get_mac() -> str:
     return "00:00:00:00:00:00"
 
 # =============================
-# 4. LOGGING IMPLEMENTATION (Robust V2)
+# 4. LOGGING IMPLEMENTATION
 # =============================
 
 class _CurrentStreamProxy:
@@ -98,8 +109,7 @@ class _CurrentStreamProxy:
         return getattr(self._get_current_stream(), name)
 
 class Tee:
-    """Writes to file and stdout simultaneously.
-    Updated to support aggressive flushing for real-time logging."""
+    """Writes to file and stdout simultaneously."""
     def __init__(self, primary, secondary):
         self.primary = primary
         self.secondary = secondary
@@ -112,8 +122,6 @@ class Tee:
         except: pass
         try: 
             self.secondary.write(s)
-            # FORCE FLUSH: Critical for "Real Time" in infinite loops
-            # This ensures logs appear in the file immediately, not just when buffer fills.
             self.secondary.flush() 
         except: pass
         return len(s)
@@ -129,6 +137,84 @@ class Tee:
 
     def isatty(self):
         return getattr(self.primary, "isatty", lambda: False)()
+
+class SmartRotatingFile:
+    """
+    A file-like object that automatically rotates to a new file 
+    after a certain number of newlines are written.
+    Enforces LOG_FILES_NUM limits on every rotation.
+    """
+    def __init__(self, module_name: str, max_lines: int, max_files: int):
+        self.module_name = module_name
+        self.max_lines = max_lines
+        self.max_files = max_files
+        self.current_lines = 0
+        self.file_handle = None
+        self._open_new_file()
+
+    def _cleanup_old_logs(self):
+        """Maintains the total number of log files under the limit."""
+        try:
+            logs = sorted([p for p in LOGS_DIR.glob("*.log")], key=lambda p: p.stat().st_mtime)
+            # We remove enough files so that adding one more won't exceed the limit
+            while len(logs) >= self.max_files:
+                oldest = logs.pop(0)
+                try: oldest.unlink(missing_ok=True)
+                except Exception: pass
+        except Exception: 
+            pass
+
+    def _open_new_file(self):
+        """Closes current and opens next."""
+        if self.file_handle:
+            try:
+                self.file_handle.write("\n[[LOG ROTATED]]\n")
+                self.file_handle.close()
+            except: pass
+
+        self._cleanup_old_logs()
+
+        timestamp = get_time_ms()
+        filename = LOGS_DIR / f"{timestamp}_{self.module_name}.log"
+        
+        self.file_handle = open(filename, "w", encoding="utf-8", buffering=1)
+        self.current_lines = 0
+
+    def write(self, data):
+        if not self.file_handle: return
+        
+        s = str(data)
+        self.file_handle.write(s)
+        self.file_handle.flush()
+        
+        # Count lines to trigger rotation
+        if self.max_lines > 0:
+            self.current_lines += s.count('\n')
+            if self.current_lines >= self.max_lines:
+                self._open_new_file()
+
+    def flush(self):
+        if self.file_handle:
+            self.file_handle.flush()
+
+    def close(self):
+        """
+        Closes the file.
+        If no logs were written (current_lines == 0), marks it as [[OK]].
+        Does NOT write [[FINISHED]].
+        """
+        if self.file_handle:
+            if self.current_lines == 0:
+                self.file_handle.write("\n[[OK]]\n")
+            
+            self.file_handle.close()
+            self.file_handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 class SimpleFormatter(logging.Formatter):
     def format(self, record):
@@ -157,45 +243,40 @@ def set_logger() -> logging.Logger:
     return logger
 
 # =============================
-# 5. EXECUTION CAPTURE (Async + Sync Support)
+# 5. EXECUTION CAPTURE
 # =============================
 
-# Type definition for generic Sync or Async functions
 TargetFunc = Union[Callable[[], int], Callable[[], Coroutine[Any, Any, int]]]
 
 def run_and_capture(func: TargetFunc, num_files=LOG_FILES_NUM) -> int:
     """
-    Executes a function (sync or async) and captures stdout/stderr to a log file.
-    Handles infinite loops and KeyboardInterrupts gracefully.
+    Executes a function (sync or async) and captures stdout/stderr.
+    Uses SmartRotatingFile to rotate logs after 50 lines (default).
     """
-    timestamp = get_time_ms()
     try: module = pathlib.Path(sys.argv[0]).stem
     except: module = "app"
     
-    log_file = LOGS_DIR / f"{timestamp}_{module}.log"
-
-    # Rotation
-    try:
-        logs = sorted([p for p in LOGS_DIR.glob("*.log")], key=lambda p: p.stat().st_mtime)
-        while len(logs) >= num_files:
-            logs.pop(0).unlink(missing_ok=True)
-    except Exception: pass
-
     rc = 1
     orig_out, orig_err = sys.stdout, sys.stderr
     
+    # Initialize the rotating file handler
+    # This replaces the standard 'open()' context manager
+    rotating_log = SmartRotatingFile(
+        module_name=module, 
+        max_lines=LOG_ROTATION_LINES, 
+        max_files=num_files
+    )
+
     try:
-        # buffering=1 ensures line buffering.
-        # Combined with Tee.flush(), this guarantees real-time updates.
-        with log_file.open("w", encoding="utf-8", buffering=1) as f:
+        with rotating_log as f:
+            # Tee now writes to stdout AND our SmartRotatingFile object
             tee_out = Tee(orig_out, f)
             tee_err = Tee(orig_err, f)
             
             with redirect_stdout(tee_out), redirect_stderr(tee_err):
-                logging.getLogger().info(f"Log started: {log_file.name}")
+                logging.getLogger().info(f"Log system started. Rotation limit: {LOG_ROTATION_LINES} lines.")
                 
                 try:
-                    # SMART EXECUTION: Detect if func is Async or Sync
                     if inspect.iscoroutinefunction(func):
                         rc = asyncio.run(func())
                     else:
@@ -213,9 +294,6 @@ def run_and_capture(func: TargetFunc, num_files=LOG_FILES_NUM) -> int:
                     traceback.print_exc()
                     rc = 1
             
-            # Final status write
-            if f.tell() > 0: f.write("\n[[FINISHED]]\n")
-            
     finally:
         sys.stdout, sys.stderr = orig_out, orig_err
 
@@ -228,17 +306,17 @@ def debug()->int:
     log.info("--- cfg.py debug ---")
     log.info(f"PROJECT_ROOT: {PROJECT_ROOT}")
     log.info(f"LOGS_DIR: {LOGS_DIR}")
-    log.info(f"QUEUE_DIR: {QUEUE_DIR}")
-    log.info(f"HISTORIC_DIR: {HISTORIC_DIR}")
-    log.info(f"PYTHON_ENV: {PYTHON_ENV}")
-    log.info(f"VERBOSE: {VERBOSE}")
-    log.info(f"API_URL: {API_URL}")
-    log.info(f"MAC_ADDRESS: {get_mac()}")
-    log.info("--- cfg.py debug end ---")
+    log.info(f"LOG_ROTATION_LINES: {LOG_ROTATION_LINES}")
+    log.info("Simulating loop for rotation test...")
+    
+    # Test rotation logic
+    for i in range(1, 150):
+        log.info(f"Log Line {i} - testing rotation")
+        time.sleep(0.01)
 
+    log.info("--- cfg.py debug end ---")
     return 0
 
 if __name__ == "__main__":
     rc = run_and_capture(debug)
     sys.exit(rc)
-    

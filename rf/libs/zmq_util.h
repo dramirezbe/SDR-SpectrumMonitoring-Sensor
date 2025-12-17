@@ -12,6 +12,7 @@ typedef void (*msg_callback_t)(const char *payload);
 typedef struct {
     void *context;
     void *socket;
+    char *addr;           // Stored address for reconnection
     char buffer[ZBUF_SIZE];
     pthread_t thread_id;
     msg_callback_t callback;

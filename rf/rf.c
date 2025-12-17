@@ -1,9 +1,4 @@
-/**
- * @file rf.c
- * @brief Continuous Headless PSD Analyzer 
- * (Merges Span Logic + ZMQ PAIR Architecture)
- */
-
+//rf.c
 #define _GNU_SOURCE
 
 #include <stdio.h>
@@ -23,7 +18,7 @@
 #include "datatypes.h" 
 #include "sdr_HAL.h"     
 #include "ring_buffer.h" 
-#include "zmq_util.h" // Must contain the zpair definitions you provided
+#include "zmq_util.h" 
 #include "utils.h"
 
 #ifndef NO_COMMON_LIBS
@@ -216,8 +211,6 @@ int main() {
 
     // 7. Main Loop
     while (1) {
-        // 
-
         // A. Wait for Configuration
         if (!config_received) {
             usleep(50000); // 50ms wait

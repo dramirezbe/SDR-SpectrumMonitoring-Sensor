@@ -15,14 +15,14 @@ class SysState(Enum):
     REALTIME = auto()
     CALIBRATING = auto()
 
-def fetch_realtime_config(client):
+def fetch_realtime_config(cli):
     """
     Fetches job configuration from /realtime and validates it using ServerJobConfig.
     """
     delta_t_ms = 0 
 
     try:
-        rc_returned, resp = client.get(cfg.CAMPAIGN_URL)
+        rc_returned, resp = cli.get(cfg.CAMPAIGN_URL)
         
         json_payload = {}
         
@@ -95,13 +95,13 @@ async def run_server():
     zmq_ctrl = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
     await asyncio.sleep(0.5)
     
-    client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
+    cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
     
     # "Never Die" Loop
     while True:
         try:
             log.info("Fetching job configuration...")
-            c_config, _, _, camp_id = fetch_realtime_config(client)
+            c_config, _, _, camp_id = fetch_realtime_config(cli)
 
             # --- CHECK: If validation failed or HTTP failed ---
             if not c_config:
@@ -137,7 +137,7 @@ async def run_server():
                 log.info("----------------------")
 
                 # 4. Upload
-                client.post_json("/data", data_dict)
+                cli.post_json("/data", data_dict)
 
             except asyncio.TimeoutError:
                 log.warning("TIMEOUT: No data from C-Engine. Retrying...")

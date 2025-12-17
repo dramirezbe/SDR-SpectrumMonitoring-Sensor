@@ -1,0 +1,10 @@
+[Unit]
+Description=Timer Status Service ANE2
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

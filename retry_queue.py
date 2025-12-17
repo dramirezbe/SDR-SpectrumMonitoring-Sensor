@@ -25,7 +25,7 @@ RC_JSON = 3         # invalid JSON or payload parsing error (client 4xx)
 RC_UNEXPECTED = 4   # other unexpected failures
 
 
-def attempt_send(client: RequestClient, payload: dict, url: str) -> int:
+def attempt_send(cli: RequestClient, payload: dict, url: str) -> int:
     """
     Attempt to send the payload to the API once.
 
@@ -36,7 +36,7 @@ def attempt_send(client: RequestClient, payload: dict, url: str) -> int:
         RC_UNEXPECTED -> unexpected situation
     """
     try:
-        rc, resp = client.post_json(url, payload)
+        rc, resp = cli.post_json(url, payload)
     except Exception as e:
         log.exception("Exception while posting JSON: %s", e)
         return RC_NETWORK
@@ -94,7 +94,7 @@ def attempt_send(client: RequestClient, payload: dict, url: str) -> int:
     return RC_NETWORK
 
 
-def retry_queue(client: RequestClient) -> int:
+def retry_queue(cli: RequestClient) -> int:
     """
     Process files in cfg.QUEUE_DIR (oldest-first), attempting to resend them to cfg.DATA_URL.
 
@@ -158,7 +158,7 @@ def retry_queue(client: RequestClient) -> int:
         while attempt < RETRIES_PER_FILE and not sent:
             attempt += 1
             log.info("Attempt %d/%d for %s", attempt, RETRIES_PER_FILE, file_path.name)
-            rc_send = attempt_send(client, payload, cfg.DATA_URL)
+            rc_send = attempt_send(cli, payload, cfg.DATA_URL)
             last_rc = rc_send
 
             if rc_send == RC_OK:
@@ -194,12 +194,12 @@ def retry_queue(client: RequestClient) -> int:
 def main() -> int:
     """Entry point for the retry queue runner."""
     try:
-        client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(RETRY_SECONDS, 15), verbose=cfg.VERBOSE, logger=log)
+        cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(RETRY_SECONDS, 15), verbose=cfg.VERBOSE, logger=log)
     except Exception as e:
         log.exception("Failed to construct RequestClient: %s", e)
         return RC_NETWORK
 
-    return retry_queue(client)
+    return retry_queue(cli)
 
 
 if __name__ == "__main__":
