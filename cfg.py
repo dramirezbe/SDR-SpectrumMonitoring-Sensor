@@ -76,21 +76,7 @@ def human_readable(ts_ms, target_tz="UTC"):
     return dt_local.strftime('%Y-%m-%d %H:%M:%S')
 
 def get_mac() -> str:
-    if mac := os.getenv("MAC_ADDRESS"):
-        if mac != "00:00:00:00:00:00": return mac
-    try:
-        interfaces = os.listdir("/sys/class/net")
-        interfaces.sort(key=lambda x: (not x.startswith("wlan"), x))
-        for iface in interfaces:
-            if iface.startswith(("lo", "sit", "docker", "veth", "vir", "br", "tun", "wg")):
-                continue
-            try:
-                with open(f"/sys/class/net/{iface}/address") as f:
-                    mac = f.read().strip()
-                if mac and mac != "00:00:00:00:00:00": return mac
-            except OSError: continue
-    except Exception: pass
-    return "00:00:00:00:00:00"
+    return "d0:65:78:9c:dd:d0"
 
 # =============================
 # 4. LOGGING IMPLEMENTATION
