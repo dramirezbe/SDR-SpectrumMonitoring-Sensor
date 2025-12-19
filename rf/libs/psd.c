@@ -8,6 +8,9 @@
 #include <ctype.h>
 #include <stdio.h>
 
+#define PFB_TAPS_PER_CHANNEL 8
+#define KAISER_BETA 8.6   // ~80 dB sidelobes
+
 // =========================================================
 // Static Helper: Robust String Lowercasing
 // =========================================================
@@ -465,6 +468,120 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
 
     // Cleanup
     free(window);
+    fftw_destroy_plan(plan);
+    fftw_free(fft_in);
+    fftw_free(fft_out);
+}
+
+//Funciones PFB
+
+static double bessi0(double x) {
+    double sum = 1.0, y = x * x / 4.0;
+    double t = y;
+    int k = 1;
+
+    while (t > 1e-12) {
+        sum += t;
+        k++;
+        t *= y / (k * k);
+    }
+    return sum;
+}
+
+static void generate_kaiser_proto(double* h, int len, double beta) {
+    double denom = bessi0(beta);
+    for (int n = 0; n < len; n++) {
+        double x = 2.0 * n / (len - 1) - 1.0;
+        h[n] = bessi0(beta * sqrt(1 - x * x)) / denom;
+    }
+}
+
+
+void execute_pfb_psd(
+    signal_iq_t* signal_data,
+    const PsdConfig_t* config,
+    double* f_out,
+    double* p_out
+) {
+    if (!signal_data || !config || !f_out || !p_out) return;
+
+    const int M = config->nperseg;              // Number of channels
+    const int T = PFB_TAPS_PER_CHANNEL;
+    const int L = M * T;                        // FIR length
+    const double fs = config->sample_rate;
+
+    size_t N = signal_data->n_signal;
+    double complex* x = signal_data->signal_iq;
+
+    memset(p_out, 0, M * sizeof(double));
+
+    // -------------------------------------------------
+    // Prototype filter
+    // -------------------------------------------------
+    double* h = (double*)malloc(L * sizeof(double));
+    generate_kaiser_proto(h, L, KAISER_BETA);
+
+    // Polyphase components
+    double* poly[T];
+    for (int t = 0; t < T; t++) {
+        poly[t] = (double*)malloc(M * sizeof(double));
+        for (int m = 0; m < M; m++) {
+            poly[t][m] = h[t * M + m];
+        }
+    }
+
+    // FFT buffers
+    double complex* fft_in  = fftw_alloc_complex(M);
+    double complex* fft_out = fftw_alloc_complex(M);
+    fftw_plan plan = fftw_plan_dft_1d(
+        M, fft_in, fft_out, FFTW_FORWARD, FFTW_ESTIMATE
+    );
+
+    // -------------------------------------------------
+    // PFB Processing
+    // -------------------------------------------------
+    int blocks = (N - L) / M;
+    if (blocks <= 0) goto cleanup;
+
+    for (int b = 0; b < blocks; b++) {
+        memset(fft_in, 0, M * sizeof(double complex));
+
+        for (int t = 0; t < T; t++) {
+            size_t offset = b * M + t * M;
+            for (int m = 0; m < M; m++) {
+                fft_in[m] += x[offset + m] * poly[t][m];
+            }
+        }
+
+        fftw_execute(plan);
+
+        for (int k = 0; k < M; k++) {
+            double mag2 = creal(fft_out[k]) * creal(fft_out[k]) +
+                          cimag(fft_out[k]) * cimag(fft_out[k]);
+            p_out[k] += mag2;
+        }
+    }
+
+    // -------------------------------------------------
+    // Normalization
+    // -------------------------------------------------
+    double scale = 1.0 / (blocks * fs * M);
+    for (int i = 0; i < M; i++) {
+        p_out[i] *= scale;
+    }
+
+    // FFT shift
+    fftshift(p_out, M);
+
+    // Frequency axis
+    double df = fs / M;
+    for (int i = 0; i < M; i++) {
+        f_out[i] = -fs / 2.0 + i * df;
+    }
+
+cleanup:
+    for (int t = 0; t < T; t++) free(poly[t]);
+    free(h);
     fftw_destroy_plan(plan);
     fftw_free(fft_in);
     fftw_free(fft_out);

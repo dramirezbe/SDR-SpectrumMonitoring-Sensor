@@ -30,6 +30,12 @@ typedef enum {
     BARTLETT_TYPE
 } PsdWindowType_t;
 
+// --- PSD Method ---
+typedef enum {
+    WELCH,
+    PFB
+} Psd_method;
+
 // --- PSD Configuration ---
 typedef struct {
     PsdWindowType_t window_type;
