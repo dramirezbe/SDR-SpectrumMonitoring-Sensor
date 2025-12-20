@@ -59,7 +59,7 @@ def fetch_realtime_config(client):
                 rf_mode="realtime",
                 method_psd="pfb",
                 center_freq_hz=int(json_payload.get("center_freq_hz")), 
-                sample_rate_hz=int(8000000),
+                sample_rate_hz=int(json_payload.get("sample_rate_hz")),
                 rbw_hz=int(json_payload.get("rbw_hz")),
                 window=json_payload.get("window"),
                 scale=json_payload.get("scale"),
