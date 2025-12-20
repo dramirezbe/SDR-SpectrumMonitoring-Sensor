@@ -8,6 +8,11 @@ from datetime import datetime
 from crontab import CronTab
 import logging
 
+import numpy as np
+from scipy.signal import windows
+from scipy.linalg import solve
+
+
 class SysState(Enum):
     IDLE = auto()
     CAMPAIGN = auto()
@@ -161,3 +166,58 @@ def format_data_for_upload(payload):
         "timestamp": cfg.get_time_ms(),
         "mac": cfg.get_mac()
     }
+
+
+class SimpleDCSpikeCleaner:
+    def __init__(self, search_frac=0.05, width_frac=0.005, neighbor_bins=20):
+        """
+        search_frac: Region to search for the spike.
+        width_frac: Width of the removal zone.
+        neighbor_bins: Number of bins to sample for noise estimation.
+        """
+        self.search_frac = search_frac
+        self.width_frac = width_frac
+        self.neighbor_bins = neighbor_bins
+
+    def clean(self, Pxx):
+        Pxx = np.asarray(Pxx, float).copy()
+        n = len(Pxx)
+        if n < self.neighbor_bins * 2: 
+            return Pxx
+
+        # 1. Locate the peak in the center region
+        mid = n // 2
+        search_radius = int(n * (self.search_frac / 2))
+        s_start = max(0, mid - search_radius)
+        s_end = min(n, mid + search_radius)
+        peak_idx = s_start + np.argmax(Pxx[s_start:s_end])
+
+        # 2. Define the removal zone
+        width_radius = max(1, int(n * (self.width_frac / 2)))
+        idx0 = max(0, peak_idx - width_radius)
+        idx1 = min(n - 1, peak_idx + width_radius)
+
+        # 3. Sample neighbors for noise statistics
+        l_neighbor = Pxx[max(0, idx0 - self.neighbor_bins): idx0]
+        r_neighbor = Pxx[idx1 + 1: min(n, idx1 + 1 + self.neighbor_bins)]
+        
+        neighbors = np.concatenate([l_neighbor, r_neighbor])
+        
+        # 4. Calculate local noise statistics
+        # We ensure local_sigma is at least 0 to prevent the 'scale < 0' error
+        local_sigma = np.std(neighbors) if neighbors.size > 0 else 0.0
+
+        # 5. Create the linear trend (The "Line")
+        y0, y1 = Pxx[idx0], Pxx[idx1]
+        num_points = idx1 - idx0 + 1
+        linear_trend = np.linspace(y0, y1, num_points)
+
+        # 6. Generate and add noise to the trend
+        # FIX: Ensure scale is non-negative using max(0, ...)
+        # We use local_sigma directly to match the surrounding noise floor
+        safe_scale = max(0.0, local_sigma)
+        noise = np.random.normal(0, safe_scale, num_points)
+        
+        Pxx[idx0:idx1 + 1] = linear_trend + noise
+
+        return Pxx

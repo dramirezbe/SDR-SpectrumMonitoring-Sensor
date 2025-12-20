@@ -4,7 +4,7 @@
 import cfg
 log = cfg.set_logger()
 from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, FilterConfig, DemodulationConfig,ShmStore, ElapsedTimer
-from functions import format_data_for_upload, CronSchedulerCampaign, GlobalSys, SysState
+from functions import format_data_for_upload, CronSchedulerCampaign, GlobalSys, SysState, SimpleDCSpikeCleaner
 
 import sys
 import asyncio
@@ -57,7 +57,7 @@ def fetch_realtime_config(client):
             # 2. Instantiate the main config
             config_obj = ServerRealtimeConfig(
                 rf_mode="realtime",
-                method_psd="pfb",
+                method_psd="welch",
                 center_freq_hz=int(json_payload.get("center_freq_hz")), 
                 sample_rate_hz=int(json_payload.get("sample_rate_hz")),
                 rbw_hz=int(json_payload.get("rbw_hz")),
@@ -118,6 +118,9 @@ async def run_realtime_logic(client, store) -> int:
     timer_force_rotation.init_count(300) 
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
+    cleaner = SimpleDCSpikeCleaner(search_frac= 0.05,
+                                    width_frac=0.005,
+                                    neighbor_bins=2)
 
     try:
         async with controller as zmq_ctrl:
@@ -134,6 +137,10 @@ async def run_realtime_logic(client, store) -> int:
                 try:
                     raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
                     data_dict = format_data_for_upload(raw_payload)
+                    
+                    #Spike
+                    Pxx_cleaned= cleaner.clean(data_dict["Pxx"])
+                    data_dict["Pxx"] = Pxx_cleaned.tolist()                    
                     
                     # Upload (Non-fatal if network blips during post)
                     rc, resp = client.post_json("/data", data_dict)
@@ -197,7 +204,7 @@ async def run_campaigns_logic(client, store, scheduler) -> int:
 
 # --- 3. MAIN LOOP ---
 async def main() -> int:
-    time.sleep(5) 
+    time.sleep(1) 
     store = ShmStore()
     client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
     scheduler = CronSchedulerCampaign(
