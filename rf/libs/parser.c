@@ -92,19 +92,6 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
         }
     }
 
-    cJSON *filt_obj = cJSON_GetObjectItemCaseSensitive(root, "filter");
-    if (cJSON_IsObject(filt_obj)) {
-        target->filter_enabled = true;
-        cJSON *f_type = cJSON_GetObjectItemCaseSensitive(filt_obj, "type");
-        cJSON *f_bw   = cJSON_GetObjectItemCaseSensitive(filt_obj, "bw_hz");
-        cJSON *f_ord  = cJSON_GetObjectItemCaseSensitive(filt_obj, "order");
-
-        if (cJSON_IsString(f_type)) target->filter_cfg.type_filter = resolve_filter_enum(f_type->valuestring);
-        if (cJSON_IsNumber(f_bw))   target->filter_cfg.bw_filter_hz = (float)f_bw->valuedouble;
-        if (cJSON_IsNumber(f_ord))  target->filter_cfg.order_filter = (int)f_ord->valuedouble;
-        target->filter_cfg.sample_rate = target->sample_rate; // Link SR
-    }
-
     cJSON *demod_obj = cJSON_GetObjectItemCaseSensitive(root, "demodulation");
     if (cJSON_IsObject(demod_obj)) {
         target->demod_enabled = true;
@@ -164,6 +151,19 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
 
     cJSON *vga = cJSON_GetObjectItemCaseSensitive(root, "vga_gain");
     if (cJSON_IsNumber(vga)) target->vga_gain = (int)vga->valuedouble;
+
+    cJSON *filt_obj = cJSON_GetObjectItemCaseSensitive(root, "filter");
+    if (cJSON_IsObject(filt_obj)) {
+        target->filter_enabled = true;
+        cJSON *f_type = cJSON_GetObjectItemCaseSensitive(filt_obj, "type");
+        cJSON *f_bw   = cJSON_GetObjectItemCaseSensitive(filt_obj, "bw_hz");
+        cJSON *f_ord  = cJSON_GetObjectItemCaseSensitive(filt_obj, "order");
+
+        if (cJSON_IsString(f_type)) target->filter_cfg.type_filter = resolve_filter_enum(f_type->valuestring);
+        if (cJSON_IsNumber(f_bw))   target->filter_cfg.bw_filter_hz = (float)f_bw->valuedouble;
+        if (cJSON_IsNumber(f_ord))  target->filter_cfg.order_filter = (int)f_ord->valuedouble;
+        target->filter_cfg.sample_rate = target->sample_rate; // Link SR
+    }
 
     // 6. Antenna
     cJSON *amp = cJSON_GetObjectItemCaseSensitive(root, "antenna_amp");
