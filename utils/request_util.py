@@ -10,12 +10,20 @@ import os
 from dataclasses import dataclass
 
 @dataclass
+class FilterConfig:
+    type: str
+    bw_hz: int
+    order: int
+
+@dataclass
+class DemodulationConfig:
+    type: str
+    bw_hz: int
+
+@dataclass
 class ServerRealtimeConfig:
-    """
-    Validates and holds the configuration for the C-Engine.
-    All fields are mandatory; no default values are provided.
-    """
     rf_mode: str
+    method_psd: str
     center_freq_hz: int
     sample_rate_hz: int
     rbw_hz: int
@@ -28,24 +36,33 @@ class ServerRealtimeConfig:
     antenna_port: int
     span: int
     ppm_error: int
+    demodulation: Optional[DemodulationConfig] = None
+    filter: Optional[FilterConfig] = None
 
     def __post_init__(self):
-        """
-        Runs automatically after initialization to validate ranges.
-        Raises ValueError if any parameter is invalid.
-        """
-    
+        # 1. Standard validations
         if not (1_000_000 <= self.center_freq_hz <= 6_000_000_000):
-            raise ValueError(f"Center frequency {self.center_freq_hz} Hz is out of range (8MHz - 6GHz).")
-        
-        if not (1_000_000 <= self.sample_rate_hz <= 2_000_000_000):
-            raise ValueError(f"Sample rate {self.sample_rate_hz} Hz is out of range (1.5MHz - 2GHz).")
-
-        if not (0.0 <= self.overlap < 1.0):
-            raise ValueError(f"Overlap {self.overlap} is invalid. Must be >= 0.0 and < 1.0.")
+            raise ValueError(f"Center frequency {self.center_freq_hz} Hz out of range (1MHz - 6GHz).")
         
         if self.antenna_port not in [1, 2, 3, 4]:
-            raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1, 2, or 3.")
+            raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1-4.")
+        
+        if self.rf_mode not in ["campaign", "realtime", "fm", "am"]:
+            raise ValueError(f"RF mode {self.rf_mode} is invalid. Must be campaign, realtime, fm, or am.")
+        
+        if self.method_psd not in ["pfb", "welch"]:
+            raise ValueError(f"PSD method {self.method_psd} is invalid. Must be pfb or welch.")
+
+        # 2. Nested Validation (only if filter is provided)
+        if self.filter is not None:
+            if self.filter.type not in ["lowpass", "highpass", "bandpass"]:
+                raise ValueError(f"Filter type {self.filter.type} is invalid.")
+
+        if self.demodulation is not None:
+            if self.demodulation.type not in ["am", "fm"]:
+                raise ValueError(f"Demodulation type {self.demodulation.type} is invalid.")
+            
+        
 
         
 

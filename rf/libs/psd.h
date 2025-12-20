@@ -3,9 +3,17 @@
 #define PSD_H
 
 #include "datatypes.h"
+#include "parser.h"
 #include "sdr_HAL.h"
-#include <cjson/cJSON.h>
-#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <fftw3.h>
+#include <alloca.h>
+#include <complex.h>
+#include <ctype.h>
+#include <stdio.h>
+#include <limits.h>
 
 // --- IQ Management ---
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size);
@@ -37,23 +45,18 @@ int scale_psd(double* psd, int nperseg, const char* scale_str);
 // --- Configuration & Parsing ---
 
 /**
- * @brief Parses a JSON string into a DesiredCfg_t struct.
- * Converts all string fields (mode, window, scale) to lowercase immediately.
- * @return 0 on success, -1 on failure.
+ * @brief Aplica un filtro digital IIR a la señal IQ en banda base.
+ * Modifica la señal "in-place" (sobreescribe signal_iq).
+ * 
+ * @param signal_iq Puntero a la estructura con los datos complejos.
+ * @param filter_cfg Configuración del filtro (BW, Orden, Tipo, SampleRate).
  */
-int parse_config_rf(const char *json_string, DesiredCfg_t *target);
-
-/**
- * @brief Frees allocated strings inside DesiredCfg_t (specifically 'scale').
- */
-void free_desired_psd(DesiredCfg_t *target);
+void filter_iq(signal_iq_t *signal_iq, filter_t *filter_cfg);
 
 /**
  * @brief Calculates derived parameters (FFT size, overlap) based on desired RBW.
  */
 int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_cfg, RB_cfg_t *rb_cfg);
-
-void print_config_summary(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *psd, RB_cfg_t *rb);
 
 void execute_pfb_psd(signal_iq_t* signal_data, const PsdConfig_t* config, double* f_out, double* p_out);
 

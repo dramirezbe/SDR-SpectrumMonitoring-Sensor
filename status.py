@@ -75,6 +75,9 @@ def main() -> int:
         log.error(f"Error building final payload: {e}")
         return 1
     
+    #debug
+    log.info(f"to send: {metrics_dict}")
+    
     # Send data
     rc, _ = cli.post_json(cfg.STATUS_URL, metrics_dict)
     if rc != 0:

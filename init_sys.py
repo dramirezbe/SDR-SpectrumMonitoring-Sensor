@@ -9,6 +9,7 @@ TODO When system power on
 * Create personalized daemons files
 * Ensure all directories exist
 * Retry queue first time
+* Kalibrate first time
 """
 
 import sys

@@ -68,6 +68,9 @@ static void* listener_thread(void *arg) {
             if (pair->verbose) {
                 printf("[C-PAIR] << RECV from Py: %s\n", pair->buffer);
             }
+            else {
+                printf("[C-PAIR] << RECV from Py\n");
+            }
 
             if (pair->callback) {
                 pair->callback(pair->buffer);

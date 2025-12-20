@@ -20,6 +20,7 @@
 #include "ring_buffer.h" 
 #include "zmq_util.h" 
 #include "utils.h"
+#include "parser.h"
 
 #ifndef NO_COMMON_LIBS
     #include "bacn_gpio.h"
@@ -94,32 +95,32 @@ int recover_hackrf(void) {
 // =========================================================
 // ZMQ & LOGIC FUNCTIONS
 // =========================================================
-
 /**
  * @brief Formats result data as JSON and publishes via ZMQ PAIR.
  */
-void publish_results(double* freq_array, double* psd_array, int length, SDR_cfg_t *local_hack) {
-    if (!zmq_channel || !freq_array || !psd_array || length <= 0) return;
+void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack) {
+    if (!zmq_channel || !psd_array || length <= 0) return;
 
     cJSON *root = cJSON_CreateObject();
     
-    // Math: freq_array is relative to DC (-Span/2 to +Span/2)
-    // Add center freq to get absolute RF values
-    double start_abs = freq_array[0] + (double)local_hack->center_freq;
-    double end_abs   = freq_array[length-1] + (double)local_hack->center_freq;
+    // Full span calculation: Center +/- (Fs / 2)
+    double fs = local_hack->sample_rate;
+    double start_freq = (double)local_hack->center_freq - (fs / 2.0);
+    double end_freq   = (double)local_hack->center_freq + (fs / 2.0);
 
-    cJSON_AddNumberToObject(root, "start_freq_hz", start_abs);
-    cJSON_AddNumberToObject(root, "end_freq_hz", end_abs);
+    cJSON_AddNumberToObject(root, "start_freq_hz", start_freq);
+    cJSON_AddNumberToObject(root, "end_freq_hz", end_freq);
+    cJSON_AddNumberToObject(root, "sample_rate_hz", fs);
 
+    // Attach the full PSD array
     cJSON *pxx_array = cJSON_CreateDoubleArray(psd_array, length);
     cJSON_AddItemToObject(root, "Pxx", pxx_array);
 
     char *json_string = cJSON_PrintUnformatted(root); 
-    
-    // SEND via ZMQ Pair
-    zpair_send(zmq_channel, json_string);
-
-    free(json_string);
+    if (json_string) {
+        zpair_send(zmq_channel, json_string);
+        free(json_string);
+    }
     cJSON_Delete(root);
 }
 
@@ -141,7 +142,7 @@ void on_command_received(const char *payload) {
     // 3. Parse and Calculate
     if (parse_config_rf(payload, &desired_config) == 0) {
         find_params_psd(desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
-        print_config_summary(&desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
+        print_config_summary_DEBUG(&desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
 
         // 4. Hardware GPIO Selection (if applicable)
         #ifndef NO_COMMON_LIBS
@@ -276,44 +277,31 @@ int main() {
             
             // 2. Convert to IQ
             signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb_cfg.total_bytes);
+
+                // 3. Apply digital filter if enabled (before PSD)
+            if (local_desired_cfg.filter_enabled) {
+                printf("[RF] Applying Filter...\n");
+                filter_iq(sig, &local_desired_cfg.filter_cfg);
+            }
             
             double* freq = malloc(local_psd_cfg.nperseg * sizeof(double));
             double* psd = malloc(local_psd_cfg.nperseg * sizeof(double));
 
             if (freq && psd && sig) {
-                // 3. Execute Welch (Full Bandwidth)
-                execute_pfb_psd(sig, &local_psd_cfg, freq, psd);
+                // 4. Calculate PSD
+                if (local_desired_cfg.method_psd == PFB) {
+                    printf("[RF] Executing PFB PSD...\n");
+                    execute_pfb_psd(sig, &local_psd_cfg, freq, psd);
+                } else {
+                    printf("[RF] Executing WELCH PSD...\n");
+                    execute_welch_psd(sig, &local_psd_cfg, freq, psd);
+                }
+
+                // 5. Scale values (dBm, etc.)
                 scale_psd(psd, local_psd_cfg.nperseg, local_desired_cfg.scale);
 
-                // 4. APPLY SPAN LOGIC (Crop Arrays)
-                // Filter the result to only show the requested Span
-                double half_span = local_desired_cfg.span / 2.0;
-                int start_idx = 0;
-                int end_idx = local_psd_cfg.nperseg - 1;
-
-                // Find valid index range
-                for (int i = 0; i < local_psd_cfg.nperseg; i++) {
-                    if (freq[i] >= -half_span) {
-                        start_idx = i;
-                        break;
-                    }
-                }
-                for (int i = start_idx; i < local_psd_cfg.nperseg; i++) {
-                    if (freq[i] > half_span) {
-                        end_idx = i - 1;
-                        break;
-                    }
-                    end_idx = i;
-                }
-
-                int valid_len = end_idx - start_idx + 1;
-
-                // 5. Publish
-                if (valid_len > 0) {
-                    publish_results(&freq[start_idx], &psd[start_idx], valid_len, &local_hack_cfg);
-                } else {
-                    printf("[RF] Warning: Span resulted in 0 bins.\n");
-                }
+                // 6. Publish Full Bandwidth
+                publish_results(psd, local_psd_cfg.nperseg, &local_hack_cfg);
             }
 
             // Cleanup Local DSP

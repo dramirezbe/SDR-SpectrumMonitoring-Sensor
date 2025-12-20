@@ -52,31 +52,18 @@ typedef enum {
     AM_MODE
 } rf_mode_t;
 
+// Add these to your datatypes.h if not already there
+typedef enum {
+    DEMOD_OFF,
+    DEMOD_FM,
+    DEMOD_AM
+} demod_type_t;
+
 // --- Demodulation Config ---
 typedef struct {
     double center_freq;
     double bw_hz;
 } DemodeConfig_t;
-
-// --- Desired User Config (from JSON) ---
-typedef struct {
-    rf_mode_t rf_mode;
-    DemodeConfig_t demode_config;
-    uint64_t center_freq;
-    double sample_rate;
-    double span;
-    int lna_gain;
-    int vga_gain;
-    bool amp_enabled;
-    int antenna_port;      
-    
-    // PSD Processing Config
-    int rbw;
-    double overlap;
-    PsdWindowType_t window_type;
-    char *scale;    // Will be stored in lowercase
-    int ppm_error;
-} DesiredCfg_t;
 
 // --- Buffer Configuration ---
 typedef struct {
@@ -87,17 +74,48 @@ typedef struct {
 typedef enum {
     LOWPASS_TYPE,
     HIGHPASS_TYPE,
-    BANDPASS_TYPE
-}type_filter_t;
-
+    BANDPASS_TYPE,
+    BANDSTOP_TYPE,
+} type_filter_t;
 
 typedef struct {
     float bw_filter_hz;
-    type_filter_t type_filter;
-    int order_fliter;
-    
-}filter_t;
+    type_filter_t type_filter;  
+    int order_filter;           
+    double sample_rate;         
+    double prev_output_i;
+    double prev_output_q;
+} filter_t;
 
-void filter_iq(signal_iq_t *signal_iq, filter_t *filter_cfg);
+// Updated DesiredCfg_t
+typedef struct {
+    rf_mode_t rf_mode;
+    Psd_method method_psd;  // New: WELCH or PFB
+    
+    // Hardware params
+    uint64_t center_freq;
+    double sample_rate;
+    double span;
+    int lna_gain;
+    int vga_gain;
+    bool amp_enabled;
+    int antenna_port;
+    int ppm_error;
+
+    // PSD params
+    int rbw;
+    double overlap;
+    PsdWindowType_t window_type;
+    char *scale;
+
+    // Optional Filter Block
+    bool filter_enabled;
+    filter_t filter_cfg;
+
+    // Optional Demod Block
+    bool demod_enabled;
+    demod_type_t demod_type;
+    DemodeConfig_t demod_cfg;
+} DesiredCfg_t;
 
 #endif

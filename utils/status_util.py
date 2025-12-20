@@ -32,7 +32,7 @@ class StatusPost:
     last_ntp_ms: int
     logs: str
     
-    # cpu_loads is internal; it will be flattened to cpu_0, cpu_1... in to_dict()
+    # cpu_loads is internal; it will be flattened to cpu_0, cpu_1... in to_dict().
     cpu_loads: List[float] = field(default_factory=list)
 
     @classmethod
@@ -47,11 +47,11 @@ class StatusPost:
             "last_kal_ms", "last_ntp_ms", "logs"
         }
         
-        # Filter for known fields
+        # Filter for known fields so unexpected keys do not break initialization.
         init_args = {k: v for k, v in data.items() if k in known_fields}
         obj = cls(**init_args)
         
-        # Dynamically find and sort CPU keys
+        # Dynamically find and sort CPU keys so cpu_0..cpu_n are ordered.
         cpu_keys = [k for k in data.keys() if k.startswith("cpu_") and k[4:].isdigit()]
         cpu_keys.sort(key=lambda x: int(x.split('_')[1]))
         
@@ -66,7 +66,7 @@ class StatusPost:
         """
         data = asdict(self)
         
-        # Remove the list field from the output
+        # Remove the list field from the output so it can be flattened.
         if "cpu_loads" in data:
             del data["cpu_loads"]
             
@@ -102,7 +102,7 @@ class StatusDevice:
         """
         snapshot = {}
 
-        # 1. Static/External Metadata
+        # 1. Static/External Metadata.
         snapshot["mac"] = mac
         snapshot["timestamp_ms"] = timestamp_ms
         snapshot["delta_t_ms"] = delta_t_ms
@@ -111,20 +111,20 @@ class StatusDevice:
 
         # 2. CPU: flatten list into cpu_0, cpu_1...
         cpu_data = self.get_cpu_percent()
-        cpu_list = cpu_data.get("cpu", [])
+        cpu_list = cpu_data.get("cpu", [])[:4] # Limit to first 4 CPUs even if there are more
         for idx, usage in enumerate(cpu_list):
             snapshot[f"cpu_{idx}"] = usage
 
-        # 3. RAM & Swap
+        # 3. RAM & Swap.
         snapshot.update(self.get_ram_swap_mb())
 
-        # 4. Disk
+        # 4. Disk.
         snapshot.update(self.get_disk())
 
-        # 5. Temperature
+        # 5. Temperature.
         snapshot.update(self.get_temp_c())
 
-        # 6. Totals
+        # 6. Totals.
         totals_mem = self.get_total_ram_swap_mb()
         snapshot["total_ram_mb"] = totals_mem.get("ram_mb") or 0
         snapshot["total_swap_mb"] = totals_mem.get("swap_mb") or 0
@@ -132,64 +132,90 @@ class StatusDevice:
         total_disk = self.get_total_disk()
         snapshot["total_disk_mb"] = total_disk.get("disk_mb") or 0
 
-        # 7. Ping
+        # 7. Ping.
         snapshot.update(self.get_ping_latency(ping_ip))
 
-        # 8. Logs
+        # 8. Logs.
         _, _, logs_text = self.get_logs()
         snapshot["logs"] = logs_text
 
-        # 9. Serialize via Dataclass to ensure strict format
+        # 9. Serialize via Dataclass to ensure strict format.
         return StatusPost.from_dict(snapshot).to_dict()
 
     def get_cpu_percent(self) -> Dict[str, List[float]]:
         """
-        Calculates CPU usage by reading /proc/stat twice with a delay.
+        Calculates CPU usage by reading /proc/stat twice (or more) with retries.
+        Robust against cases where counters don't advance in short windows.
         """
         def read_cpu_lines():
-            lines = []
+            """
+            Reads per-core cumulative counters from /proc/stat.
+
+            Returns:
+                List[(total_jiffies, idle_jiffies)] for cpu0..cpuN.
+                Skips the first aggregated "cpu" line and only keeps per-core lines.
+            """
             try:
                 with open("/proc/stat", "r") as f:
                     lines = [l for l in f.readlines() if l.startswith("cpu")]
             except Exception:
+                # If /proc/stat is not readable, return no CPU data.
                 return []
                 
             parsed = []
+            # lines[0] is the aggregate 'cpu' line.
             for l in lines[1:]:  # skip aggregate 'cpu' line
                 parts = l.split()
-                if len(parts) < 5: continue
+                if len(parts) < 5:
+                    # Not enough fields to compute idle/total reliably.
+                    continue
                 vals = [int(x) for x in parts[1:]]
                 total = sum(vals)
-                idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+                idle = vals[3] + (vals[4] if len(vals) > 4 else 0)  # idle + iowait
                 parsed.append((total, idle))
             return parsed
 
         try:
             prev = read_cpu_lines()
-            
-            # Blocking delay for calculation. 
-            # Increased to 0.2s to capture a meaningful delta and avoid 0.0 on fast systems.
-            time.sleep(0.2) 
-            
-            cur = read_cpu_lines()
 
-            usage = []
-            if not prev or not cur or len(prev) != len(cur):
-                # Fallback if read failed
+            if not prev:
                 return {"cpu": []}
 
-            for (t1, i1), (t2, i2) in zip(prev, cur):
-                total_delta = t2 - t1
-                idle_delta = i2 - i1
-                if total_delta <= 0:
-                    pct = 0.0
-                else:
-                    pct = (1.0 - idle_delta / total_delta) * 100.0
-                usage.append(round(pct, 2))
+            max_tries = 5
+            # Initial sleep between reads, set to 1s for better stability.
+            sleep_s = 1.0
 
-            return {"cpu": usage}
+            for _ in range(max_tries):
+                time.sleep(sleep_s)
+                cur = read_cpu_lines()
+
+                if not cur or len(cur) != len(prev):
+                    sleep_s = min(sleep_s * 2.0, 1.5)
+                    prev = cur if cur else prev
+                    continue
+
+                usage = []
+                any_progress = False
+
+                for (t1, i1), (t2, i2) in zip(prev, cur):
+                    total_delta = t2 - t1
+                    idle_delta = i2 - i1
+
+                    if total_delta > 0:
+                        any_progress = True
+                        pct = (1.0 - (idle_delta / total_delta)) * 100.0
+                        usage.append(round(pct, 3))
+                    else:
+                        usage.append(0.0)
+                if any_progress:
+                    return {"cpu": usage}
+                
+                # If there was no progress, increase sleep and retry.
+                sleep_s = min(sleep_s * 2.0, 1.5)
+                prev = cur
+            return {"cpu": []}
         except Exception:
-             return {"cpu": []}
+            return {"cpu": []}
 
     def get_ram_swap_mb(self) -> Dict[str, int]:
         """
@@ -197,7 +223,7 @@ class StatusDevice:
         """
         mem_total = mem_available = swap_total = swap_free = None
         
-        # Retry mechanism to avoid null data
+        # Retry mechanism to avoid null data.
         for _ in range(3):
             try:
                 with open("/proc/meminfo", "r") as f:
@@ -211,11 +237,12 @@ class StatusDevice:
                         elif line.startswith("SwapFree:"):
                             swap_free = int(line.split()[1])
                     
-                    # If we successfully found the keys, break loop
+                    # If we successfully found the keys, break loop.
                     if (mem_total is not None and mem_available is not None):
                         break
             except Exception:
-                time.sleep(0.05) # Small sleep before retry
+                # Small sleep before retry.
+                time.sleep(0.05)
                 continue
 
         ram_mb = 0
@@ -230,7 +257,7 @@ class StatusDevice:
 
     def get_total_ram_swap_mb(self) -> Dict[str, int]:
         mem_total = swap_total = None
-        # Retry mechanism
+        # Retry mechanism.
         for _ in range(3):
             try:
                 with open("/proc/meminfo", "r") as f:
@@ -252,6 +279,7 @@ class StatusDevice:
     def get_disk(self) -> dict:
         try:
             st = os.statvfs(self.disk_path_str)
+            # Used space is total blocks minus free blocks.
             used_bytes = (st.f_blocks - st.f_bfree) * st.f_frsize
             used_mb = used_bytes // (1024 * 1024)
             return {"disk_mb": used_mb}
@@ -261,6 +289,7 @@ class StatusDevice:
     def get_total_disk(self) -> dict:
         try:
             st = os.statvfs(self.disk_path_str)
+            # Total space is all blocks.
             total_bytes = st.f_blocks * st.f_frsize
             total_mb = total_bytes // (1024 * 1024)
             return {"disk_mb": total_mb}
@@ -277,10 +306,11 @@ class StatusDevice:
                 with open(path, "r") as f:
                     content = f.read().strip()
                     if content:
+                        # Kernel exposes millidegrees Celsius.
                         temp_c = int(content) / 1000.0
                         return {"temp_c": temp_c}
             except Exception:
-                # Sensor might be busy, wait 50ms and retry
+                # Sensor might be busy, wait 50ms and retry.
                 time.sleep(0.05)
                 continue
         
@@ -290,6 +320,7 @@ class StatusDevice:
         cmd = ["ping", "-c", "1", "-W", "1", ip]
         err_dict = {"ping_ms": -1.0}
         try:
+            # Run a single ping with a 1s timeout.
             output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
         except subprocess.CalledProcessError:
             return err_dict
@@ -297,6 +328,7 @@ class StatusDevice:
         for line in output.splitlines():
             if "time=" in line:
                 try:
+                    # Parse latency from the ping output line.
                     time_part = line.split("time=")[1]
                     time_str = time_part.split()[0]
                     latency_ms = float(time_str)
@@ -315,9 +347,10 @@ class StatusDevice:
         collected_lines: List[str] = []
 
         if not self.logs_dir.exists() or not self.logs_dir.is_dir():
+            # If logs directory is missing, return default message.
             return None, None, result_logs
 
-        # 1. Identify and sort log files by timestamp (Newest First)
+        # 1. Identify and sort log files by timestamp (Newest First).
         # format: <timestamp>_<module>.log
         log_files = []
         for p in self.logs_dir.glob("*.log"):
@@ -329,10 +362,10 @@ class StatusDevice:
             except Exception:
                 continue
         
-        # Sort descending (Newest -> Oldest)
+        # Sort descending (Newest -> Oldest).
         log_files.sort(key=lambda x: x[0], reverse=True)
 
-        # 2. Collect lines
+        # 2. Collect lines.
         for _, p in log_files:
             try:
                 text = p.read_text(encoding="utf-8", errors="ignore")
@@ -356,11 +389,12 @@ class StatusDevice:
                     break
 
             except Exception as e:
+                # Log read errors but continue with other files.
                 self._log.error(f"Error reading log file {p}: {e}")
                 continue
 
         if collected_lines:
             result_logs = "\n".join(collected_lines)
 
-        # Returns None, None, str to match expected signature in get_status_snapshot
+        # Returns None, None, str to match expected signature in get_status_snapshot.
         return None, None, result_logs

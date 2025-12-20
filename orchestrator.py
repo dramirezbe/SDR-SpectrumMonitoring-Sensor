@@ -3,7 +3,7 @@
 
 import cfg
 log = cfg.set_logger()
-from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, ShmStore, ElapsedTimer
+from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, FilterConfig, DemodulationConfig,ShmStore, ElapsedTimer
 from functions import format_data_for_upload, CronSchedulerCampaign, GlobalSys, SysState
 
 import sys
@@ -35,8 +35,29 @@ def fetch_realtime_config(client):
         log.info(f"json_payload: {json_payload}") 
 
         try:
+                # 1. Extract and create the FilterConfig if it exists in the JSON
+            filter_data = json_payload.get("filter")
+            demodulation_data = json_payload.get("demodulation")
+            demodulation_obj = None
+            filter_obj = None
+
+            if demodulation_data:
+                demodulation_obj = DemodulationConfig(
+                    type=demodulation_data.get("type"),
+                    bw_hz=int(demodulation_data.get("bw_hz"))
+                )
+            
+            if filter_data:
+                filter_obj = FilterConfig(
+                    type=filter_data.get("type"),
+                    bw_hz=int(filter_data.get("bw_hz")),
+                    order=int(filter_data.get("order"))
+                )
+
+            # 2. Instantiate the main config
             config_obj = ServerRealtimeConfig(
                 rf_mode="realtime",
+                method_psd="pfb",
                 center_freq_hz=int(json_payload.get("center_freq_hz")), 
                 sample_rate_hz=int(json_payload.get("sample_rate_hz")),
                 rbw_hz=int(json_payload.get("rbw_hz")),
@@ -48,8 +69,11 @@ def fetch_realtime_config(client):
                 antenna_amp=bool(json_payload.get("antenna_amp")),
                 antenna_port=int(json_payload.get("antenna_port")), 
                 span=int(json_payload.get("span")),
-                ppm_error=0
+                ppm_error=0,
+                demodulation=demodulation_obj,
+                filter=filter_obj  # Pass the object here
             )
+
             return asdict(config_obj), resp, delta_t_ms
 
         except (ValueError, TypeError) as val_err:
@@ -81,6 +105,9 @@ async def run_realtime_logic(client, store) -> int:
     next_config, _, delta_t_ms = fetch_realtime_config(client)
     if not next_config:
         return 0
+    
+    #DEBUG
+    log.info(f"next_config: {next_config}")
 
     # 2. Lock State and Initialize Rotation Timer
     GlobalSys.set(SysState.REALTIME)
