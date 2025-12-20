@@ -45,7 +45,6 @@ bool GPSRDY = false;
 // FUNCTION PROTOTYPES
 // =========================================================
 void run_cmd(const char *cmd);
-bool is_valid_gps_data(const char* lat_str, const char* lon_str);
 int get_wlan_ip(char *ip);
 int get_eth_ip(char *ip);
 int get_ppp_ip(char *ip);
@@ -119,26 +118,6 @@ int get_ppp_ip(char *ip) {
     return 0;
 }
 
-// --- GPS Logic ---
-
-bool is_valid_gps_data(const char* lat_str, const char* lon_str) {
-    if (!lat_str || !lon_str) return false;
-    if (strlen(lat_str) < 1 || strlen(lon_str) < 1) return false;
-
-    char *endptr_lat, *endptr_lon;
-    double lat = strtod(lat_str, &endptr_lat);
-    double lon = strtod(lon_str, &endptr_lon);
-
-    if (lat_str == endptr_lat || lon_str == endptr_lon) return false;
-    // Check ranges
-    if (lat < -90.0 || lat > 90.0) return false;
-    if (lon < -180.0 || lon > 180.0) return false;
-    // Simple check to reject 0.0, 0.0 (often default init values)
-    if (fabs(lat) < 0.0001 && fabs(lon) < 0.0001) return false;
-
-    return true;
-}
-
 // =========================================================
 // MAIN ORCHESTRATION
 // =========================================================
@@ -155,33 +134,37 @@ int main() {
 
     // 2. Network / Internet Setup
     char ip[IP_BUF];
-    sleep(5); // Give interfaces a moment
+    sleep(30); // Give interfaces a moment
 
     if(get_eth_ip(ip)) {
         printf("IP address assigned to Ethernet: %s\n", ip);
-    } else if(get_wlan_ip(ip)) {
-        printf("IP address assigned to WiFi: %s\n", ip);
     } else {
-        printf("Starting PPP connection...\n");
-        run_cmd("sudo pon rnet");
-        sleep(10);
-        
-        if(!get_ppp_ip(ip)) {
-            printf("No IP address assigned! Restarting PPP...\n");
-            run_cmd("sudo poff rnet");
-            sleep(5);
+        sleep(30);
+        if(get_wlan_ip(ip)) {
+            printf("IP address assigned to WiFi: %s\n", ip);
+        } else {
+            sleep(30);
+            printf("Starting PPP connection...\n");
             run_cmd("sudo pon rnet");
             sleep(10);
-
+            
             if(!get_ppp_ip(ip)) {
-                printf("PPP failed again. No IP assigned.\n");
+                printf("No IP address assigned! Restarting PPP...\n");
+                run_cmd("sudo poff rnet");
+                sleep(5);
+                run_cmd("sudo pon rnet");
+                sleep(10);
+
+                if(!get_ppp_ip(ip)) {
+                    printf("PPP failed again. No IP assigned.\n");
+                }
+            }
+            if(strlen(ip) > 0) {
+                printf("PPP connected. IP = %s\n", ip);
             }
         }
-        if(strlen(ip) > 0) {
-            printf("PPP connected. IP = %s\n", ip);
-        }
-    }
-
+    } 
+    
     // 3. Environment Setup
     char *api_url = getenv_c("API_URL"); 
     if (api_url == NULL) {

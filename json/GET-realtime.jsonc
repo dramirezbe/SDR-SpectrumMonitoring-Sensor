@@ -42,7 +42,7 @@
         //int
         "filter_bw_hz": 200000,
 
-        //default stat
+        //default stat (1-8)
         "order_filter":2
     }
 }

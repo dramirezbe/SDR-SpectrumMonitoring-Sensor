@@ -55,11 +55,6 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
 
 void print_config_summary(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *psd, RB_cfg_t *rb);
 
-
-static double bessi0(double x);
-
-static void generate_kaiser_proto(double* h, int len, double beta);
-
 void execute_pfb_psd(signal_iq_t* signal_data, const PsdConfig_t* config, double* f_out, double* p_out);
 
 

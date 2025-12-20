@@ -77,40 +77,12 @@ User=anepi
 Restart=always
 RestartSec=5
 
-# Wait for internet
-ExecStartPre=/bin/bash -c 'until ping -c 1 -W 1 8.8.8.8; do echo "Waiting for internet..."; sleep 5; done'
-
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
 ExecStart={cfg.PYTHON_ENV_STR} orchestrator.py
 
 StandardOutput=syslog
 StandardError=syslog
 SyslogIdentifier=orchestrator-ane2
-
-[Install]
-WantedBy=multi-user.target
-"""
-
-INIT_SYS_DAEMON = f"""
-[Unit]
-Description=Initialize ANE2
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-User=anepi
-Type=oneshot
-
-# Wait for internet
-ExecStartPre=/bin/bash -c 'until ping -c 1 -W 1 8.8.8.8; do echo "Waiting for internet..."; sleep 5; done'
-
-WorkingDirectory={str(cfg.PROJECT_ROOT)}
-ExecStart={cfg.PYTHON_ENV_STR} init_sys.py
-RemainAfterExit=yes
-
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=init-sys-ane2
 
 [Install]
 WantedBy=multi-user.target
@@ -127,8 +99,6 @@ User=anepi
 Type=oneshot
 
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
-
-ExecStartPre=/bin/bash -c 'until ping -c 1 -W 1 8.8.8.8; do echo "Waiting for internet..."; sleep 5; done'
 
 ExecStart={cfg.PYTHON_ENV_STR} status.py
 
@@ -161,8 +131,6 @@ User=anepi
 Type=oneshot
 
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
-
-ExecStartPre=/bin/bash -c 'until ping -c 1 -W 1 8.8.8.8; do echo "Waiting for internet..."; sleep 5; done'
 
 ExecStart={cfg.PYTHON_ENV_STR} retry_queue.py
 
@@ -231,7 +199,6 @@ def main() -> int:
     save_daemon_file("rf-ane2.service", RF_APP_DAEMON)
     save_daemon_file("ltegps-ane2.service", LTEGPS_DAEMON)
     save_daemon_file("orchestrator-ane2.service", ORCHESTRATOR_DAEMON)
-    save_daemon_file("init-sys-ane2.service", INIT_SYS_DAEMON)
 
     save_daemon_file("retry-queue-ane2.service", QUEUE_DAEMON)
     save_daemon_file("retry-queue-ane2.timer", QUEUE_DAEMON_TIMER)

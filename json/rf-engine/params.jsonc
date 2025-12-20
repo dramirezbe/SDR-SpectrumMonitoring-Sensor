@@ -1,0 +1,14 @@
+{
+  // Can be realtime, campaign, fm, am
+  "rf_mode": "realtime",
+  "center_freq_hz": 2400000000,
+  "sample_rate_hz": 20000000.0,
+  "rbw_hz": 1000,
+  "overlap": 0.5,
+  "window": "hamming",
+  "lna_gain": 32,
+  "vga_gain": 20,
+  "antenna_amp": true,
+  "antenna_port": 1,
+  "ppm_error": 0
+}

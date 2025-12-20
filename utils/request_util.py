@@ -34,25 +34,20 @@ class ServerRealtimeConfig:
         Runs automatically after initialization to validate ranges.
         Raises ValueError if any parameter is invalid.
         """
-        # 1. Validate Center Frequency (8 MHz - 6 GHz)
-        if not (8_000_000 <= self.center_freq_hz <= 6_000_000_000):
+    
+        if not (1_000_000 <= self.center_freq_hz <= 6_000_000_000):
             raise ValueError(f"Center frequency {self.center_freq_hz} Hz is out of range (8MHz - 6GHz).")
-
-        # 2. Validate Sample Rate (1.5 MHz - 2 GHz)
-        if not (1_500_000 <= self.sample_rate_hz <= 2_000_000_000):
+        
+        if not (1_000_000 <= self.sample_rate_hz <= 2_000_000_000):
             raise ValueError(f"Sample rate {self.sample_rate_hz} Hz is out of range (1.5MHz - 2GHz).")
 
-        # 3. Validate Overlap (0.0 to 0.99)
         if not (0.0 <= self.overlap < 1.0):
             raise ValueError(f"Overlap {self.overlap} is invalid. Must be >= 0.0 and < 1.0.")
-
-        # 4. Validate Antenna Port
+        
         if self.antenna_port not in [1, 2, 3, 4]:
             raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1, 2, or 3.")
 
-        # 5. Sanity Check Span
-        if self.span <= 0:
-            raise ValueError(f"Span {self.span} must be positive.")
+        
 
 class RequestClient:
     """

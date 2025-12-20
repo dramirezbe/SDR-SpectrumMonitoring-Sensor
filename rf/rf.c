@@ -213,7 +213,7 @@ int main() {
     while (1) {
         // A. Wait for Configuration
         if (!config_received) {
-            usleep(50000); // 50ms wait
+            usleep(25000); // 25ms wait
             continue;
         }
 
@@ -282,7 +282,7 @@ int main() {
 
             if (freq && psd && sig) {
                 // 3. Execute Welch (Full Bandwidth)
-                execute_welch_psd(sig, &local_psd_cfg, freq, psd);
+                execute_pfb_psd(sig, &local_psd_cfg, freq, psd);
                 scale_psd(psd, local_psd_cfg.nperseg, local_desired_cfg.scale);
 
                 // 4. APPLY SPAN LOGIC (Crop Arrays)

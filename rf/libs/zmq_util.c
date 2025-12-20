@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <time.h>
 
-#define WATCHDOG_TIMEOUT 10.0
+#define WATCHDOG_TIMEOUT 15.0
 
 // --- Helper: Get monotonic time in seconds ---
 static double get_time_sec() {
