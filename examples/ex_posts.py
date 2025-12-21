@@ -58,13 +58,13 @@ post_dict_data = {
 }
 
 #log.info(f"to send: {post_dict_gps}")
-#rc, resp = cli.post_json("/gps", post_dict_gps)
+#rc, resp = cli.post_json(cfg.GPS_URL, post_dict_gps)
 
 #log.info(f"to send: {post_dict_status}")
-#rc, resp = cli.post_json("/status", post_dict_status)
+#rc, resp = cli.post_json(cfg.STATUS_URL, post_dict_status)
 
 log.info(f"to send: {post_dict_data}")
-rc, resp = cli.post_json("/data", post_dict_data)
+rc, resp = cli.post_json(cfg.DATA_URL, post_dict_data)
 
 log.info(f"rc={rc} resp={resp}")
 log.info(f"string json={resp.json()}")

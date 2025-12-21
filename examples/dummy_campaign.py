@@ -137,7 +137,7 @@ async def run_server():
                 log.info("----------------------")
 
                 # 4. Upload
-                cli.post_json("/data", data_dict)
+                cli.post_json(cfg.DATA_URL, data_dict)
 
             except asyncio.TimeoutError:
                 log.warning("TIMEOUT: No data from C-Engine. Retrying...")

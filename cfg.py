@@ -25,9 +25,10 @@ load_dotenv()
 # =============================
 # 2. CONFIGURATION (Safe Defaults)
 # =============================
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/sensor/")
+API_URL = os.getenv("API_URL", "https://rsm.ane.gov.co:12443/api/sensor")
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
+DUMMY_MAC = os.getenv("DUMMY_MAC", "d0:65:78:9c:dd:d0")
 LOG_FILES_NUM = int(os.getenv("LOG_FILES_NUM", "10"))
 LOG_ROTATION_LINES = int(os.getenv("LOG_ROTATION_LINES", "50"))
 
@@ -76,7 +77,20 @@ def human_readable(ts_ms, target_tz="UTC"):
     return dt_local.strftime('%Y-%m-%d %H:%M:%S')
 
 def get_mac() -> str:
-    return "d0:65:78:9c:dd:d0"
+    if DEVELOPMENT: return DUMMY_MAC
+    try:
+        interfaces = os.listdir("/sys/class/net")
+        interfaces.sort(key=lambda x: (not x.startswith("wlan"), x))
+        for iface in interfaces:
+            if iface.startswith(("lo", "sit", "docker", "veth", "vir", "br", "tun", "wg")):
+                continue
+            try:
+                with open(f"/sys/class/net/{iface}/address") as f:
+                    mac = f.read().strip()
+                if mac and mac != "00:00:00:00:00:00": return mac
+            except OSError: continue
+    except Exception: pass
+    return "00:00:00:00:00:00"
 
 # =============================
 # 4. LOGGING IMPLEMENTATION

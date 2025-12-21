@@ -174,7 +174,7 @@ async def run_server():
                 log.info("----------------------")
 
                 # 5. Send to API
-                client.post_json("/data", data_dict)
+                client.post_json(cfg.DATA_URL, data_dict)
 
             except asyncio.TimeoutError:
                 log.warning("TIMEOUT: No data received.")

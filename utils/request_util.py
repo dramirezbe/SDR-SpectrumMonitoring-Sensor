@@ -22,7 +22,6 @@ class DemodulationConfig:
 
 @dataclass
 class ServerRealtimeConfig:
-    rf_mode: str
     method_psd: str
     center_freq_hz: int
     sample_rate_hz: int
@@ -46,9 +45,6 @@ class ServerRealtimeConfig:
         
         if self.antenna_port not in [1, 2, 3, 4]:
             raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1-4.")
-        
-        if self.rf_mode not in ["campaign", "realtime", "fm", "am"]:
-            raise ValueError(f"RF mode {self.rf_mode} is invalid. Must be campaign, realtime, fm, or am.")
         
         if self.method_psd not in ["pfb", "welch"]:
             raise ValueError(f"PSD method {self.method_psd} is invalid. Must be pfb or welch.")

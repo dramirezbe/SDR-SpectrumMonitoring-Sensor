@@ -3,8 +3,14 @@
 
 import cfg
 log = cfg.set_logger()
-from utils import RequestClient, ZmqPairController, ServerRealtimeConfig, FilterConfig, DemodulationConfig,ShmStore, ElapsedTimer
-from functions import format_data_for_upload, CronSchedulerCampaign, GlobalSys, SysState, SimpleDCSpikeCleaner
+from utils import (
+    RequestClient, ZmqPairController, ServerRealtimeConfig, 
+    FilterConfig, DemodulationConfig, ShmStore, ElapsedTimer
+)
+from functions import (
+    format_data_for_upload, CronSchedulerCampaign, GlobalSys, 
+    SysState, SimpleDCSpikeCleaner, AcquireRealtime
+)
 
 import sys
 import asyncio
@@ -32,10 +38,10 @@ def fetch_realtime_config(client):
         if not json_payload:
             return {}, resp, delta_t_ms
 
-        log.info(f"json_payload: {json_payload}") 
+        #Debugging
+        log.info(f"json_payload: {json_payload}")
 
         try:
-                # 1. Extract and create the FilterConfig if it exists in the JSON
             filter_data = json_payload.get("filter")
             demodulation_data = json_payload.get("demodulation")
             demodulation_obj = None
@@ -54,9 +60,7 @@ def fetch_realtime_config(client):
                     order=int(filter_data.get("order"))
                 )
 
-            # 2. Instantiate the main config
             config_obj = ServerRealtimeConfig(
-                rf_mode="realtime",
                 method_psd="pfb",
                 center_freq_hz=int(json_payload.get("center_freq_hz")), 
                 sample_rate_hz=int(json_payload.get("sample_rate_hz")),
@@ -71,7 +75,7 @@ def fetch_realtime_config(client):
                 span=int(json_payload.get("span")),
                 ppm_error=0,
                 demodulation=demodulation_obj,
-                filter=filter_obj  # Pass the object here
+                filter=filter_obj
             )
 
             return asdict(config_obj), resp, delta_t_ms
@@ -96,9 +100,9 @@ async def _perform_calibration_sequence(store):
         log.error(f"❌ Error during calibration: {e}")
     log.info("--------------------------------")
 
-# --- 1. REALTIME LOGIC (STICKY MODE WITH ROTATION) ---
+# --- 1. REALTIME LOGIC (WITH OFFSET & CROP) ---
 async def run_realtime_logic(client, store) -> int:
-    log.info("[REALTIME] Entering Sticky Mode...")
+    log.info("[REALTIME] Entering Sticky Mode (Offset & Crop enabled)...")
     if not GlobalSys.is_idle(): return 1
     
     # 1. Initial Probe
@@ -106,60 +110,60 @@ async def run_realtime_logic(client, store) -> int:
     if not next_config:
         return 0
     
-    #DEBUG
-    log.info(f"next_config: {next_config}")
-
-    # 2. Lock State and Initialize Rotation Timer
+    # 2. Lock State
     GlobalSys.set(SysState.REALTIME)
     store.add_to_persistent("delta_t_ms", delta_t_ms)
     
-    # Force break after 5 minutes (300s) to allow Campaign checks
     timer_force_rotation = ElapsedTimer()
     timer_force_rotation.init_count(300) 
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
-    cleaner = SimpleDCSpikeCleaner(search_frac= 0.05,
-                                    width_frac=0.005,
-                                    neighbor_bins=2)
+    cleaner = SimpleDCSpikeCleaner(search_frac=0.05, width_frac=0.005, neighbor_bins=2)
 
     try:
         async with controller as zmq_ctrl:
-            log.info("[REALTIME] Connection established. Max session duration: 5m.")
+            # Initialize the specialized acquirer
+            acquirer = AcquireRealtime(
+                controller=zmq_ctrl, 
+                cleaner=cleaner,
+                hardware_max_bw=20_000_000, 
+                user_safe_bw=18_000_000
+            )
+
+            log.info("[REALTIME] Connection established. Processing stream...")
             
             while True:
-                # A. Check for 5-minute rotation
                 if timer_force_rotation.time_elapsed():
-                    log.info("[REALTIME] Periodic rotation triggered. Re-evaluating system state.")
+                    log.info("[REALTIME] Periodic rotation triggered.")
                     break
 
-                # B. Data Acquisition Cycle
-                await zmq_ctrl.send_command(next_config)
-                try:
-                    raw_payload = await asyncio.wait_for(zmq_ctrl.wait_for_data(), timeout=10)
-                    data_dict = format_data_for_upload(raw_payload)
-                    
-                    #Spike
-                    Pxx_cleaned= cleaner.clean(data_dict["Pxx"])
-                    data_dict["Pxx"] = Pxx_cleaned.tolist()                    
-                    
-                    # Upload (Non-fatal if network blips during post)
-                    rc, resp = client.post_json("/data", data_dict)
+                #StateMachine Realtime
+                is_demod = bool(next_config.get("demodulation"))
+
+                if is_demod:
+                    dsp_payload = await acquirer.acquire_raw(next_config)
+                else:
+                    dsp_payload = await acquirer.acquire_with_offset(next_config)
+                
+                if dsp_payload:
+                    final_payload = format_data_for_upload(dsp_payload)
+
+                    rc, _ = client.post_json(cfg.DATA_URL, final_payload)
                     if rc != 0:
                         log.warning(f"[REALTIME] Upload failed (RC {rc}).")
-                except asyncio.TimeoutError:
-                    log.warning("[REALTIME] C-Engine Timeout.")
+                else:
+                    log.warning("[REALTIME] Acquisition timeout or DSP error.")
 
-                # C. Config Heartbeat (1-strike fail logic)
+                # --- STEP D: Heartbeat / Config Update ---
                 new_conf, _, dt = fetch_realtime_config(client)
                 if not new_conf:
-                    log.error("[REALTIME] Config fetch failed or Stop command received. Breaking immediately.")
+                    log.error("[REALTIME] Stop command received. Breaking.")
                     break 
                 
-                # Update config for next acquisition loop
                 next_config = new_conf
                 store.add_to_persistent("delta_t_ms", dt)
 
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
 
     except Exception as e:
         log.error(f"[REALTIME] Critical loop error: {e}")
@@ -223,12 +227,10 @@ async def main() -> int:
     log.info("Orchestrator online. Monitoring tasks...")
 
     while True:
-        # Check Realtime
         if GlobalSys.is_idle() and tim_check_realtime.time_elapsed():
             await run_realtime_logic(client, store)
             tim_check_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
 
-        # Check Campaigns
         if GlobalSys.is_idle() and tim_check_campaign.time_elapsed():
             await run_campaigns_logic(client, store, scheduler)
             tim_check_campaign.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
