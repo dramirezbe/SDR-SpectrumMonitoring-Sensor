@@ -1,4 +1,12 @@
-#utils/request_util.py
+# utils/request_util.py
+"""
+Utilidades de Comunicación (HTTP y ZMQ).
+
+Este módulo centraliza las interacciones externas e internas del sensor. 
+Incluye validadores de configuración de hardware, un cliente HTTP robusto con 
+manejo de errores unificado y un controlador de sockets ZeroMQ para la 
+comunicación entre procesos (IPC).
+"""
 
 import requests
 from typing import Optional, Tuple, Dict, Any
@@ -11,17 +19,25 @@ from dataclasses import dataclass
 
 @dataclass
 class FilterConfig:
-    type: str
-    bw_hz: int
-    order: int
+    """Configuración de filtrado digital para la señal de RF."""
+    type: str #: Tipo de filtro ('lowpass', 'highpass', 'bandpass')
+    bw_hz: int #: Ancho de banda del filtro en Hertz
+    order: int #: Orden del filtro (complejidad/atenuación)
 
 @dataclass
 class DemodulationConfig:
-    type: str
-    bw_hz: int
+    """Configuración de demodulación para escucha o análisis."""
+    type: str #: Tipo de demodulación ('am', 'fm')
+    bw_hz: int #: Ancho de banda de demodulación en Hertz
 
 @dataclass
 class ServerRealtimeConfig:
+    """
+    Configuración maestra de tiempo real enviada por el servidor.
+
+    Realiza validaciones automáticas mediante `__post_init__` para asegurar 
+    que los parámetros solicitados por la nube sean compatibles con el hardware.
+    """
     method_psd: str
     center_freq_hz: int
     sample_rate_hz: int
@@ -39,37 +55,38 @@ class ServerRealtimeConfig:
     filter: Optional[FilterConfig] = None
 
     def __post_init__(self):
-        # 1. Standard validations
+        """Valida las restricciones físicas del hardware SDR."""
+        # Validación de rango de frecuencia (1MHz a 6GHz)
         if not (1_000_000 <= self.center_freq_hz <= 6_000_000_000):
-            raise ValueError(f"Center frequency {self.center_freq_hz} Hz out of range (1MHz - 6GHz).")
+            raise ValueError(f"Frecuencia central {self.center_freq_hz} Hz fuera de rango.")
         
+        # Validación de puertos de antena
         if self.antenna_port not in [1, 2, 3, 4]:
-            raise ValueError(f"Antenna port {self.antenna_port} is invalid. Must be 1-4.")
+            raise ValueError(f"Puerto de antena {self.antenna_port} inválido.")
         
+        # Validación de métodos de Densidad Espectral de Potencia (PSD)
         if self.method_psd not in ["pfb", "welch"]:
-            raise ValueError(f"PSD method {self.method_psd} is invalid. Must be pfb or welch.")
+            raise ValueError(f"Método PSD {self.method_psd} inválido. Debe ser pfb o welch.")
 
-        # 2. Nested Validation (only if filter is provided)
         if self.filter is not None:
             if self.filter.type not in ["lowpass", "highpass", "bandpass"]:
-                raise ValueError(f"Filter type {self.filter.type} is invalid.")
+                raise ValueError(f"Tipo de filtro {self.filter.type} inválido.")
 
         if self.demodulation is not None:
             if self.demodulation.type not in ["am", "fm"]:
-                raise ValueError(f"Demodulation type {self.demodulation.type} is invalid.")
-            
-        
-
-        
+                raise ValueError(f"Tipo de demodulación {self.demodulation.type} inválido.")
 
 class RequestClient:
     """
-    Lightweight HTTP client with unified return codes and internal logging.
+    Cliente HTTP ligero con códigos de retorno unificados.
 
-    Return codes:
-        0 -> success (HTTP 2xx)
-        1 -> known network/server/client error
-        2 -> unexpected error
+    Esta clase simplifica las peticiones `requests` inyectando automáticamente 
+    la dirección MAC en los endpoints y capturando excepciones comunes de red.
+
+    Códigos de Retorno (RC):
+        * **0**: Éxito (Respuesta HTTP 2xx).
+        * **1**: Error de red conocido (Timeout, Conexión, Error 4xx/5xx).
+        * **2**: Error inesperado (Serialización, Excepciones críticas).
     """
 
     def __init__(
@@ -80,31 +97,34 @@ class RequestClient:
         verbose: bool = False,
         logger=None,
     ):
-        # Removed api_key argument
+        """
+        Args:
+            base_url (str): URL base de la API.
+            mac_wifi (str): Dirección MAC del sensor para identificación.
+            timeout (tuple): Tiempos de espera (conexión, lectura) en segundos.
+            verbose (bool): Si es True, imprime detalles de las peticiones.
+            logger: Instancia de logging para registro de eventos.
+        """
         self.base_url = base_url.rstrip("/")
         self.mac_wifi = mac_wifi
         self.timeout = timeout
         self.verbose = verbose
         self._log = logger
 
-    # -------------------------------------------------------------------------
-    # Public methods
-    # -------------------------------------------------------------------------
     def get(
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, Optional[requests.Response]]:
-        # Add default Accept header for GET
+        """Realiza una petición GET inyectando la MAC en la ruta."""
         hdrs = {"Accept": "application/json"}
         if self._is_valid_mac():
             endpoint = f"/{self.mac_wifi}{endpoint}"
-        else:
-            if self._log:
-                self._log.warning(f"Invalid MAC address {self.mac_wifi}")
-        if headers:
-            hdrs.update(headers)
+        elif self._log:
+            self._log.warning(f"Dirección MAC inválida: {self.mac_wifi}")
+            
+        if headers: hdrs.update(headers)
         return self._send_request("GET", endpoint, headers=hdrs, params=params)
 
     def post_json(
@@ -113,22 +133,17 @@ class RequestClient:
         json_dict: Dict[str, Any],
         headers: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, Optional[requests.Response]]:
+        """Envía un diccionario JSON mediante una petición POST."""
         try:
             body = json.dumps(json_dict).encode("utf-8")
         except Exception as e:
-            if self._log:
-                self._log.error(f"[HTTP] JSON serialization error: {e}")
+            if self._log: self._log.error(f"[HTTP] Error de serialización: {e}")
             return 2, None
 
-        # Add default Content-Type header for POST_JSON
         hdrs = {"Content-Type": "application/json"}
-        if headers:
-            hdrs.update(headers)
+        if headers: hdrs.update(headers)
         return self._send_request("POST", endpoint, headers=hdrs, data=body)
 
-    # -------------------------------------------------------------------------
-    # Internal unified handler
-    # -------------------------------------------------------------------------
     def _send_request(
         self,
         method: str,
@@ -137,74 +152,53 @@ class RequestClient:
         data: Optional[bytes] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Optional[requests.Response]]:
-
+        """Manejador interno unificado para todas las llamadas HTTP."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         
         try:
             if self.verbose and self._log:
-                # Log URL and method
                 self._log.info(f"[HTTP] {method} → {url}")
-                # Optional: Log headers
-                # self._log.info(f"[HTTP] Headers: {headers}")
 
             resp = requests.request(
-                method,
-                url,
-                headers=headers, 
-                data=data,
-                params=params,
-                timeout=self.timeout,
+                method, url, headers=headers, data=data, 
+                params=params, timeout=self.timeout
             )
 
-            # Success
             if 200 <= resp.status_code < 300:
-                if self.verbose and self._log:
-                    self._log.info(f"[HTTP] success rc={resp.status_code}")
                 return 0, resp
 
-            # Known HTTP errors
-            if 300 <= resp.status_code < 400:
-                msg = f"[HTTP] redirect rc={resp.status_code}"
-            elif 400 <= resp.status_code < 500:
-                msg = f"[HTTP] client error rc={resp.status_code}"
-            elif 500 <= resp.status_code < 600:
-                msg = f"[HTTP] server error rc={resp.status_code}"
-            else:
-                msg = f"[HTTP] unknown status rc={resp.status_code}"
-
+            # Mapeo de errores HTTP
             if self._log:
-                self._log.error(msg)
+                self._log.error(f"[HTTP] Error rc={resp.status_code} en {url}")
             return 1, resp
 
-        except requests.exceptions.Timeout:
-            if self._log:
-                self._log.error("[HTTP] timeout")
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if self._log: self._log.error(f"[HTTP] Error de conectividad: {e}")
             return 1, None
-
-        except requests.exceptions.ConnectionError as e:
-            if self._log:
-                self._log.error(f"[HTTP] connection error: {e}")
-            return 1, None
-
-        except requests.exceptions.RequestException as e:
-            if self._log:
-                self._log.error(f"[HTTP] request exception: {e}")
-            return 1, None
-
         except Exception as e:
-            if self._log:
-                self._log.error(f"[HTTP] unexpected error: {e}")
+            if self._log: self._log.error(f"[HTTP] Error inesperado: {e}")
             return 2, None
         
-    def _is_valid_mac(self):
+    def _is_valid_mac(self) -> bool:
+        """Valida el formato de la dirección MAC mediante regex."""
         pattern = r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$"
-        
-        if re.match(pattern, self.mac_wifi):
-            return True
-        return False
+        return bool(re.match(pattern, self.mac_wifi))
 
 class ZmqPairController:
-    def __init__(self, addr, is_server=True, verbose=False):
+    """
+    Controlador asíncrono para sockets ZeroMQ del tipo PAIR.
+
+    Se utiliza para la comunicación Inter-Procesos (IPC) entre este código 
+    Python y el motor de procesamiento RF (C++/Rust/Python). Implementa 
+    el protocolo de limpieza de archivos IPC para evitar bloqueos.
+    """
+    def __init__(self, addr: str, is_server: bool = True, verbose: bool = False):
+        """
+        Args:
+            addr (str): Dirección del socket (ej: 'ipc:///tmp/rf_engine').
+            is_server (bool): Si es True, realiza un 'bind', de lo contrario 'connect'.
+            verbose (bool): Activa logs de depuración para mensajes enviados/recibidos.
+        """
         self.addr = addr
         self.is_server = is_server
         self.verbose = verbose
@@ -212,81 +206,55 @@ class ZmqPairController:
         self.socket = None
 
     def start(self):
-        """Initializes the context and binds/connects the socket."""
-        if self.socket is not None:
-            print("[PY] Socket already open.")
-            return
+        """Inicializa el contexto y prepara el socket."""
+        if self.socket is not None: return
 
         self.context = zmq.asyncio.Context()
         self.socket = self.context.socket(zmq.PAIR)
-        
-        # Set LINGER to 0 to ensure the socket closes immediately 
-        # without waiting for pending messages.
-        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.setsockopt(zmq.LINGER, 0) # Cierre inmediato
 
         if self.is_server:
-            # IPC Cleanup: Remove the file if it already exists
             if self.addr.startswith("ipc://"):
                 path = self.addr.replace("ipc://", "")
                 if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError as e:
-                        print(f"[PY] Error removing IPC file: {e}")
-            
-            try:
-                self.socket.bind(self.addr)
-            except zmq.ZMQError as e:
-                print(f"[PY] Failed to bind: {e}")
-                raise
+                    try: os.remove(path)
+                    except OSError: pass
+            self.socket.bind(self.addr)
         else:
             self.socket.connect(self.addr)
             
-        if self.verbose:
-            print(f"[PY] ZMQ Started on {self.addr}")
+        if self.verbose: print(f"[PY] ZMQ Iniciado en {self.addr}")
 
     def close(self):
-        """Closes the socket and terminates the context cleanly."""
+        """Libera los recursos de ZeroMQ y limpia archivos temporales IPC."""
         if self.socket:
-            if self.verbose:
-                print("[PY] Closing socket...")
             self.socket.close()
             self.socket = None
-        
         if self.context:
-            if self.verbose:
-                print("[PY] Terminating context...")
             self.context.term()
             self.context = None
 
-        # Optional: Explicitly remove IPC file on close (for Server)
-        # This is polite, but the 'start' method already handles cleanup for the next run.
         if self.is_server and self.addr.startswith("ipc://"):
             path = self.addr.replace("ipc://", "")
             if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+                try: os.remove(path)
+                except OSError: pass
 
     async def send_command(self, payload: dict):
-        if not self.socket:
-            raise RuntimeError("Socket is not open. Call start() first.")
-        msg = json.dumps(payload)
-        await self.socket.send_string(msg)
-        if self.verbose:
-            print(f"[PY] >> Sent CMD")
+        """Envía un comando JSON de forma asíncrona."""
+        if not self.socket: raise RuntimeError("Socket no iniciado.")
+        await self.socket.send_string(json.dumps(payload))
+        if self.verbose: print(f"[PY] >> Comando enviado")
 
-    async def wait_for_data(self):
-        if not self.socket:
-            raise RuntimeError("Socket is not open. Call start() first.")
+    async def wait_for_data(self) -> dict:
+        """Espera y recibe una respuesta JSON desde el socket."""
+        if not self.socket: raise RuntimeError("Socket no iniciado.")
         msg = await self.socket.recv_string()
-        if self.verbose:
-            print(f"[PY] << Received Payload")
+        if self.verbose: print(f"[PY] << Datos recibidos")
         return json.loads(msg)
 
-    # --- Context Manager Support (Recommended) ---
     async def __aenter__(self):
+        """Soporte para gestor de contexto asíncrono (`async with`)."""
         self.start()
         return self
 

@@ -2,27 +2,30 @@
 # init_sys.py
 
 """
-TODO When system power on
+Módulo de Inicialización Crítica del Sistema.
 
-* Ensure cleaning Crontab
-* Ensure cleaning Shared memory
-* Create personalized daemons files
-* Ensure all directories exist
-* Retry queue first time
-* Kalibrate first time
+Este script se ejecuta durante el arranque del sistema (power-on) para garantizar 
+que el entorno esté limpio y correctamente configurado antes de iniciar los servicios 
+principales. Sus responsabilidades incluyen:
+
+* Limpieza del Crontab de campañas previas.
+* Vaciado de la memoria compartida persistente.
+* Creación de la estructura de directorios necesaria.
+* Generación dinámica de archivos de servicio (daemons) y timers de systemd.
 """
 
 import sys
 import cfg
 from functions import CronSchedulerCampaign, ShmStore
 
-# Initialize Logger
+# Inicialización del Logger
 log = cfg.set_logger()
 
-# Define where the daemon files will be generated
+# Directorio donde se generarán los archivos de servicio de systemd
 DAEMONS_DIR = cfg.PROJECT_ROOT / "daemons"
 
-# --- DAEMON DEFINITIONS ---
+# --- DEFINICIONES DE DAEMONS ---
+# Estas cadenas contienen las plantillas para los servicios y timers de systemd.
 
 RF_APP_DAEMON = f"""
 [Unit]
@@ -153,10 +156,22 @@ AccuracySec=1s
 WantedBy=timers.target
 """
 
-# --- MAIN LOGIC ---
+# --- LÓGICA PRINCIPAL ---
 
 def save_daemon_file(filename: str, content: str):
-    """Writes the daemon string to the daemons/ folder"""
+    """
+    Guarda el contenido de la configuración de un daemon en la carpeta de daemons.
+
+    Toma una cadena de texto con el formato de unidad de systemd y la escribe en el 
+    disco, sobreescribiendo archivos existentes si es necesario.
+
+    Args:
+        filename (str): Nombre del archivo a crear (ej. 'rf-ane2.service').
+        content (str): Contenido completo de la configuración del servicio/timer.
+
+    Raises:
+        OSError: Si hay un error al escribir el archivo en el sistema de archivos.
+    """
     file_path = DAEMONS_DIR / filename
     try:
         with open(file_path, "w") as f:
@@ -166,14 +181,23 @@ def save_daemon_file(filename: str, content: str):
         log.error(f"Failed to write {filename}: {e}")
 
 def main() -> int:
+    """
+    Ejecuta el flujo secuencial de inicialización del sistema.
+
+    Sigue los pasos de creación de directorios, limpieza de tareas programadas (cron), 
+    vaciado de memoria compartida y persistencia de archivos de servicio de sistema.
+
+    Returns:
+        int: Código de salida (0 para éxito, no nulo si ocurre un error crítico).
+    """
     log.info("Starting System Initialization...")
 
-    # 1. Ensure all directories exist
-    # We include DAEMONS_DIR here so we can write to it immediately after
+    # 1. Asegurar que todos los directorios existan
+    # Incluimos DAEMONS_DIR para poder escribir en él inmediatamente después
     for p in [cfg.QUEUE_DIR, cfg.LOGS_DIR, cfg.HISTORIC_DIR, DAEMONS_DIR]:
         p.mkdir(parents=True, exist_ok=True)
 
-    # 2. Ensure cleaning Crontab
+    # 2. Limpiar el Crontab de campañas antiguas
     try:
         init_scheduler = CronSchedulerCampaign(
             poll_interval_s=cfg.INTERVAL_REQUEST_CAMPAIGNS_S,
@@ -187,7 +211,7 @@ def main() -> int:
     except Exception as e:
         log.error(f"Error cleaning Crontab: {e}")
 
-    # 3. Ensure cleaning Shared memory
+    # 3. Limpiar la memoria compartida (Shared memory)
     try:
         store = ShmStore()
         store.clear_persistent()
@@ -195,8 +219,8 @@ def main() -> int:
     except Exception as e:
         log.error(f"Error clearing Shared Memory: {e}")
 
-    # 4. Create personalized daemons files
-    # The filenames match the specific request
+    # 4. Crear archivos de daemons personalizados
+    # Los nombres de archivo corresponden a los requerimientos de systemd
     save_daemon_file("rf-ane2.service", RF_APP_DAEMON)
     save_daemon_file("ltegps-ane2.service", LTEGPS_DAEMON)
     save_daemon_file("orchestrator-ane2.service", ORCHESTRATOR_DAEMON)

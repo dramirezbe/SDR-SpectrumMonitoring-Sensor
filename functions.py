@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 # functions.py
+
+"""
+Módulo de Funciones de Soporte y Lógica de Adquisición.
+
+Este módulo centraliza la lógica de procesamiento de señales, la gestión de la 
+máquina de estados global, la programación de tareas mediante Crontab y las 
+estrategias de adquisición de datos para eliminar artefactos (picos DC).
+"""
+
 import cfg
 from utils import ShmStore
 
@@ -11,6 +20,16 @@ import asyncio
 from copy import deepcopy
 
 class SysState(Enum):
+    """
+    Enumeración de los estados posibles del sistema.
+    
+    Attributes:
+        IDLE: Sistema en espera de comandos.
+        CAMPAIGN: Ejecutando una campaña programada.
+        REALTIME: Modo de transmisión en tiempo real activo.
+        KALIBRATING: Realizando calibración de hardware.
+        ERROR: Estado de falla crítica.
+    """
     IDLE = auto()
     CAMPAIGN = auto()
     REALTIME = auto()
@@ -18,21 +37,51 @@ class SysState(Enum):
     ERROR = auto()
 
 class GlobalSys:
+    """
+    Controlador estático del estado global del sistema.
+
+    Proporciona métodos de clase para gestionar las transiciones de estado 
+    y verificar la disponibilidad del sistema de manera centralizada.
+    """
     current = SysState.IDLE
     log = cfg.set_logger()
 
     @classmethod
     def set(cls, new_state: SysState):
+        """
+        Cambia el estado actual del sistema y registra la transición.
+
+        Args:
+            new_state (SysState): El nuevo estado al que se desea transicionar.
+        """
         if cls.current != new_state:
             cls.log.info(f"State Transition: {cls.current.name} -> {new_state.name}")
             cls.current = new_state
 
     @classmethod
     def is_idle(cls):
+        """
+        Verifica si el sistema está en estado de espera (IDLE).
+
+        Returns:
+            bool: True si el sistema está IDLE, False en cualquier otro caso.
+        """
         return cls.current == SysState.IDLE
 
 # --- HELPER FUNCTIONS ---
 def format_data_for_upload(payload):
+    """
+    Estructura los datos procesados para su envío a la API.
+
+    Añade metadatos esenciales como el timestamp del sistema y la dirección 
+    MAC del dispositivo.
+
+    Args:
+        payload (dict): Diccionario con los datos espectrales (Pxx) y frecuencias.
+
+    Returns:
+        dict: Diccionario formateado listo para ser serializado como JSON.
+    """
     return {
         "Pxx": payload.get("Pxx", []),
         "start_freq_hz": int(payload.get("start_freq_hz", 0)),
@@ -42,7 +91,22 @@ def format_data_for_upload(payload):
     }
 
 class CronSchedulerCampaign:
+    """
+    Gestor de programación de campañas basado en Crontab.
+
+    Esta clase se encarga de traducir las ventanas de tiempo de las campañas 
+    recibidas desde la API en tareas programadas del sistema operativo.
+    """
     def __init__(self, poll_interval_s, python_env=None, cmd=None, logger=None):
+        """
+        Inicializa el programador.
+
+        Args:
+            poll_interval_s (int): Intervalo de consulta de la API en segundos.
+            python_env (str, optional): Ruta al ejecutable de Python.
+            cmd (str, optional): Ruta al script de ejecución de campañas.
+            logger (logging.Logger, optional): Instancia de logger personalizada.
+        """
         self.poll_interval_ms = poll_interval_s * 1000
         self.python_env = python_env if python_env else "/usr/bin/python3"
         self.cmd = f"{self.python_env} {cmd}"
@@ -50,39 +114,39 @@ class CronSchedulerCampaign:
         self._log = logger if logger else logging.getLogger(__name__)
 
         if cfg.DEVELOPMENT:
-            # Ensure directory exists
             self.debug_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # ✅ Ensure file exists
             if not self.debug_file.exists():
                 self.debug_file.write_text("", encoding="utf-8")
-
             self.cron = CronTab(tabfile=str(self.debug_file))
         else:
             self.cron = CronTab(user=True)
 
     def _ts_to_human(self, ts_ms):
-        """Converts milliseconds timestamp to human-readable string"""
+        """Convierte un timestamp en ms a formato legible (UTC)."""
         if ts_ms is None: return "None"
         return cfg.human_readable(ts_ms, target_tz="UTC")
 
     def _seconds_to_cron_interval(self, seconds):
+        """Convierte segundos en una expresión de intervalo para Cron."""
         minutes = int(seconds / 60)
         if minutes < 1: minutes = 1 
         return f"*/{minutes} * * * *"
 
     def _job_exists(self, campaign_id):
+        """Verifica si ya existe una tarea cron para el ID de campaña."""
         return any(self.cron.find_comment(f"CAMPAIGN_{campaign_id}"))
 
     def _remove_job(self, campaign_id):
+        """Elimina la tarea cron asociada a una campaña específica."""
         if self._job_exists(campaign_id):
             self.cron.remove_all(comment=f"CAMPAIGN_{campaign_id}")
             self._log.info(f"🗑️ REMOVED Job ID {campaign_id}")
 
     def _upsert_job(self, camp, store: ShmStore):
+        """Inserta o actualiza una tarea en el cron y actualiza la memoria compartida."""
         c_id = camp['campaign_id']
         
-        # 1. ALWAYS Update Shared Memory (Critical!)
+        # Actualización de Memoria Compartida
         dict_persist_params = {
             "campaign_id": c_id,
             "center_freq_hz": camp.get('center_freq_hz'),
@@ -104,7 +168,6 @@ class CronSchedulerCampaign:
         except Exception:
             self._log.error("Failed to update store.")
 
-        # 2. Setup Cron only if missing
         if self._job_exists(c_id): 
             return 
 
@@ -116,12 +179,21 @@ class CronSchedulerCampaign:
 
     def sync_jobs(self, campaigns: list, current_time_ms: float, store: ShmStore) -> bool:
         """
-        Returns True if ANY campaign is currently active (inside window).
-        Returns False if all campaigns are finished, pending, or error.
+        Sincroniza la lista de campañas del servidor con el Crontab local.
+
+        Analiza las ventanas de tiempo de cada campaña. Si la campaña está dentro 
+        de su ventana activa, se asegura de que exista en el cron. De lo contrario, 
+        la elimina.
+
+        Args:
+            campaigns (list): Lista de diccionarios de campañas desde la API.
+            current_time_ms (float): Tiempo actual del sistema en milisegundos.
+            store (ShmStore): Instancia para persistir parámetros de la campaña activa.
+
+        Returns:
+            bool: True si existe al menos una campaña activa en este momento.
         """
         any_active = False
-        
-        # DEBUG: Human Readable Now
         now_human = self._ts_to_human(current_time_ms)
         self._log.info(f"🕒 SYNC CHECK | Current Time: {now_human} ({int(current_time_ms)})")
 
@@ -135,27 +207,14 @@ class CronSchedulerCampaign:
                 self._remove_job(c_id)
                 continue
 
-            # Time Window Logic
             window_open = start_ms - self.poll_interval_ms
             window_close = end_ms - self.poll_interval_ms
             
-            # DEBUG: Human Readable Ranges
-            start_human = self._ts_to_human(start_ms)
-            end_human = self._ts_to_human(end_ms)
-            win_open_human = self._ts_to_human(window_open)
-            win_close_human = self._ts_to_human(window_close)
-
             is_in_window = window_open <= current_time_ms <= window_close
             
-            self._log.info(f"🔎 CHECK Camp {c_id} | Status: {status}")
-            self._log.info(f"   📅 Range : {start_human} -> {end_human}")
-            self._log.info(f"   🪟 Window: {win_open_human} -> {win_close_human}")
-            self._log.info(f"   🎯 Active? {'YES' if is_in_window else 'NO'}")
-
             if is_in_window:
                 self._upsert_job(camp, store)
-                any_active = True # We are busy!
-                # Break ensures we don't overwrite SharedMemory with a subsequent (inactive) campaign
+                any_active = True
                 break
             else:
                 self._remove_job(c_id)
@@ -164,94 +223,117 @@ class CronSchedulerCampaign:
         return any_active
     
 class SimpleDCSpikeCleaner:
+    """
+    Algoritmo de limpieza para eliminar el pico DC del centro del espectro.
+
+    Utiliza una técnica de interpolación lineal con ruido aleatorio basado en la 
+    desviación estándar de los bins vecinos para "rellenar" la zona afectada 
+    por el artefacto DC del hardware.
+    """
     def __init__(self, search_frac=0.05, width_frac=0.005, neighbor_bins=20):
         """
-        search_frac: Region to search for the spike.
-        width_frac: Width of the removal zone.
-        neighbor_bins: Number of bins to sample for noise estimation.
+        Args:
+            search_frac (float): Fracción del espectro donde buscar el pico máximo.
+            width_frac (float): Ancho de la zona a eliminar y reconstruir.
+            neighbor_bins (int): Cantidad de bins laterales para estimar el ruido base.
         """
         self.search_frac = search_frac
         self.width_frac = width_frac
         self.neighbor_bins = neighbor_bins
 
     def clean(self, Pxx):
+        """
+        Aplica el algoritmo de limpieza sobre un array de densidades espectrales.
+
+        Args:
+            Pxx (np.array): Array original con los datos de potencia (PSD).
+
+        Returns:
+            np.array: Array procesado con el pico DC mitigado.
+        """
         Pxx = np.asarray(Pxx, float).copy()
         n = len(Pxx)
         if n < self.neighbor_bins * 2: 
             return Pxx
 
-        # 1. Locate the peak in the center region
         mid = n // 2
         search_radius = int(n * (self.search_frac / 2))
         s_start = max(0, mid - search_radius)
         s_end = min(n, mid + search_radius)
         peak_idx = s_start + np.argmax(Pxx[s_start:s_end])
 
-        # 2. Define the removal zone
         width_radius = max(1, int(n * (self.width_frac / 2)))
         idx0 = max(0, peak_idx - width_radius)
         idx1 = min(n - 1, peak_idx + width_radius)
 
-        # 3. Sample neighbors for noise statistics
         l_neighbor = Pxx[max(0, idx0 - self.neighbor_bins): idx0]
         r_neighbor = Pxx[idx1 + 1: min(n, idx1 + 1 + self.neighbor_bins)]
-        
         neighbors = np.concatenate([l_neighbor, r_neighbor])
         
-        # 4. Calculate local noise statistics
-        # We ensure local_sigma is at least 0 to prevent the 'scale < 0' error
         local_sigma = np.std(neighbors) if neighbors.size > 0 else 0.0
 
-        # 5. Create the linear trend (The "Line")
         y0, y1 = Pxx[idx0], Pxx[idx1]
         num_points = idx1 - idx0 + 1
         linear_trend = np.linspace(y0, y1, num_points)
 
-        # 6. Generate and add noise to the trend
-        # FIX: Ensure scale is non-negative using max(0, ...)
-        # We use local_sigma directly to match the surrounding noise floor
         safe_scale = max(0.0, local_sigma)
         noise = np.random.normal(0, safe_scale, num_points)
         
         Pxx[idx0:idx1 + 1] = linear_trend + noise
-
         return Pxx
     
 class AcquireRealtime:
+    """
+    Controlador de adquisición de alta fidelidad para tiempo real.
+
+    Implementa una técnica de desplazamiento de frecuencia (offset) y recorte 
+    (crop) para mover el artefacto DC fuera de la banda de interés del usuario,
+    garantizando un espectro más limpio.
+    """
     def __init__(self, controller, cleaner, hardware_max_bw=20_000_000, user_safe_bw=18_000_000, log=cfg.set_logger()):
+        """
+        Args:
+            controller (ZmqPairController): Controlador de comunicación ZMQ.
+            cleaner (SimpleDCSpikeCleaner): Instancia del limpiador de picos.
+            hardware_max_bw (int): Ancho de banda máximo real del hardware.
+            user_safe_bw (int): Límite de ancho de banda para aplicar la técnica de offset.
+        """
         self._log = log
         self.controller = controller
         self.cleaner = cleaner
-        self.HW_BW = hardware_max_bw      # The 20MHz we actually use
-        self.SAFE_BW = user_safe_bw       # The 18MHz limit
-        self.OFFSET = 1_000_000           # 1MHz shift to move the DC spike
+        self.HW_BW = hardware_max_bw      
+        self.SAFE_BW = user_safe_bw       
+        self.OFFSET = 1_000_000           
 
     async def acquire_with_offset(self, user_config):
         """
-        Interacts with RF-Engine and returns the final cleaned/cropped dict.
+        Adquiere datos aplicando un desplazamiento de frecuencia preventivo.
+
+        Si el ancho de banda solicitado es <= 18MHz, desplaza la frecuencia central 
+        del hardware 1MHz hacia arriba. Esto hace que el pico DC aparezca en +1MHz, 
+        el cual es limpiado y posteriormente recortado para entregar exactamente 
+        la frecuencia central que el usuario pidió sin el artefacto en el centro.
+
+        Args:
+            user_config (dict): Parámetros solicitados por el usuario.
+
+        Returns:
+            dict: Payload procesado, limpiado y recortado.
         """
         requested_fs = user_config.get("sample_rate_hz", 0)
         original_center = user_config.get("center_freq_hz")
 
-        # --- VALIDATION: Logic for 18MHz or less ---
         if requested_fs <= self.SAFE_BW:
-            # 1. Prepare SECRET hardware config
-            # We shift center freq UP by 1MHz so the DC spike is at +1MHz
             hw_config = user_config.copy()
             hw_config["sample_rate_hz"] = self.HW_BW
             hw_config["center_freq_hz"] = original_center + self.OFFSET
             
-            # 2. Acquire 20MHz
             raw_payload = await self._send_and_receive(hw_config)
             if not raw_payload: return None
 
-            # 3. Clean Spikes on the 20MHz data
             pxx = np.array(raw_payload["Pxx"])
             pxx_cleaned = self.cleaner.clean(pxx)
 
-            # 4. CROP to the original requested BW
-            # Because we shifted center UP by 1MHz, the original target 
-            # is now at -1MHz relative to the current center.
             final_data = self._extract_sub_region(
                 pxx_cleaned, 
                 hw_center=original_center + self.OFFSET,
@@ -260,9 +342,7 @@ class AcquireRealtime:
                 target_bw=requested_fs
             )
             return final_data
-
         else:
-            # --- FALLBACK: If user wants > 18MHz, do nothing but clean ---
             self._log.info(f"Requested BW {requested_fs} > 18MHz. Skipping offset/crop.")
             raw_payload = await self._send_and_receive(user_config)
             if not raw_payload: return None
@@ -273,24 +353,25 @@ class AcquireRealtime:
         
     async def acquire_raw(self, config):
         """
-        Performs a direct acquisition using the provided config.
-        Applies spike correction (cleaning) but performs NO frequency 
-        offsets or cropping.
+        Realiza una adquisición directa sin desplazamientos ni recortes.
+
+        Args:
+            config (dict): Parámetros de configuración de radio.
+
+        Returns:
+            dict: Payload con corrección básica de picos.
         """
-        # 1. Send the command exactly as provided and wait for data
         payload = await self._send_and_receive(config)
-        
         if not payload or "Pxx" not in payload:
             self._log.warning("Acquisition failed or returned empty payload.")
             return None
 
-        # 2. Convert to numpy for the cleaner, then back to list for JSON compatibility
         pxx = np.array(payload["Pxx"])
         payload["Pxx"] = self.cleaner.clean(pxx).tolist()
-
         return payload
 
     async def _send_and_receive(self, config):
+        """Envía comando al motor RF y espera la respuesta."""
         await self.controller.send_command(config)
         try:
             return await asyncio.wait_for(self.controller.wait_for_data(), timeout=10)
@@ -299,23 +380,17 @@ class AcquireRealtime:
 
     def _extract_sub_region(self, pxx, hw_center, hw_bw, target_center, target_bw):
         """
-        Math to find where the original 18MHz (or less) sits inside the 20MHz capture.
+        Calcula y extrae los índices del array correspondientes a la sub-banda.
         """
         num_bins = len(pxx)
         hz_per_bin = hw_bw / num_bins
-        
-        # Calculate start/end of the hardware span
         hw_min_f = hw_center - (hw_bw / 2)
-        
-        # Calculate start/end of the user's requested span
         target_min_f = target_center - (target_bw / 2)
         target_max_f = target_center + (target_bw / 2)
 
-        # Map frequencies to array indices
         start_idx = int((target_min_f - hw_min_f) / hz_per_bin)
         end_idx = int((target_max_f - hw_min_f) / hz_per_bin)
 
-        # Ensure we stay within array bounds
         start_idx = max(0, start_idx)
         end_idx = min(num_bins, end_idx)
 
@@ -326,77 +401,73 @@ class AcquireRealtime:
             "sample_rate_hz": target_bw
         }
 
-
 class AcquireCampaign:
     """
-    Production-grade class to acquire RF data and remove DC spike artifacts 
-    via spectral stitching with an offset capture.
+    Estrategia de adquisición de grado campaña mediante costura espectral (Spectral Stitching).
+
+    Realiza dos capturas: una en la frecuencia objetivo y otra desplazada 2MHz. 
+    Posteriormente, reemplaza ("parchea") la sección central contaminada de la primera 
+    captura con datos limpios de la segunda.
     """
     def __init__(self, controller, log):
+        """
+        Args:
+            controller (ZmqPairController): Controlador de hardware.
+            log (logging.Logger): Logger de sistema.
+        """
         self.controller = controller
         self._log = log
-        # Constants for patching
-        self.OFFSET_HZ = 2e6  # Frequency shift for secondary capture
-        self.PATCH_BW_HZ = 1e6 # Width of the center to replace
+        self.OFFSET_HZ = 2e6  
+        self.PATCH_BW_HZ = 1e6 
 
     async def _single_acquire(self, rf_params):
-        """Internal low-level acquisition."""
+        """Adquisición de bajo nivel con tiempo de enfriamiento para el PLL."""
         await self.controller.send_command(rf_params)
         self._log.debug(f"Acquiring CF: {rf_params['center_freq_hz']/1e6} MHz")
-        
-        # Wait for engine response
         data = await asyncio.wait_for(self.controller.wait_for_data(), timeout=20)
-        
-        # Hardware cooldown to prevent PLL locking issues or buffer overlaps
         await asyncio.sleep(0.2) 
         return data
 
     async def get_corrected_data(self, rf_params):
         """
-        Performs dual-acquisition and returns a single dictionary 
-        with the DC spike removed.
+        Ejecuta la doble adquisición y el parcheo quirúrgico de los datos.
+
+        Returns:
+            dict: Datos con el centro espectral reemplazado por la captura offset.
         """
         orig_params = deepcopy(rf_params)
         orig_cf = orig_params["center_freq_hz"]
 
-        # 1. Primary Acquisition (Target Frequency)
+        # 1. Captura primaria
         data1 = await self._single_acquire(orig_params)
         
-        # 2. Offset Acquisition (Same sample rate, shifted CF)
+        # 2. Captura offset (Shift +2MHz)
         offset_params = deepcopy(orig_params)
         offset_params["center_freq_hz"] = orig_cf + self.OFFSET_HZ
         data2 = await self._single_acquire(offset_params)
 
-        # --- Efficient Patching Logic ---
         try:
             pxx1 = np.array(data1['Pxx'])
             pxx2 = np.array(data2['Pxx'])
             
-            # Calculate resolution (bins per Hz)
-            # Both captures have same SR, so df is identical
             df = (data1['end_freq_hz'] - data1['start_freq_hz']) / len(pxx1)
             bin_shift = int(self.OFFSET_HZ / df)
 
-            # Define the patch indices in the primary array (center)
             patch_bins = int(self.PATCH_BW_HZ / df)
             center_idx = len(pxx1) // 2
             s1, e1 = center_idx - (patch_bins // 2), center_idx + (patch_bins // 2)
 
-            # Locate the clean data in the second array
-            # (Shifted down because the second capture CF was shifted up)
             s2, e2 = s1 - bin_shift, e1 - bin_shift
 
-            # Perform the surgical replacement
             if s2 >= 0 and e2 <= len(pxx2):
                 pxx1[s1:e1] = pxx2[s2:e2]
                 self._log.info(f"DC spike removed at {orig_cf/1e6} MHz.")
             else:
                 self._log.warning("Offset capture too narrow to patch requested window.")
 
-            # Update the original dict with cleaned data
             data1['Pxx'] = pxx1.tolist()
             return data1
 
         except Exception as e:
             self._log.error(f"Failed to process DC spike correction: {e}")
-            return data1 # Fallback to raw data if logic fails
+            return data1

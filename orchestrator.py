@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # orchestrator.py
 
+"""
+Módulo Orquestador Principal.
+
+Este módulo actúa como el motor central del sistema, coordinando la transición entre 
+diferentes estados (IDLE, REALTIME, CAMPAIGN, KALIBRATING). Gestiona la descarga de 
+configuraciones desde la API, la lógica de adquisición de datos en tiempo real y 
+la programación de campañas mediante tareas cron.
+"""
+
 import cfg
 log = cfg.set_logger()
 from utils import (
@@ -19,7 +28,22 @@ import time
 
 # --- CONFIG FETCHING ---
 def fetch_realtime_config(client):
-    """Fetches job configuration and validates it."""
+    """
+    Descarga y valida la configuración de tiempo real desde el servidor.
+
+    Realiza una petición GET al endpoint de configuración, calcula la latencia 
+    de red (delta_t) y mapea la respuesta JSON a objetos de configuración 
+    especializados para filtrado y demodulación.
+
+    Args:
+        client (RequestClient): Cliente HTTP para realizar la consulta.
+
+    Returns:
+        tuple: Un conjunto de tres elementos:
+            * dict: Configuración mapeada como diccionario (asdict). Vacío si falla.
+            * Response: Objeto de respuesta HTTP completo.
+            * int: Latencia de la petición en milisegundos (delta_t_ms).
+    """
     delta_t_ms = 0 
     try:
         start_delta_t = time.perf_counter()
@@ -90,6 +114,15 @@ def fetch_realtime_config(client):
 
 # --- HELPER: CALIBRATION ---
 async def _perform_calibration_sequence(store):
+    """
+    Ejecuta la secuencia de calibración previa a una campaña.
+
+    Cambia el estado global del sistema a KALIBRATING y realiza las tareas 
+    necesarias para estabilizar el hardware antes de la adquisición.
+
+    Args:
+        store (ShmStore): Almacén de memoria compartida para persistencia.
+    """
     log.info("--------------------------------")
     log.info("🛠️ STARTING PRE-CAMPAIGN CALIBRATION")
     GlobalSys.set(SysState.KALIBRATING)
@@ -102,6 +135,21 @@ async def _perform_calibration_sequence(store):
 
 # --- 1. REALTIME LOGIC (WITH OFFSET & CROP) ---
 async def run_realtime_logic(client, store) -> int:
+    """
+    Gestiona el bucle de ejecución para el modo de tiempo real.
+
+    Establece una conexión ZMQ con el backend de procesamiento (DSP), adquiere
+    espectros (con o sin demodulación/offset) y los sube a la API. El bucle 
+    se mantiene activo hasta que el servidor deja de enviar una configuración válida 
+    o se alcanza el tiempo de rotación.
+
+    Args:
+        client (RequestClient): Cliente para comunicación con la API.
+        store (ShmStore): Almacén para guardar el delta de tiempo de red.
+
+    Returns:
+        int: Código de estado (0 para fin de ciclo, 1 si el sistema está ocupado).
+    """
     log.info("[REALTIME] Entering Sticky Mode (Offset & Crop enabled)...")
     if not GlobalSys.is_idle(): return 1
     
@@ -175,6 +223,21 @@ async def run_realtime_logic(client, store) -> int:
 
 # --- 2. CAMPAIGN LOGIC ---
 async def run_campaigns_logic(client, store, scheduler) -> int:
+    """
+    Sincroniza y gestiona las campañas de medición programadas.
+
+    Consulta la lista de campañas pendientes en el servidor. Si hay campañas activas,
+    ejecuta una calibración y pone al sistema en modo CAMPAIGN. Se mantiene 
+    monitoreando la ventana de tiempo hasta que no queden tareas pendientes.
+
+    Args:
+        client (RequestClient): Cliente para comunicación con la API.
+        store (ShmStore): Almacén de persistencia.
+        scheduler (CronSchedulerCampaign): Gestor de tareas programadas en el sistema.
+
+    Returns:
+        int: Código de estado (0 éxito, 1 si el sistema no está IDLE o falla la red).
+    """
     log.info("[CAMPAIGN] Checking for scheduled campaigns...")
     if not GlobalSys.is_idle(): return 1
 
@@ -208,6 +271,16 @@ async def run_campaigns_logic(client, store, scheduler) -> int:
 
 # --- 3. MAIN LOOP ---
 async def main() -> int:
+    """
+    Punto de entrada principal del orquestador.
+
+    Inicializa los servicios base (Store, Client, Scheduler) y entra en un bucle 
+    infinito. Utiliza temporizadores (`ElapsedTimer`) para decidir cuándo consultar 
+    la API por nuevas configuraciones de tiempo real o campañas programadas.
+
+    Returns:
+        int: Código de salida del script.
+    """
     time.sleep(1) 
     store = ShmStore()
     client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)

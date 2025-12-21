@@ -1,11 +1,17 @@
 # utils/status_util.py
 """
-Status_module
+Módulo de Estado del Dispositivo (Status Module).
 
-Gathers device metrics such as CPU, RAM, Disk usage, Temperature, LTE GPS coordinates, 
-Ping latency to API server, and recent log entries. Returns all data as a dictionary.
-Includes retry logic and sleeps to ensure data integrity.
+Este módulo se encarga de recopilar métricas críticas del hardware, incluyendo:
+- Uso de CPU (por núcleo), RAM y Swap.
+- Ocupación de disco y temperatura del procesador.
+- Latencia de red (Ping) y extracción de logs recientes.
+- Metadatos de temporización (NTP, Calibración).
+
+El módulo implementa mecanismos de reintento para garantizar la integridad de los 
+datos ante posibles bloqueos de E/S del sistema operativo.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 import time
@@ -17,6 +23,30 @@ from typing import Dict, List, Any
 
 @dataclass
 class StatusPost:
+    """
+    Estructura de datos para el reporte de estado del sensor.
+
+    Esta clase actúa como un DTO (Data Transfer Object) que valida y formatea 
+    las métricas para su envío a la API central. Maneja la conversión dinámica 
+    de listas de carga de CPU a claves individuales indexadas.
+
+    Attributes:
+        mac (str): Dirección MAC del dispositivo.
+        ram_mb (int): Memoria RAM en uso (MB).
+        swap_mb (int): Memoria Swap en uso (MB).
+        disk_mb (int): Espacio de disco en uso (MB).
+        temp_c (float): Temperatura actual en grados Celsius.
+        total_ram_mb (int): RAM total disponible.
+        total_swap_mb (int): Swap total disponible.
+        total_disk_mb (int): Capacidad total del disco.
+        delta_t_ms (int): Latencia de procesamiento interna.
+        ping_ms (float): Latencia de red hacia el servidor.
+        timestamp_ms (int): Tiempo Unix del reporte en milisegundos.
+        last_kal_ms (int): Timestamp de la última calibración.
+        last_ntp_ms (int): Timestamp de la última sincronización horaria.
+        logs (str): Fragmento de texto con los logs más recientes.
+        cpu_loads (List[float]): Lista interna de cargas por núcleo.
+    """
     mac: str
     ram_mb: int
     swap_mb: int
@@ -31,14 +61,18 @@ class StatusPost:
     last_kal_ms: int
     last_ntp_ms: int
     logs: str
-    
-    # cpu_loads is internal; it will be flattened to cpu_0, cpu_1... in to_dict().
     cpu_loads: List[float] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]):
         """
-        Custom constructor to handle dynamic flat keys (cpu_0, cpu_1...).
+        Constructor personalizado para manejar claves de CPU dinámicas (cpu_0, cpu_1...).
+
+        Args:
+            data (Dict[str, Any]): Diccionario plano con métricas y claves cpu_n.
+
+        Returns:
+            StatusPost: Instancia de la clase con la lista cpu_loads poblada.
         """
         known_fields = {
             "mac", "ram_mb", "swap_mb", "disk_mb", "temp_c",
@@ -47,30 +81,31 @@ class StatusPost:
             "last_kal_ms", "last_ntp_ms", "logs"
         }
         
-        # Filter for known fields so unexpected keys do not break initialization.
         init_args = {k: v for k, v in data.items() if k in known_fields}
         obj = cls(**init_args)
         
-        # Dynamically find and sort CPU keys so cpu_0..cpu_n are ordered.
+        # Filtrar y ordenar las claves de CPU dinámicamente.
         cpu_keys = [k for k in data.keys() if k.startswith("cpu_") and k[4:].isdigit()]
         cpu_keys.sort(key=lambda x: int(x.split('_')[1]))
         
         obj.cpu_loads = [data[k] for k in cpu_keys]
-        
         return obj
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Converts the dataclass back to a dictionary with flattened CPU keys.
-        Matches the required JSON output format.
+        Convierte la instancia a un diccionario plano para serialización JSON.
+
+        Aplana la lista `cpu_loads` de nuevo a claves individuales (cpu_0, cpu_1, etc.)
+        para cumplir con el contrato de la API.
+
+        Returns:
+            Dict[str, Any]: Diccionario listo para ser enviado por HTTP.
         """
         data = asdict(self)
         
-        # Remove the list field from the output so it can be flattened.
         if "cpu_loads" in data:
             del data["cpu_loads"]
             
-        # Flatten cpu_loads list back into cpu_0, cpu_1, etc.
         for idx, usage in enumerate(self.cpu_loads):
             data[f"cpu_{idx}"] = usage
             
@@ -78,13 +113,20 @@ class StatusPost:
 
 class StatusDevice:
     """
-    A collection of methods to consult various device metrics.
-    Includes retry mechanisms to avoid null data on busy I/O.
+    Controlador para la consulta de métricas del sistema operativo.
+
+    Utiliza los sistemas de archivos virtuales /proc y /sys para obtener 
+    información del hardware sin necesidad de herramientas externas pesadas.
     """
     def __init__(self, disk_path: Path = Path('/'),
                  logs_dir: Path = (Path.cwd() / "Logs"),
                  logger=logging.getLogger(__name__)):
-        
+        """
+        Args:
+            disk_path (Path): Punto de montaje del disco a monitorear.
+            logs_dir (Path): Carpeta donde se almacenan los archivos .log.
+            logger (logging.Logger): Instancia para registro de errores.
+        """
         self._log = logger
         self.disk_path = disk_path
         self.disk_path_str = str(disk_path)
@@ -98,91 +140,91 @@ class StatusDevice:
                             mac: str = "",
                             ping_ip: str = "8.8.8.8") -> Dict[str, Any]:
         """
-        Aggregates metrics and returns a dictionary matching the StatusPost JSON structure.
+        Genera una captura completa del estado actual del sistema.
+
+        Coordina todas las subrutinas de recolección (CPU, RAM, Disco, Red, Logs) 
+        y empaqueta el resultado en el formato estricto definido por StatusPost.
+
+        Args:
+            delta_t_ms (int): Latencia de procesamiento actual.
+            last_kal_ms (int): Tiempo desde la última calibración.
+            last_ntp_ms (int): Tiempo desde la última sincronía NTP.
+            timestamp_ms (int): Tiempo actual del sistema.
+            mac (str): Dirección MAC del sensor.
+            ping_ip (str): IP de destino para medir latencia de red.
+
+        Returns:
+            Dict[str, Any]: Snapshot completo serializado como diccionario.
         """
         snapshot = {}
 
-        # 1. Static/External Metadata.
+        # 1. Metadatos estáticos y temporales.
         snapshot["mac"] = mac
         snapshot["timestamp_ms"] = timestamp_ms
         snapshot["delta_t_ms"] = delta_t_ms
         snapshot["last_kal_ms"] = last_kal_ms
         snapshot["last_ntp_ms"] = last_ntp_ms
 
-        # 2. CPU: flatten list into cpu_0, cpu_1...
+        # 2. CPU: Recolección y aplanamiento.
         cpu_data = self.get_cpu_percent()
-        cpu_list = cpu_data.get("cpu", [])[:4] # Limit to first 4 CPUs even if there are more
+        cpu_list = cpu_data.get("cpu", [])[:4] 
         for idx, usage in enumerate(cpu_list):
             snapshot[f"cpu_{idx}"] = usage
 
-        # 3. RAM & Swap.
+        # 3. Métricas de memoria dinámica.
         snapshot.update(self.get_ram_swap_mb())
-
-        # 4. Disk.
         snapshot.update(self.get_disk())
-
-        # 5. Temperature.
         snapshot.update(self.get_temp_c())
 
-        # 6. Totals.
+        # 4. Capacidades totales de hardware.
         totals_mem = self.get_total_ram_swap_mb()
         snapshot["total_ram_mb"] = totals_mem.get("ram_mb") or 0
         snapshot["total_swap_mb"] = totals_mem.get("swap_mb") or 0
+        snapshot["total_disk_mb"] = self.get_total_disk().get("disk_mb") or 0
 
-        total_disk = self.get_total_disk()
-        snapshot["total_disk_mb"] = total_disk.get("disk_mb") or 0
-
-        # 7. Ping.
+        # 5. Red y Logs.
         snapshot.update(self.get_ping_latency(ping_ip))
-
-        # 8. Logs.
         _, _, logs_text = self.get_logs()
         snapshot["logs"] = logs_text
 
-        # 9. Serialize via Dataclass to ensure strict format.
         return StatusPost.from_dict(snapshot).to_dict()
 
     def get_cpu_percent(self) -> Dict[str, List[float]]:
         """
-        Calculates CPU usage by reading /proc/stat twice (or more) with retries.
-        Robust against cases where counters don't advance in short windows.
+        Calcula el uso de CPU leyendo /proc/stat.
+
+        Realiza dos lecturas de los contadores acumulativos (jiffies) con un 
+        intervalo de espera para calcular el diferencial de carga.
+
+        
+
+        Returns:
+            Dict[str, List[float]]: Diccionario con la clave 'cpu' y lista de porcentajes.
         """
         def read_cpu_lines():
-            """
-            Reads per-core cumulative counters from /proc/stat.
-
-            Returns:
-                List[(total_jiffies, idle_jiffies)] for cpu0..cpuN.
-                Skips the first aggregated "cpu" line and only keeps per-core lines.
-            """
+            """Lee contadores acumulativos por núcleo desde el kernel."""
             try:
                 with open("/proc/stat", "r") as f:
                     lines = [l for l in f.readlines() if l.startswith("cpu")]
             except Exception:
-                # If /proc/stat is not readable, return no CPU data.
                 return []
                 
             parsed = []
-            # lines[0] is the aggregate 'cpu' line.
-            for l in lines[1:]:  # skip aggregate 'cpu' line
+            for l in lines[1:]:  # Ignorar la línea agregada inicial.
                 parts = l.split()
                 if len(parts) < 5:
-                    # Not enough fields to compute idle/total reliably.
                     continue
                 vals = [int(x) for x in parts[1:]]
                 total = sum(vals)
-                idle = vals[3] + (vals[4] if len(vals) > 4 else 0)  # idle + iowait
+                idle = vals[3] + (vals[4] if len(vals) > 4 else 0) # idle + iowait.
                 parsed.append((total, idle))
             return parsed
 
         try:
             prev = read_cpu_lines()
-
-            if not prev:
-                return {"cpu": []}
+            if not prev: return {"cpu": []}
 
             max_tries = 5
-            # Initial sleep between reads, set to 1s for better stability.
             sleep_s = 1.0
 
             for _ in range(max_tries):
@@ -191,12 +233,10 @@ class StatusDevice:
 
                 if not cur or len(cur) != len(prev):
                     sleep_s = min(sleep_s * 2.0, 1.5)
-                    prev = cur if cur else prev
                     continue
 
                 usage = []
                 any_progress = False
-
                 for (t1, i1), (t2, i2) in zip(prev, cur):
                     total_delta = t2 - t1
                     idle_delta = i2 - i1
@@ -207,67 +247,47 @@ class StatusDevice:
                         usage.append(round(pct, 3))
                     else:
                         usage.append(0.0)
-                if any_progress:
-                    return {"cpu": usage}
                 
-                # If there was no progress, increase sleep and retry.
+                if any_progress: return {"cpu": usage}
                 sleep_s = min(sleep_s * 2.0, 1.5)
-                prev = cur
             return {"cpu": []}
         except Exception:
             return {"cpu": []}
 
     def get_ram_swap_mb(self) -> Dict[str, int]:
         """
-        Reads /proc/meminfo. Retries up to 3 times if file read returns incomplete data.
+        Obtiene el uso actual de RAM y Swap desde /proc/meminfo.
+
+        Returns:
+            Dict[str, int]: Megabytes en uso para RAM y Swap.
         """
         mem_total = mem_available = swap_total = swap_free = None
-        
-        # Retry mechanism to avoid null data.
         for _ in range(3):
             try:
                 with open("/proc/meminfo", "r") as f:
                     for line in f:
-                        if line.startswith("MemTotal:"):
-                            mem_total = int(line.split()[1])
-                        elif line.startswith("MemAvailable:"):
-                            mem_available = int(line.split()[1])
-                        elif line.startswith("SwapTotal:"):
-                            swap_total = int(line.split()[1])
-                        elif line.startswith("SwapFree:"):
-                            swap_free = int(line.split()[1])
-                    
-                    # If we successfully found the keys, break loop.
-                    if (mem_total is not None and mem_available is not None):
-                        break
+                        if line.startswith("MemTotal:"): mem_total = int(line.split()[1])
+                        elif line.startswith("MemAvailable:"): mem_available = int(line.split()[1])
+                        elif line.startswith("SwapTotal:"): swap_total = int(line.split()[1])
+                        elif line.startswith("SwapFree:"): swap_free = int(line.split()[1])
+                    if mem_total is not None: break
             except Exception:
-                # Small sleep before retry.
                 time.sleep(0.05)
-                continue
 
-        ram_mb = 0
-        if mem_total is not None and mem_available is not None:
-            ram_mb = (mem_total - mem_available) // 1024
-
-        swap_mb = 0
-        if swap_total is not None and swap_free is not None:
-            swap_mb = (swap_total - swap_free) // 1024
-
+        ram_mb = (mem_total - mem_available) // 1024 if mem_total and mem_available else 0
+        swap_mb = (swap_total - swap_free) // 1024 if swap_total and swap_free else 0
         return {"ram_mb": ram_mb, "swap_mb": swap_mb}
 
     def get_total_ram_swap_mb(self) -> Dict[str, int]:
+        """Obtiene las capacidades máximas de RAM y Swap."""
         mem_total = swap_total = None
-        # Retry mechanism.
         for _ in range(3):
             try:
                 with open("/proc/meminfo", "r") as f:
                     for line in f:
-                        if line.startswith("MemTotal:"):
-                            mem_total = int(line.split()[1])
-                        elif line.startswith("SwapTotal:"):
-                            swap_total = int(line.split()[1])
-                if mem_total is not None:
-                    break
+                        if line.startswith("MemTotal:"): mem_total = int(line.split()[1])
+                        elif line.startswith("SwapTotal:"): swap_total = int(line.split()[1])
+                if mem_total is not None: break
             except Exception:
                 time.sleep(0.05)
 
@@ -277,28 +297,29 @@ class StatusDevice:
         }
 
     def get_disk(self) -> dict:
+        """Calcula el espacio ocupado en disco mediante statvfs."""
         try:
             st = os.statvfs(self.disk_path_str)
-            # Used space is total blocks minus free blocks.
-            used_bytes = (st.f_blocks - st.f_bfree) * st.f_frsize
-            used_mb = used_bytes // (1024 * 1024)
+            used_mb = ((st.f_blocks - st.f_bfree) * st.f_frsize) // (1024 * 1024)
             return {"disk_mb": used_mb}
         except Exception:
              return {"disk_mb": 0}
 
     def get_total_disk(self) -> dict:
+        """Calcula el tamaño total de la partición de disco."""
         try:
             st = os.statvfs(self.disk_path_str)
-            # Total space is all blocks.
-            total_bytes = st.f_blocks * st.f_frsize
-            total_mb = total_bytes // (1024 * 1024)
+            total_mb = (st.f_blocks * st.f_frsize) // (1024 * 1024)
             return {"disk_mb": total_mb}
         except Exception:
             return {"disk_mb": 0}
 
     def get_temp_c(self) -> Dict[str, float]:
         """
-        Reads thermal zone temp. Retries on failure to handle busy sensors.
+        Lee la temperatura del procesador desde thermal_zone.
+
+        Returns:
+            Dict[str, float]: Temperatura en grados Celsius. -1.0 si falla.
         """
         path = "/sys/class/thermal/thermal_zone0/temp"
         for _ in range(3):
@@ -306,95 +327,71 @@ class StatusDevice:
                 with open(path, "r") as f:
                     content = f.read().strip()
                     if content:
-                        # Kernel exposes millidegrees Celsius.
-                        temp_c = int(content) / 1000.0
-                        return {"temp_c": temp_c}
+                        return {"temp_c": int(content) / 1000.0}
             except Exception:
-                # Sensor might be busy, wait 50ms and retry.
                 time.sleep(0.05)
-                continue
-        
         return {"temp_c": -1.0}
 
-    def get_ping_latency(self, ip: str):
-        cmd = ["ping", "-c", "1", "-W", "1", ip]
-        err_dict = {"ping_ms": -1.0}
-        try:
-            # Run a single ping with a 1s timeout.
-            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
-        except subprocess.CalledProcessError:
-            return err_dict
+    def get_ping_latency(self, ip: str) -> Dict[str, float]:
+        """
+        Mide la latencia de red hacia un host remoto.
 
-        for line in output.splitlines():
-            if "time=" in line:
-                try:
-                    # Parse latency from the ping output line.
-                    time_part = line.split("time=")[1]
-                    time_str = time_part.split()[0]
-                    latency_ms = float(time_str)
-                    return {"ping_ms": latency_ms}
-                except Exception:
-                    return err_dict
-        return err_dict
+        Args:
+            ip (str): Dirección IP o dominio a pinguear.
+
+        Returns:
+            Dict[str, float]: Tiempo de respuesta en milisegundos.
+        """
+        cmd = ["ping", "-c", "1", "-W", "1", ip]
+        try:
+            output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+            for line in output.splitlines():
+                if "time=" in line:
+                    latency = float(line.split("time=")[1].split()[0])
+                    return {"ping_ms": latency}
+        except Exception:
+            pass
+        return {"ping_ms": -1.0}
 
     def get_logs(self):
         """
-        Retrieves the last 10 lines of logs from the logs directory.
-        Iterates files from newest to oldest, filtering out '[[OK]]' flags.
+        Extrae las últimas 10 líneas de log relevantes.
+
+        Busca en la carpeta de logs de forma cronológica inversa, omitiendo 
+        marcas de éxito irrelevantes para el diagnóstico.
+
+        Returns:
+            tuple: (None, None, logs_text) para mantener compatibilidad de firma.
         """
-        result_logs = "System running normally"
+        result_logs = "Sistema operando normalmente"
         max_lines = 10
         collected_lines: List[str] = []
 
-        if not self.logs_dir.exists() or not self.logs_dir.is_dir():
-            # If logs directory is missing, return default message.
+        if not self.logs_dir.exists():
             return None, None, result_logs
 
-        # 1. Identify and sort log files by timestamp (Newest First).
-        # format: <timestamp>_<module>.log
         log_files = []
         for p in self.logs_dir.glob("*.log"):
             try:
-                # Extract timestamp from filename stem
                 ts_part = p.stem.split('_')[0]
-                if ts_part.isdigit():
-                    log_files.append((int(ts_part), p))
-            except Exception:
-                continue
+                if ts_part.isdigit(): log_files.append((int(ts_part), p))
+            except Exception: continue
         
-        # Sort descending (Newest -> Oldest).
         log_files.sort(key=lambda x: x[0], reverse=True)
 
-        # 2. Collect lines.
         for _, p in log_files:
             try:
-                text = p.read_text(encoding="utf-8", errors="ignore")
-                lines = text.splitlines()
-
-                # Filter out lines containing [[OK]], keep the rest
+                lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
                 valid_lines = [line for line in lines if "[[OK]]" not in line]
+                if not valid_lines: continue
 
-                if not valid_lines:
-                    continue
-
-                # Prepend the valid lines from this file to our collection.
-                # Since we are iterating New->Old files, the current file's lines 
-                # come *after* whatever we process next (which is older).
-                # Example state: collected = [NewFileLines] -> [OldFileLines + NewFileLines]
                 collected_lines = valid_lines + collected_lines
-
-                # If we have gathered enough lines, trim and stop
                 if len(collected_lines) >= max_lines:
                     collected_lines = collected_lines[-max_lines:]
                     break
-
             except Exception as e:
-                # Log read errors but continue with other files.
-                self._log.error(f"Error reading log file {p}: {e}")
+                self._log.error(f"Error al leer log {p}: {e}")
                 continue
 
-        if collected_lines:
-            result_logs = "\n".join(collected_lines)
-
-        # Returns None, None, str to match expected signature in get_status_snapshot.
+        if collected_lines: result_logs = "\n".join(collected_lines)
         return None, None, result_logs
