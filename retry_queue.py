@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-#retry_queue.py
+# retry_queue.py
+
+"""
+Módulo de Gestión de Cola de Reintentos.
+
+Este script se encarga de procesar archivos JSON almacenados localmente que no pudieron
+ser enviados previamente. Gestiona la lógica de reintentos, validación de archivos
+y limpieza de la cola de envío hacia la API central.
+"""
 
 from __future__ import annotations
 
@@ -13,27 +21,36 @@ from utils import RequestClient
 
 log = cfg.set_logger()
 
-# Retry behaviour (tunable)
+# Configuración de reintentos
 RETRY_SECONDS = 5
 RETRIES_PER_FILE = 2
 
-# Return codes (aligned with acquire_runner style)
+# Códigos de retorno
 RC_OK = 0
-RC_NETWORK = 1      # network / client POST issues (transient)
-RC_IO = 2           # file IO / filesystem errors or unexpected local errors
-RC_JSON = 3         # invalid JSON or payload parsing error (client 4xx)
-RC_UNEXPECTED = 4   # other unexpected failures
+RC_NETWORK = 1      # Problemas de red o de POST (transitorios)
+RC_IO = 2           # Errores de entrada/salida o de sistema de archivos
+RC_JSON = 3         # JSON inválido o error de validación (4xx)
+RC_UNEXPECTED = 4   # Otros fallos inesperados
 
 
 def attempt_send(cli: RequestClient, payload: dict, url: str) -> int:
     """
-    Attempt to send the payload to the API once.
+    Intenta enviar un payload a la API una sola vez.
+
+    Realiza una petición POST y analiza la respuesta para determinar si el error
+    es transitorio o permanente.
+
+    Args:
+        cli (RequestClient): Instancia del cliente de peticiones HTTP.
+        payload (dict): Diccionario con los datos a enviar.
+        url (str): URL del endpoint de la API.
 
     Returns:
-        RC_OK -> success (POST accepted with 2xx)
-        RC_NETWORK -> transient/network (retryable)
-        RC_JSON -> client validation error (4xx) - treated as failure (but not deleted)
-        RC_UNEXPECTED -> unexpected situation
+        int: Código de retorno basado en el resultado:
+            * RC_OK: Éxito (2xx).
+            * RC_NETWORK: Error transitorio de red o servidor (5xx).
+            * RC_JSON: Error de validación del cliente (4xx).
+            * RC_UNEXPECTED: Error inesperado o respuesta malformada.
     """
     try:
         rc, resp = cli.post_json(url, payload)
@@ -96,13 +113,18 @@ def attempt_send(cli: RequestClient, payload: dict, url: str) -> int:
 
 def retry_queue(cli: RequestClient) -> int:
     """
-    Process files in cfg.QUEUE_DIR (oldest-first), attempting to resend them to cfg.DATA_URL.
+    Procesa los archivos en el directorio de cola intentando reenviarlos.
 
-    Rules:
-      - Corrupt JSON files are deleted.
-      - Successfully sent files are deleted.
-      - If a file exhausts its retries (any error), the runner **stops immediately** and returns RC_OK.
-        The file is left in place (so it can be retried next run).
+    Sigue un orden de antigüedad (los más viejos primero). Los archivos corruptos
+    o enviados con éxito se eliminan. Si un archivo agota sus reintentos por
+    error de red, el proceso se detiene inmediatamente para preservar el orden.
+
+    Args:
+        cli (RequestClient): Cliente para realizar los reintentos de envío.
+
+    Returns:
+        int: Siempre retorna RC_OK tras finalizar o detener el procesamiento.
+        RC_IO: Si hay errores persistentes al listar el directorio.
     """
     qdir = Path(cfg.QUEUE_DIR)
     if not qdir.exists():
@@ -192,7 +214,14 @@ def retry_queue(cli: RequestClient) -> int:
 
 
 def main() -> int:
-    """Entry point for the retry queue runner."""
+    """
+    Punto de entrada principal para el ejecutor de la cola de reintentos.
+
+    Inicializa el cliente HTTP y lanza el procesamiento de la cola.
+
+    Returns:
+        int: RC_OK si el proceso termina correctamente, RC_NETWORK si falla la inicialización.
+    """
     try:
         cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(RETRY_SECONDS, 15), verbose=cfg.VERBOSE, logger=log)
     except Exception as e:

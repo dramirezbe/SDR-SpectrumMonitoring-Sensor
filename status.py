@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-#status.py
+# status.py
+
+"""
+Módulo de Gestión de Estado del Dispositivo.
+
+Este script se encarga de recopilar métricas del sistema, como la sincronización NTP,
+tiempos de calibración y deltas de tiempo, para construir un paquete de datos (payload)
+y enviarlo al servidor central a través de una API REST.
+"""
 
 import cfg
 import sys
@@ -14,10 +22,14 @@ from utils import StatusDevice, ShmStore, RequestClient
 
 def get_last_ntp_sync_ms():
     """
-    Returns the last NTP sync time as a Unix timestamp in milliseconds.
+    Obtiene la última sincronización NTP como un timestamp Unix en milisegundos.
+
+    Consulta el archivo de marca de tiempo del servicio systemd-timesyncd para 
+    determinar cuándo ocurrió la última sincronización de red con éxito.
+
     Returns:
-        int: Unix timestamp in ms (e.g., 1734395127137)
-        None: If the sync file is missing.
+        int: Timestamp Unix en milisegundos (ej. 1734395127137).
+        None: Si el archivo de sincronización no existe o no se puede leer.
     """
     # The file systemd uses to mark the last sync time
     SYNC_FILE = '/var/lib/systemd/timesync/clock'
@@ -34,6 +46,19 @@ def get_last_ntp_sync_ms():
         return None
 
 def build_status_final_payload(store, device):
+    """
+    Construye el payload final con el estado completo del dispositivo.
+
+    Recopila información desde el almacenamiento persistente (ShmStore) y 
+    del sistema (NTP) para generar una instantánea (snapshot) del estado actual.
+
+    Args:
+        store (ShmStore): Instancia del almacén de memoria compartida para consultar persistencia.
+        device (StatusDevice): Instancia del dispositivo para generar el formato del snapshot.
+
+    Returns:
+        dict: Diccionario formateado con todas las métricas, MAC y timestamp actual.
+    """
     # 1. Delta T
     try:
         delta_t_ms = store.consult_persistent("delta_t_ms")
@@ -65,6 +90,15 @@ def build_status_final_payload(store, device):
     
 
 def main() -> int:
+    """
+    Punto de entrada principal del script.
+
+    Inicializa los clientes de comunicación, construye el payload de estado
+    y realiza la petición POST hacia el endpoint configurado.
+
+    Returns:
+        int: Código de salida (0 para éxito, 1 para error).
+    """
     store = ShmStore()
     device = StatusDevice(logs_dir=cfg.LOGS_DIR, logger=log)
     cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=cfg.VERBOSE, logger=log)
