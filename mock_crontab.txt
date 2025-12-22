@@ -1,0 +1,1 @@
+*/2 * * * * /home/javastral/GIT/SDR-SpectrumMonitoring-Sensor/venv/bin/python3 /home/javastral/GIT/SDR-SpectrumMonitoring-Sensor/campaign_runner.py # CAMPAIGN_25

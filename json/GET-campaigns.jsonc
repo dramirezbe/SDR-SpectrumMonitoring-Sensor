@@ -29,12 +29,6 @@
       // Interval between consecutive measurements, in seconds.
       "acquisition_period_s": 300, // 5 min
 
-      //int span<=sample_rate
-      "span": 20000000,
-
-      //string (dBm, dBmV, dBuV, V, W)
-      "scale": "dbm",
-
       //-----default stats--------
       "window": "hamming",
       //float
@@ -57,13 +51,8 @@
 
       //None if not needed
       "filter":{
-        //lowpass, bandpass highpass
-        "type": "lowpass",
-        //int
-        "filter_bw_hz": 200000,
-
-        //default stat
-        "order_filter":2
+        "start_freq_hz": 1000,
+        "end_freq_hz": 2000
       }
     }
 

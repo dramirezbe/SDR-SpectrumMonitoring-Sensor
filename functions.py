@@ -177,49 +177,64 @@ class CronSchedulerCampaign:
         job.setall(schedule)
         self._log.info(f"🆕 ADDED Job ID {c_id} | Schedule: {schedule}")
 
-    def sync_jobs(self, campaigns: list, current_time_ms: float, store: ShmStore) -> bool:
+    def sync_jobs(self, campaigns: list, current_time_ms: int, store: ShmStore) -> bool:
         """
-        Sincroniza la lista de campañas del servidor con el Crontab local.
-
-        Analiza las ventanas de tiempo de cada campaña. Si la campaña está dentro 
-        de su ventana activa, se asegura de que exista en el cron. De lo contrario, 
-        la elimina.
-
-        Args:
-            campaigns (list): Lista de diccionarios de campañas desde la API.
-            current_time_ms (float): Tiempo actual del sistema en milisegundos.
-            store (ShmStore): Instancia para persistir parámetros de la campaña activa.
-
-        Returns:
-            bool: True si existe al menos una campaña activa en este momento.
+        Sincroniza campañas con mayor verbosidad y logs legibles.
         """
         any_active = False
-        now_human = self._ts_to_human(current_time_ms)
-        self._log.info(f"🕒 SYNC CHECK | Current Time: {now_human} ({int(current_time_ms)})")
+        now_human = cfg.human_readable(current_time_ms)
+        
+        self._log.info("="*60)
+        self._log.info(f"🔍 SYNC START | System Time: {now_human} ({int(current_time_ms)} ms)")
+        self._log.info("="*60)
 
         for camp in campaigns:
             c_id = camp['campaign_id']
             status = camp['status']
+            
+            # Tiempos de la campaña
             start_ms = camp['timeframe']['start']
             end_ms = camp['timeframe']['end']
             
-            if status in ['canceled', 'error', 'finished']:
-                self._remove_job(c_id)
-                continue
-
+            # Ventana de activación (con margen de poll_interval)
             window_open = start_ms - self.poll_interval_ms
             window_close = end_ms - self.poll_interval_ms
             
             is_in_window = window_open <= current_time_ms <= window_close
-            
+
+            # Formateo para logs
+            start_h  = cfg.human_readable(start_ms)
+            end_h    = cfg.human_readable(end_ms)
+            w_open_h = cfg.human_readable(window_open)
+            w_close_h= cfg.human_readable(window_close)
+
+            self._log.info(f"📋 Campaign ID: {c_id} | Status: {status.upper()}")
+            self._log.info(f"   ﹂ Timeframe: [{start_h}] TO [{end_h}]")
+            self._log.info(f"   ﹂ Activation Window: {w_open_h} < [NOW] < {w_close_h}")
+
+            # Lógica de descarte por status
+            if status in ['canceled', 'error', 'finished']:
+                self._log.warning(f"   ﹂ ❌ Skipping: Inactive status '{status}'")
+                self._remove_job(c_id)
+                continue
+
+            # Lógica de ventana de tiempo
             if is_in_window:
+                self._log.info(f"   ﹂ ✅ WITHIN WINDOW: Proceeding to upsert job.")
                 self._upsert_job(camp, store)
                 any_active = True
-                break
+                # Break si solo se permite una campaña activa a la vez
+                # break 
             else:
+                reason = "Not started yet" if current_time_ms < window_open else "Already expired"
+                self._log.info(f"   ﹂ ⏳ OUTSIDE WINDOW: {reason}")
                 self._remove_job(c_id)
-        
+
         self.cron.write()
+        self._log.info("="*60)
+        self._log.info(f"SYNC FINISHED | Active campaigns found: {any_active}")
+        self._log.info("="*60)
+        
         return any_active
     
 class SimpleDCSpikeCleaner:

@@ -66,23 +66,7 @@ def fetch_realtime_config(client):
         log.info(f"json_payload: {json_payload}")
 
         try:
-            filter_data = json_payload.get("filter")
-            demodulation_data = json_payload.get("demodulation")
-            demodulation_obj = None
-            filter_obj = None
-
-            if demodulation_data:
-                demodulation_obj = DemodulationConfig(
-                    type=demodulation_data.get("type"),
-                    bw_hz=int(demodulation_data.get("bw_hz"))
-                )
-            
-            if filter_data:
-                filter_obj = FilterConfig(
-                    type=filter_data.get("type"),
-                    bw_hz=int(filter_data.get("bw_hz")),
-                    order=int(filter_data.get("order"))
-                )
+            #
 
             config_obj = ServerRealtimeConfig(
                 method_psd="pfb",
@@ -98,8 +82,6 @@ def fetch_realtime_config(client):
                 antenna_port=int(json_payload.get("antenna_port")), 
                 span=int(json_payload.get("span")),
                 ppm_error=0,
-                demodulation=demodulation_obj,
-                filter=filter_obj
             )
 
             return asdict(config_obj), resp, delta_t_ms
