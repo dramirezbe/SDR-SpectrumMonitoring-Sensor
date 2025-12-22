@@ -20,15 +20,8 @@ from dataclasses import dataclass
 @dataclass
 class FilterConfig:
     """Configuración de filtrado digital para la señal de RF."""
-    type: str #: Tipo de filtro ('lowpass', 'highpass', 'bandpass')
-    bw_hz: int #: Ancho de banda del filtro en Hertz
-    order: int #: Orden del filtro (complejidad/atenuación)
-
-@dataclass
-class DemodulationConfig:
-    """Configuración de demodulación para escucha o análisis."""
-    type: str #: Tipo de demodulación ('am', 'fm')
-    bw_hz: int #: Ancho de banda de demodulación en Hertz
+    start_freq_hz: int #: Frecuencia de inicio en Hertz
+    end_freq_hz: int #: Frecuencia de fin en Hertz
 
 @dataclass
 class ServerRealtimeConfig:
@@ -43,15 +36,13 @@ class ServerRealtimeConfig:
     sample_rate_hz: int
     rbw_hz: int
     window: str
-    scale: str
     overlap: float
     lna_gain: int
     vga_gain: int
     antenna_amp: bool
     antenna_port: int
-    span: int
     ppm_error: int
-    demodulation: Optional[DemodulationConfig] = None
+    demodulation: Optional[str] = None
     filter: Optional[FilterConfig] = None
 
     def __post_init__(self):
@@ -69,12 +60,12 @@ class ServerRealtimeConfig:
             raise ValueError(f"Método PSD {self.method_psd} inválido. Debe ser pfb o welch.")
 
         if self.filter is not None:
-            if self.filter.type not in ["lowpass", "highpass", "bandpass"]:
-                raise ValueError(f"Tipo de filtro {self.filter.type} inválido.")
+           if self.filter.start_freq_hz > self.filter.end_freq_hz:
+               raise ValueError(f"La frecuencia de inicio debe ser menor que la de fin.")
 
         if self.demodulation is not None:
-            if self.demodulation.type not in ["am", "fm"]:
-                raise ValueError(f"Tipo de demodulación {self.demodulation.type} inválido.")
+            if self.demodulation not in ["am", "fm"]:
+                raise ValueError(f"Tipo de demodulación {self.demodulation} inválido.")
 
 class RequestClient:
     """

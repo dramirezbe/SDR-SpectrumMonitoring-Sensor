@@ -5,21 +5,17 @@
     "last_ntp_ms": 124,
     "last_kal_ms": 125,
     "ppm_error": 0.1,
-    "rf_mode": "campaign",
     "center_freq_hz": 98000000,
     "sample_rate_hz": 20000000,
     "rbw_hz": 20000000,
-    "span": 20000000,
     "antenna_port": 2,
     "window": "blackman-harris",
-    "scale": "dBm",
     "overlap": 0.5,
     "lna_gain": 0,
     "vga_gain": 0,
     "antenna_amp": true,
     "filter":{
-        "type": "lowpass",
-        "filter_bw_hz": 200000,
-        "order_filter":2
-    }
+        "start_freq_hz":2500,
+        "end_freq_hz":2600
+    }    
 }

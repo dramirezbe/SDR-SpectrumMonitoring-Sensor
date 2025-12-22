@@ -103,14 +103,13 @@ void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack) {
 
     cJSON *root = cJSON_CreateObject();
     
-    // Full span calculation: Center +/- (Fs / 2)
+    // Center +/- (Fs / 2)
     double fs = local_hack->sample_rate;
     double start_freq = (double)local_hack->center_freq - (fs / 2.0);
     double end_freq   = (double)local_hack->center_freq + (fs / 2.0);
 
     cJSON_AddNumberToObject(root, "start_freq_hz", start_freq);
     cJSON_AddNumberToObject(root, "end_freq_hz", end_freq);
-    cJSON_AddNumberToObject(root, "sample_rate_hz", fs);
 
     // Attach the full PSD array
     cJSON *pxx_array = cJSON_CreateDoubleArray(psd_array, length);
@@ -124,34 +123,25 @@ void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack) {
     cJSON_Delete(root);
 }
 
-/**
- * @brief ZMQ Callback. Handles incoming configuration commands.
- */
 void on_command_received(const char *payload) {
     printf("\n>>> [RF] Received Command Payload.\n");
     
-    // 1. Cleanup previous scale strings if needed
-    // (Assuming free_desired_psd handles internal pointers)
-    if (config_received) {
-        // Optional: free_desired_psd(&desired_config); 
-    }
-
-    // 2. Clear Structs
+    // Clear Structs - No dynamic strings left to free
     memset(&desired_config, 0, sizeof(DesiredCfg_t));
 
-    // 3. Parse and Calculate
+    // Parse into the global desired_config
     if (parse_config_rf(payload, &desired_config) == 0) {
+        // find_params_psd calculates hack_cfg, psd_cfg, and rb_cfg based on rbw/sample_rate
         find_params_psd(desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
+        
         print_config_summary_DEBUG(&desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
 
-        // 4. Hardware GPIO Selection (if applicable)
         #ifndef NO_COMMON_LIBS
             select_ANTENNA(desired_config.antenna_port);
         #else
             printf("[GPIO] selected port: %d\n", desired_config.antenna_port);
         #endif
 
-        // 5. Signal Main Loop
         config_received = true; 
     } else {
         fprintf(stderr, ">>> [PARSER] Failed to parse JSON configuration.\n");
@@ -272,37 +262,51 @@ int main() {
         // E. DSP Processing & Span Logic
         int8_t* linear_buffer = malloc(local_rb_cfg.total_bytes);
         if (linear_buffer) {
-            // 1. Unroll RB
+            
             rb_read(&rb, linear_buffer, local_rb_cfg.total_bytes);
             
-            // 2. Convert to IQ
-            signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb_cfg.total_bytes);
-
-                // 3. Apply digital filter if enabled (before PSD)
-            if (local_desired_cfg.filter_enabled) {
-                printf("[RF] Applying Filter...\n");
-                filter_iq(sig, &local_desired_cfg.filter_cfg);
-            }
             
+            signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb_cfg.total_bytes);
+            
+            //Prepare terrain
             double* freq = malloc(local_psd_cfg.nperseg * sizeof(double));
             double* psd = malloc(local_psd_cfg.nperseg * sizeof(double));
 
-            if (freq && psd && sig) {
-                // 4. Calculate PSD
-                if (local_desired_cfg.method_psd == PFB) {
-                    printf("[RF] Executing PFB PSD...\n");
-                    execute_pfb_psd(sig, &local_psd_cfg, freq, psd);
-                } else {
-                    printf("[RF] Executing WELCH PSD...\n");
-                    execute_welch_psd(sig, &local_psd_cfg, freq, psd);
-                }
+            if (!freq || !psd || !sig) {
+                fprintf(stderr, "[RF] Error: Out of Memory.\n");
+                needs_recovery = true;
+                goto error_handler;
+            } 
 
-                // 5. Scale values (dBm, etc.)
-                scale_psd(psd, local_psd_cfg.nperseg, local_desired_cfg.scale);
-
-                // 6. Publish Full Bandwidth
-                publish_results(psd, local_psd_cfg.nperseg, &local_hack_cfg);
+            // 1. Unified Pre-filtering (Optional)
+            if (local_desired_cfg.filter_enabled) {
+                printf("[RF] Filtering: %d Hz to %d Hz\n", 
+                        local_desired_cfg.filter_cfg.start_freq_hz, 
+                        local_desired_cfg.filter_cfg.end_freq_hz);
+                //filter_iq(sig, &local_desired_cfg.filter_cfg);
             }
+            //Always execute PSD, but handle if AM or FM logic
+            switch (local_desired_cfg.rf_mode) {
+                case AM_MODE:
+                    printf("[RF] Executing AM PSD...\n");
+                    break;
+                case FM_MODE:
+                    printf("[RF] Executing FM PSD...\n");
+                    break;
+                default:
+                    printf("[RF] Just executing PSD...\n");
+                    break;                
+            }
+
+            if (local_desired_cfg.method_psd == PFB) {
+                printf("[RF] Executing PFB PSD...\n");
+                execute_pfb_psd(sig, &local_psd_cfg, freq, psd);
+            } else {
+                printf("[RF] Executing WELCH PSD...\n");
+                execute_welch_psd(sig, &local_psd_cfg, freq, psd);
+            }
+            
+            publish_results(psd, local_psd_cfg.nperseg, &local_hack_cfg);
 
             // Cleanup Local DSP
             free(linear_buffer);

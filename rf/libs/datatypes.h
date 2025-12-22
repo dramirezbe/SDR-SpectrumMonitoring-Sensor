@@ -44,58 +44,31 @@ typedef struct {
     int noverlap;
 } PsdConfig_t;
 
-// --- RF Configuration Enums ---
-typedef enum {
-    REALTIME_MODE,
-    CAMPAIGN_MODE,
-    FM_MODE,
-    AM_MODE
-} rf_mode_t;
-
-// Add these to your datatypes.h if not already there
-typedef enum {
-    DEMOD_OFF,
-    DEMOD_FM,
-    DEMOD_AM
-} demod_type_t;
-
-// --- Demodulation Config ---
-typedef struct {
-    double center_freq;
-    double bw_hz;
-} DemodeConfig_t;
-
 // --- Buffer Configuration ---
 typedef struct {
     size_t total_bytes;
     int rb_size;    
 } RB_cfg_t;
 
-typedef enum {
-    LOWPASS_TYPE,
-    HIGHPASS_TYPE,
-    BANDPASS_TYPE,
-    BANDSTOP_TYPE,
-} type_filter_t;
-
 typedef struct {
-    float bw_filter_hz;
-    type_filter_t type_filter;  
-    int order_filter;           
-    double sample_rate;         
-    double prev_output_i;
-    double prev_output_q;
+    int start_freq_hz;
+    int end_freq_hz;
 } filter_t;
+
+typedef enum {
+    PSD_MODE, // When demodulation is "None" or invalid
+    FM_MODE,  // When demodulation is "fm"
+    AM_MODE   // When demodulation is "am"
+} rf_mode_t;
 
 // Updated DesiredCfg_t
 typedef struct {
     rf_mode_t rf_mode;
-    Psd_method method_psd;  // New: WELCH or PFB
+    Psd_method method_psd;
     
     // Hardware params
     uint64_t center_freq;
     double sample_rate;
-    double span;
     int lna_gain;
     int vga_gain;
     bool amp_enabled;
@@ -106,16 +79,25 @@ typedef struct {
     int rbw;
     double overlap;
     PsdWindowType_t window_type;
-    char *scale;
 
-    // Optional Filter Block
+    // Filter Block
     bool filter_enabled;
-    filter_t filter_cfg;
-
-    // Optional Demod Block
-    bool demod_enabled;
-    demod_type_t demod_type;
-    DemodeConfig_t demod_cfg;
+    filter_t filter_cfg; // Contains start_freq_hz and end_freq_hz
 } DesiredCfg_t;
+
+// --- RF Metrics (AM depth, FM deviation) ---
+typedef struct {
+    float env_min;
+    float env_max;
+    uint32_t counter;
+    uint32_t report_samples;   // window length at AUDIO rate
+    float depth_ema;           // m in [0..1] after clamp (EMA over windows)
+} am_depth_state_t;
+
+typedef struct {
+    float dev_max_hz;          // peak within the current reporting window
+    float dev_ema_hz;          // smoothed deviation (EMA)
+    uint32_t counter;
+} fm_dev_state_t;
 
 #endif

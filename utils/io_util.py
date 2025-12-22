@@ -17,6 +17,7 @@ import logging
 import json
 import time
 import fcntl
+from typing import Any 
 from typing import Optional
 
 # Configuración del logger local

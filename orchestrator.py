@@ -14,7 +14,7 @@ import cfg
 log = cfg.set_logger()
 from utils import (
     RequestClient, ZmqPairController, ServerRealtimeConfig, 
-    FilterConfig, DemodulationConfig, ShmStore, ElapsedTimer
+    FilterConfig, ShmStore, ElapsedTimer
 )
 from functions import (
     format_data_for_upload, CronSchedulerCampaign, GlobalSys, 
@@ -62,28 +62,37 @@ def fetch_realtime_config(client):
         if not json_payload:
             return {}, resp, delta_t_ms
 
-        #Debugging
-        log.info(f"json_payload: {json_payload}")
-
-        try:
-            #
-
-            config_obj = ServerRealtimeConfig(
+        if json_payload.get("center_freq_hz") == 0:
+            return {}, resp, delta_t_ms
+        
+        config_obj = ServerRealtimeConfig(
                 method_psd="pfb",
                 center_freq_hz=int(json_payload.get("center_freq_hz")), 
                 sample_rate_hz=int(json_payload.get("sample_rate_hz")),
                 rbw_hz=int(json_payload.get("rbw_hz")),
                 window=json_payload.get("window"),
-                scale=json_payload.get("scale"),
                 overlap=float(json_payload.get("overlap")),
                 lna_gain=int(json_payload.get("lna_gain")),
                 vga_gain=int(json_payload.get("vga_gain")),
                 antenna_amp=bool(json_payload.get("antenna_amp")),
                 antenna_port=int(json_payload.get("antenna_port")), 
-                span=int(json_payload.get("span")),
                 ppm_error=0,
             )
+        
+        if json_payload.get("demodulation") in ["fm","am"]:
+            config_obj.demodulation = json_payload.get("demodulation")
+        else:
+            config_obj.demodulation = None
 
+        if json_payload.get("filter") is not None:
+            config_obj.filter = FilterConfig(
+                start_freq_hz=int(json_payload.get("filter").get("start_freq_hz")),
+                end_freq_hz=int(json_payload.get("filter").get("end_freq_hz")),
+            )
+        else:
+            config_obj.filter = None
+
+        try:    
             return asdict(config_obj), resp, delta_t_ms
 
         except (ValueError, TypeError) as val_err:
@@ -116,7 +125,7 @@ async def _perform_calibration_sequence(store):
     log.info("--------------------------------")
 
 # --- 1. REALTIME LOGIC (WITH OFFSET & CROP) ---
-async def run_realtime_logic(client, store) -> int:
+async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     """
     Gestiona el bucle de ejecución para el modo de tiempo real.
 
@@ -204,7 +213,7 @@ async def run_realtime_logic(client, store) -> int:
     return 0
 
 # --- 2. CAMPAIGN LOGIC ---
-async def run_campaigns_logic(client, store, scheduler) -> int:
+async def run_campaigns_logic(client: RequestClient, store: ShmStore, scheduler: CronSchedulerCampaign) -> int:
     """
     Sincroniza y gestiona las campañas de medición programadas.
 
@@ -220,6 +229,13 @@ async def run_campaigns_logic(client, store, scheduler) -> int:
     Returns:
         int: Código de estado (0 éxito, 1 si el sistema no está IDLE o falla la red).
     """
+    def _validate_camp_arr(resp):
+        if resp is not None:
+            camps_arr = resp.json().get("campaigns", [])
+            if not camps_arr: return 1, None
+            else: return 0, camps_arr
+        else: return 1, None
+
     log.info("[CAMPAIGN] Checking for scheduled campaigns...")
     if not GlobalSys.is_idle(): return 1
 
@@ -227,9 +243,9 @@ async def run_campaigns_logic(client, store, scheduler) -> int:
         rc, resp = client.get(cfg.CAMPAIGN_URL)
         if rc != 0: return 1
         
-        camps_arr = resp.json().get("campaigns", [])
-        if not camps_arr: return 1
-
+        err, camps_arr = _validate_camp_arr(resp)
+        if err or not camps_arr: return 1
+            
         is_active = scheduler.sync_jobs(camps_arr, cfg.get_time_ms(), store)
         
         if is_active:
@@ -241,7 +257,9 @@ async def run_campaigns_logic(client, store, scheduler) -> int:
                 rc, resp = client.get(cfg.CAMPAIGN_URL)
                 if rc != 0: break 
                 
-                camps_arr = resp.json().get("campaigns", [])
+                err, camps_arr = _validate_camp_arr(resp)
+                if err or not camps_arr: return 1
+                
                 if not scheduler.sync_jobs(camps_arr, cfg.get_time_ms(), store):
                     log.info("[CAMPAIGN] Window closed. Exiting campaign mode.")
                     break

@@ -82,13 +82,23 @@ def format_data_for_upload(payload):
     Returns:
         dict: Diccionario formateado listo para ser serializado como JSON.
     """
-    return {
+    post_dict = {
         "Pxx": payload.get("Pxx", []),
         "start_freq_hz": int(payload.get("start_freq_hz", 0)),
         "end_freq_hz": int(payload.get("end_freq_hz", 0)),
         "timestamp": cfg.get_time_ms(),
         "mac": cfg.get_mac()
     }
+
+    if payload.get("excursion_hz", 0) != 0:
+        post_dict.update({"excursion_hz": int(payload.get("excursion_hz"))})
+
+    if payload.get("depth", 0) != 0:
+        post_dict.update({"depth": int(payload.get("depth"))})
+
+    return post_dict
+
+
 
 class CronSchedulerCampaign:
     """
@@ -152,10 +162,8 @@ class CronSchedulerCampaign:
             "center_freq_hz": camp.get('center_freq_hz'),
             "sample_rate_hz": camp.get('sample_rate_hz'),
             "rbw_hz": camp.get('rbw_hz'),
-            "span": camp.get('span'),
             "antenna_port": camp.get('antenna_port'),
             "window": camp.get('window'),
-            "scale": camp.get('scale'),
             "overlap": camp.get('overlap'),
             "lna_gain": camp.get('lna_gain'),
             "vga_gain": camp.get('vga_gain'),
