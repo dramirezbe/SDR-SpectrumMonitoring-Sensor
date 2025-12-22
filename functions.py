@@ -453,44 +453,71 @@ class AcquireCampaign:
 
     async def get_corrected_data(self, rf_params):
         """
-        Ejecuta la doble adquisición y el parcheo quirúrgico de los datos.
-
-        Returns:
-            dict: Datos con el centro espectral reemplazado por la captura offset.
+        Smarter acquisition using Level Normalization and Alpha Blending
+        to eliminate patching artifacts and DC spikes.
         """
         orig_params = deepcopy(rf_params)
         orig_cf = orig_params["center_freq_hz"]
 
-        # 1. Captura primaria
+        # 1. Double Acquisition
         data1 = await self._single_acquire(orig_params)
-        
-        # 2. Captura offset (Shift +2MHz)
         offset_params = deepcopy(orig_params)
         offset_params["center_freq_hz"] = orig_cf + self.OFFSET_HZ
+        await asyncio.sleep(0.5)
         data2 = await self._single_acquire(offset_params)
 
         try:
             pxx1 = np.array(data1['Pxx'])
             pxx2 = np.array(data2['Pxx'])
             
+            # Frequency resolution and indexing
             df = (data1['end_freq_hz'] - data1['start_freq_hz']) / len(pxx1)
             bin_shift = int(self.OFFSET_HZ / df)
-
             patch_bins = int(self.PATCH_BW_HZ / df)
             center_idx = len(pxx1) // 2
-            s1, e1 = center_idx - (patch_bins // 2), center_idx + (patch_bins // 2)
 
+            # Patch boundaries for Capture 1 (Target) and Capture 2 (Source)
+            s1, e1 = center_idx - (patch_bins // 2), center_idx + (patch_bins // 2)
             s2, e2 = s1 - bin_shift, e1 - bin_shift
 
-            if s2 >= 0 and e2 <= len(pxx2):
-                pxx1[s1:e1] = pxx2[s2:e2]
-                self._log.info(f"DC spike removed at {orig_cf/1e6} MHz.")
-            else:
-                self._log.warning("Offset capture too narrow to patch requested window.")
+            # Safety check for indices
+            if s2 < 0 or e2 > len(pxx2):
+                self._log.warning("Offset capture indices out of range. Check OFFSET_HZ.")
+                return data1
 
+            # --- STEP 1: LEVEL MATCHING (Normalization) ---
+            # We compare a small 100kHz 'guard band' just outside the patch 
+            # to find the gain difference between the two captures.
+            guard_bins = int(100e3 / df)
+            ref_s, ref_e = s1 - guard_bins, s1
+            
+            if ref_s > 0:
+                # Use median to be robust against transient signals/spikes
+                level1 = np.median(pxx1[ref_s:ref_e])
+                level2 = np.median(pxx2[ref_s - bin_shift : ref_e - bin_shift])
+                gain_corr = level1 / level2
+                pxx2_patch = pxx2[s2:e2] * gain_corr
+            else:
+                pxx2_patch = pxx2[s2:e2]
+
+            # --- STEP 2: ALPHA BLENDING (Cross-fading) ---
+            # Create a weight mask to fade the patch in and out
+            # This removes the vertical 'seams' seen in your image.
+            blend_width = int(patch_bins * 0.1)  # 10% of patch for transition
+            mask = np.ones(patch_bins)
+            
+            # Linear ramps for the edges
+            ramp = np.linspace(0, 1, blend_width)
+            mask[:blend_width] = ramp
+            mask[-blend_width:] = ramp[::-1]
+
+            # Apply the weighted blend: (Original * (1-mask)) + (Patch * mask)
+            pxx1[s1:e1] = (pxx1[s1:e1] * (1 - mask)) + (pxx2_patch * mask)
+
+            self._log.info(f"Smart DC correction applied at {orig_cf/1e6} MHz.")
             data1['Pxx'] = pxx1.tolist()
             return data1
 
         except Exception as e:
-            self._log.error(f"Failed to process DC spike correction: {e}")
+            self._log.error(f"Failed smart DC spike correction: {e}")
             return data1

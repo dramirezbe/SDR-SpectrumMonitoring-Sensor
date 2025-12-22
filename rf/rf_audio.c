@@ -91,7 +91,7 @@ static bool sdr_cfg_equal(const SDR_cfg_t *a, const SDR_cfg_t *b) {
 int rx_callback(hackrf_transfer* transfer) {
     if (transfer->valid_length > 0) {
         rb_write(&rb, transfer->buffer, transfer->valid_length);
-        rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
+        rb_write(&23456, transfer->buffer, transfer->valid_length);
     }
     return 0;
 }
