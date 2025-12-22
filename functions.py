@@ -127,7 +127,7 @@ class CronSchedulerCampaign:
             self.debug_file.parent.mkdir(parents=True, exist_ok=True)
             if not self.debug_file.exists():
                 self.debug_file.write_text("", encoding="utf-8")
-            self.cron = CronTab(tabfile=str(self.debug_file))
+            self.cron = CronTab(user=True)
         else:
             self.cron = CronTab(user=True)
 
@@ -470,51 +470,52 @@ class AcquireCampaign:
             pxx1 = np.array(data1['Pxx'])
             pxx2 = np.array(data2['Pxx'])
             
-            # Frequency resolution and indexing
             df = (data1['end_freq_hz'] - data1['start_freq_hz']) / len(pxx1)
             bin_shift = int(self.OFFSET_HZ / df)
-            patch_bins = int(self.PATCH_BW_HZ / df)
+            
+            # 1. Define the center and half-width
             center_idx = len(pxx1) // 2
+            half_patch = int((self.PATCH_BW_HZ / df) // 2)
 
-            # Patch boundaries for Capture 1 (Target) and Capture 2 (Source)
-            s1, e1 = center_idx - (patch_bins // 2), center_idx + (patch_bins // 2)
+            # 2. Calculate indices for Capture 1 (The target)
+            s1, e1 = center_idx - half_patch, center_idx + half_patch
+            
+            # 3. Calculate indices for Capture 2 (The source)
             s2, e2 = s1 - bin_shift, e1 - bin_shift
 
-            # Safety check for indices
+            # 4. DETERMINE ACTUAL SLICE LENGTH (This prevents the 818 vs 819 error)
+            actual_len = e1 - s1 
+
             if s2 < 0 or e2 > len(pxx2):
-                self._log.warning("Offset capture indices out of range. Check OFFSET_HZ.")
+                self._log.warning("Offset capture indices out of range.")
                 return data1
 
-            # --- STEP 1: LEVEL MATCHING (Normalization) ---
-            # We compare a small 100kHz 'guard band' just outside the patch 
-            # to find the gain difference between the two captures.
+            # --- STEP 1: LEVEL MATCHING ---
             guard_bins = int(100e3 / df)
             ref_s, ref_e = s1 - guard_bins, s1
             
             if ref_s > 0:
-                # Use median to be robust against transient signals/spikes
                 level1 = np.median(pxx1[ref_s:ref_e])
                 level2 = np.median(pxx2[ref_s - bin_shift : ref_e - bin_shift])
                 gain_corr = level1 / level2
-                pxx2_patch = pxx2[s2:e2] * gain_corr
+                # Use actual_len to slice Capture 2
+                pxx2_patch = pxx2[s2 : s2 + actual_len] * gain_corr
             else:
-                pxx2_patch = pxx2[s2:e2]
+                pxx2_patch = pxx2[s2 : s2 + actual_len]
 
-            # --- STEP 2: ALPHA BLENDING (Cross-fading) ---
-            # Create a weight mask to fade the patch in and out
-            # This removes the vertical 'seams' seen in your image.
-            blend_width = int(patch_bins * 0.1)  # 10% of patch for transition
-            mask = np.ones(patch_bins)
+            # --- STEP 2: ALPHA BLENDING ---
+            # Create mask based on ACTUAL length of the slice
+            mask = np.ones(actual_len)
+            blend_width = max(1, int(actual_len * 0.1)) 
             
-            # Linear ramps for the edges
             ramp = np.linspace(0, 1, blend_width)
             mask[:blend_width] = ramp
             mask[-blend_width:] = ramp[::-1]
 
-            # Apply the weighted blend: (Original * (1-mask)) + (Patch * mask)
+            # Now all arrays are guaranteed to be (actual_len,)
             pxx1[s1:e1] = (pxx1[s1:e1] * (1 - mask)) + (pxx2_patch * mask)
 
-            self._log.info(f"Smart DC correction applied at {orig_cf/1e6} MHz.")
+            self._log.info(f"Smart DC correction applied at {orig_cf/1e6} MHz. Slice size: {actual_len}")
             data1['Pxx'] = pxx1.tolist()
             return data1
 

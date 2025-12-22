@@ -54,6 +54,9 @@ def fetch_realtime_config(client):
         if resp is None or resp.status_code != 200:
             return {}, resp, delta_t_ms 
         
+        #DEBUG
+        log.info(f"---REALTIME--- :{resp.json()}")
+        
         try:
             json_payload = resp.json()
         except Exception:
@@ -231,6 +234,8 @@ async def run_campaigns_logic(client: RequestClient, store: ShmStore, scheduler:
     """
     def _validate_camp_arr(resp):
         if resp is not None:
+            #DEBUG
+            log.info(f"---CAMPAIGNS--- :{resp.json()}")
             camps_arr = resp.json().get("campaigns", [])
             if not camps_arr: return 1, None
             else: return 0, camps_arr
