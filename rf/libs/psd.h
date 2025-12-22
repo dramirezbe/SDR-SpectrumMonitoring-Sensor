@@ -20,6 +20,7 @@
 #define POWER_FLOOR_WATTS 1.0e-20
 
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size);
+void iq_compensation(signal_iq_t* signal_data);
 void free_signal_iq(signal_iq_t* signal);
 
 double get_window_enbw_factor(PsdWindowType_t type); 

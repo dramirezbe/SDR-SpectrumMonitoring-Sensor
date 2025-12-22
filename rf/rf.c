@@ -267,6 +267,7 @@ int main() {
             
             
             signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb_cfg.total_bytes);
+            iq_compensation(sig);
             
             //Prepare terrain
             double* freq = malloc(local_psd_cfg.nperseg * sizeof(double));

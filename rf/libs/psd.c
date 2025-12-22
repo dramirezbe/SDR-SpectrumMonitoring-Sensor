@@ -36,6 +36,63 @@ signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size) {
     return signal_data;
 }
 
+void iq_compensation(signal_iq_t* signal_data) {
+    if (!signal_data || !signal_data->signal_iq || signal_data->n_signal == 0)
+        return;
+
+    size_t N = signal_data->n_signal;
+    double complex* x = signal_data->signal_iq;
+
+    double meanI = 0.0, meanQ = 0.0;
+    double pI = 0.0, pQ = 0.0;
+    double crossIQ = 0.0;
+
+    // -------------------------------------------------
+    // 1) DC offset removal
+    // -------------------------------------------------
+    for (size_t n = 0; n < N; n++) {
+        meanI += creal(x[n]);
+        meanQ += cimag(x[n]);
+    }
+    meanI /= N;
+    meanQ /= N;
+
+    for (size_t n = 0; n < N; n++) {
+        x[n] = (creal(x[n]) - meanI) + (cimag(x[n]) - meanQ) * I;
+    }
+
+    // -------------------------------------------------
+    // 2) Gain imbalance
+    // -------------------------------------------------
+    for (size_t n = 0; n < N; n++) {
+        double I_n = creal(x[n]);
+        double Q_n = cimag(x[n]);
+        pI += I_n * I_n;
+        pQ += Q_n * Q_n;
+        crossIQ += I_n * Q_n;
+    }
+
+    if (pI <= 0.0 || pQ <= 0.0)
+        return;
+
+    double gain = sqrt(pI / pQ);
+
+    for (size_t n = 0; n < N; n++) {
+        x[n] = creal(x[n]) + (cimag(x[n]) * gain) * I;
+    }
+
+    // -------------------------------------------------
+    // 3) Phase correction (decorrelation)
+    // -------------------------------------------------
+    double rho = crossIQ / pI;
+
+    for (size_t n = 0; n < N; n++) {
+        double I_n = creal(x[n]);
+        double Q_n = cimag(x[n]);
+        x[n] = I_n + (Q_n - rho * I_n) * I;
+    }
+}
+
 void free_signal_iq(signal_iq_t* signal) {
     if (signal) {
         if (signal->signal_iq) {
