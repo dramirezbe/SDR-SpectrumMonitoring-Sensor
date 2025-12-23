@@ -56,6 +56,20 @@ typedef struct {
 } filter_t;
 
 typedef enum {
+    LOWPASS_TYPE,
+    HIGHPASS_TYPE,
+    BANDPASS_TYPE
+}type_filter_audio_t;
+
+
+typedef struct {
+    float bw_filter_hz;
+    type_filter_audio_t type_filter;
+    int order_fliter;
+    
+}filter_audio_t;
+
+typedef enum {
     PSD_MODE, // When demodulation is "None" or invalid
     FM_MODE,  // When demodulation is "fm"
     AM_MODE   // When demodulation is "am"

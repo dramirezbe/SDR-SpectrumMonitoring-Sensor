@@ -56,7 +56,22 @@ echo -e "${CYAN}==============================================${NC}"
 log "Step 1/6: Installing system dependencies via APT..."
 apt-get update -qq
 apt-get install -y libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv \
-    autoconf automake libtool pkg-config git autoconf-archive libtool libusb-1.0-0-dev libfftw3-dev
+    autoconf automake libtool pkg-config git autoconf-archive libtool libusb-1.0-0-dev libfftw3-dev \
+    python3-gi \
+  python3-gst-1.0 \
+  gobject-introspection \
+  gir1.2-gstreamer-1.0 \
+  gir1.2-gst-plugins-base-1.0 \
+  gir1.2-gst-plugins-bad-1.0 \
+  gstreamer1.0-tools \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav \
+  gstreamer1.0-nice \
+  libnice10 \
+  libopus-dev
 
 # 2. Install libgpiod v2 from source
 log "Step 2/6: Building and installing libgpiod v2..."

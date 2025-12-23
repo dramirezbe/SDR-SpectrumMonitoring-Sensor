@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -10,7 +12,15 @@
 #include <pthread.h>
 #include <time.h>
 #include <signal.h>
-
+#include <complex.h>
+#include <sys/time.h>
+#include <errno.h>
+#include <stdatomic.h>
+#include <sys/socket.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/types.h>
 #include <libhackrf/hackrf.h>
 #include <cjson/cJSON.h>
 
@@ -23,11 +33,25 @@
 #include "utils.h"
 #include "parser.h"
 #include "chan_filter.h"
+#include "am_radio_local.h"
+#include "net_audio_retry.h"
+#include "fm_radio.h"
+#include "audio_stream_ctx.h"
+#include "am_radio_local.h"
+#include "net_audio_retry.h"
+#include "iq_iir_filter.h"
+#include "opus_tx.h"
 
 #ifndef NO_COMMON_LIBS
     #include "bacn_gpio.h"
 #endif
-
+// ========================= IQ Channel Filter (rf_audio.c variables)
+static int    IQ_FILTER_ENABLE        = 1;
+// Recommended two-sided channel BW:
+// AM voice-like channel BW ~10kHz (±5kHz)
+static float  IQ_FILTER_BW_AM_HZ      = 10000.0f;
+// Optional: apply same channel filter to IQ before PSD in FM/AM (default OFF to preserve current PSD behavior)
+static int    IQ_FILTER_APPLY_TO_PSD  = 1;
 // =========================================================
 // GLOBAL VARIABLES
 // =========================================================
@@ -35,6 +59,12 @@
 zpair_t *zmq_channel = NULL;
 hackrf_device* device = NULL;
 ring_buffer_t rb;
+
+// Two ring buffers:
+//   rb         = large buffer used for acquisition/full-PSD (main thread reads)
+//   audio_rb   = small buffer used only by audio thread (audio thread reads)
+ring_buffer_t rb;
+ring_buffer_t audio_rb;
 
 volatile bool stop_streaming = true; 
 volatile bool config_received = false; 
@@ -50,6 +80,10 @@ SDR_cfg_t current_hw_cfg = {0};
 
 pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Audio thread control
+pthread_t audio_thread;
+volatile bool audio_thread_running = false;
+
 // =========================================================
 // UTILITY FUNCTIONS
 // =========================================================
@@ -62,6 +96,7 @@ void handle_sigint(int sig) {
 int rx_callback(hackrf_transfer* transfer) {
     if (stop_streaming) return 0; 
     rb_write(&rb, transfer->buffer, transfer->valid_length);
+    rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
     return 0;
 }
 
@@ -132,6 +167,214 @@ void on_command_received(const char *payload) {
             printf("[GPIO] selected port: %d\n", temp_desired.antenna_port);
         #endif
     }
+}
+
+// HELPERS
+static inline uint64_t now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
+}
+
+static inline void msleep_int(int ms) {
+    if (ms <= 0) return;
+    usleep((useconds_t)ms * 1000);
+}
+
+void* audio_thread_fn(void* arg) {
+    audio_stream_ctx_t *ctx = (audio_stream_ctx_t*)arg;
+    if (!ctx || !ctx->fm_radio || !ctx->am_radio) {
+        fprintf(stderr, "[AUDIO] FATAL: ctx or radios NULL\n");
+        return NULL;
+    }
+
+    // sanity: Opus expects one of the standard rates; we use 48000
+    if (!(ctx->opus_sample_rate == 8000  || ctx->opus_sample_rate == 12000 ||
+          ctx->opus_sample_rate == 16000 || ctx->opus_sample_rate == 24000 ||
+          ctx->opus_sample_rate == 48000)) {
+        fprintf(stderr, "[AUDIO] FATAL: invalid opus_sample_rate=%d\n", ctx->opus_sample_rate);
+        return NULL;
+    }
+
+    const int frame_samples = (ctx->opus_sample_rate * ctx->frame_ms) / 1000; // e.g., 960 @48k/20ms
+    if (frame_samples <= 0) {
+        fprintf(stderr, "[AUDIO] FATAL: invalid frame_samples\n");
+        return NULL;
+    }
+
+    int8_t  *raw_iq_chunk = (int8_t*)malloc((size_t)AUDIO_CHUNK_SAMPLES * 2);
+    int16_t *pcm_out      = (int16_t*)malloc((size_t)AUDIO_CHUNK_SAMPLES * sizeof(int16_t));
+
+    signal_iq_t audio_sig;
+    audio_sig.n_signal = AUDIO_CHUNK_SAMPLES;
+    audio_sig.signal_iq = (double complex*)malloc((size_t)AUDIO_CHUNK_SAMPLES * sizeof(double complex));
+
+    int16_t *pcm_accum = (int16_t*)malloc((size_t)frame_samples * sizeof(int16_t));
+    int accum_len = 0;
+
+    if (!raw_iq_chunk || !pcm_out || !audio_sig.signal_iq || !pcm_accum) {
+        fprintf(stderr, "[AUDIO] FATAL: malloc failed\n");
+        free(raw_iq_chunk);
+        free(pcm_out);
+        free(audio_sig.signal_iq);
+        free(pcm_accum);
+        return NULL;
+    }
+
+    opus_tx_t *tx = NULL;
+
+    // local helper: (re)connect opus tx
+
+
+    audio_thread_running = true;
+
+    // track mode/fs changes to reconfig IQ filter cleanly
+    int    last_mode = -1;
+    double last_fs   = 0.0;
+
+    // metrics reporter (added only for metrics)
+    uint64_t last_metrics_ms = now_ms();
+    const uint64_t METRICS_EVERY_MS = 500;
+
+    while (audio_thread_running) {
+
+        // Ensure TCP/Opus encoder is ready (infinite retries, 3s)
+        if (ensure_tx_with_retry(ctx, &tx, &audio_thread_running) != 0) {
+            // thread stopping
+            break;
+        }
+
+        // Wait for enough IQ bytes
+        if (rb_available(&audio_rb) < (size_t)(AUDIO_CHUNK_SAMPLES * 2)) {
+            usleep(1000);
+            continue;
+        }
+
+        // Drain one chunk
+        rb_read(&audio_rb, raw_iq_chunk, AUDIO_CHUNK_SAMPLES * 2);
+
+        // Convert int8 IQ -> complex double (normalized)
+        for (int i = 0; i < AUDIO_CHUNK_SAMPLES; ++i) {
+            double real = ((double)raw_iq_chunk[2*i]) / 128.0;
+            double imag = ((double)raw_iq_chunk[2*i + 1]) / 128.0;
+            audio_sig.signal_iq[i] = real + imag * I;
+        }
+
+        // Read current mode/fs (set by main thread)
+        int mode = atomic_load(&ctx->current_mode);
+        double fs_hz = atomic_load(&ctx->current_fs_hz);
+        if (fs_hz <= 0.0) fs_hz = 2000000.0;
+
+        // ===== IQ CHANNEL FILTER =====
+        if (IQ_FILTER_ENABLE) {
+            float bw = (mode == AM_MODE) ? IQ_FILTER_BW_AM_HZ : IQ_FILTER_BW_FM_HZ;
+
+            ctx->iqf_cfg.type_filter  = BANDPASS_TYPE;
+            ctx->iqf_cfg.order_fliter = IQ_FILTER_ORDER;
+            ctx->iqf_cfg.bw_filter_hz = bw;
+
+            // init or reconfig if mode/fs changed
+            if (!ctx->iqf_ready) {
+                if (iq_iir_filter_init(&ctx->iqf, fs_hz, &ctx->iqf_cfg, 1) == 0) {
+                    ctx->iqf_ready = 1;
+                    last_mode = mode;
+                    last_fs = fs_hz;
+                }
+            } else {
+                if (mode != last_mode || fabs(fs_hz - last_fs) > 1e-6) {
+                    iq_iir_filter_config(&ctx->iqf, fs_hz, &ctx->iqf_cfg);
+                    iq_iir_filter_reset(&ctx->iqf);
+                    last_mode = mode;
+                    last_fs = fs_hz;
+                }
+            }
+
+            if (ctx->iqf_ready) {
+                iq_iir_filter_apply_inplace(&ctx->iqf, &audio_sig);
+            }
+        }
+
+        // ===== Demod IQ -> PCM (FM or AM) =====
+        int samples_gen = 0;
+        if (mode == AM_MODE) {
+            samples_gen = am_radio_local_iq_to_pcm(ctx->am_radio, &audio_sig, pcm_out, &ctx->am_depth);
+        } else {
+            // default: FM
+            // >>> FIX: pass metrics state + fs_demod <<<
+            samples_gen = fm_radio_iq_to_pcm(
+                ctx->fm_radio,
+                &audio_sig,
+                pcm_out,
+                &ctx->fm_dev,
+                (int)llround(fs_hz)
+            );
+        }
+
+        // ===== metrics print (added only for metrics) =====
+        uint64_t tnow = now_ms();
+        if (tnow - last_metrics_ms >= METRICS_EVERY_MS) {
+            last_metrics_ms = tnow;
+
+            if (mode == AM_MODE) {
+                float depth_pct = 100.0f * ctx->am_depth.depth_ema;
+                if (isfinite(depth_pct)) {
+                    fprintf(stderr, "[AM] depth=%.1f %%\n", depth_pct);
+                }
+            } else {
+                float dev_ema = ctx->fm_dev.dev_ema_hz;
+                float dev_pk  = ctx->fm_dev.dev_max_hz;
+                if (isfinite(dev_ema) || isfinite(dev_pk)) {
+                    fprintf(stderr, "[FM] dev_ema=%.1f Hz  dev_peak=%.1f Hz  fs=%d\n",
+                            dev_ema, dev_pk, (int)llround(fs_hz));
+                }
+            }
+        }
+
+        if (samples_gen <= 0) continue;
+
+        // Ensure TCP/Opus encoder is ready
+        if (ensure_tx_with_retry(ctx, &tx, &audio_thread_running) != 0) {
+            // Se solicitó detener el hilo o el programa
+            break;
+        }
+
+        // Accumulate into exact Opus frames
+        int idx = 0;
+        while (idx < samples_gen) {
+            int space = frame_samples - accum_len;
+            int take  = samples_gen - idx;
+            if (take > space) take = space;
+
+            memcpy(&pcm_accum[accum_len], &pcm_out[idx], (size_t)take * sizeof(int16_t));
+            accum_len += take;
+            idx += take;
+
+            if (accum_len == frame_samples) {
+                if (opus_tx_send_frame(tx, pcm_accum, frame_samples) != 0) {
+                    fprintf(stderr, "[AUDIO] WARN: opus_tx_send_frame failed. Reconnecting in 3s...\n");
+                    opus_tx_destroy(tx);
+                    tx = NULL;
+                    accum_len = 0;
+                    sleep_cancelable_ms(RECONNECT_DELAY_MS, &audio_thread_running);
+                    break;
+                }
+                accum_len = 0;
+            }
+        }
+    }
+
+    if (tx) opus_tx_destroy(tx);
+
+    if (ctx->iqf_ready) {
+        iq_iir_filter_free(&ctx->iqf);
+        ctx->iqf_ready = 0;
+    }
+
+    free(raw_iq_chunk);
+    free(pcm_out);
+    free(audio_sig.signal_iq);
+    free(pcm_accum);
+    return NULL;
 }
 
 // =========================================================

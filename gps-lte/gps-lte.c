@@ -143,17 +143,16 @@ int main() {
         if(get_wlan_ip(ip)) {
             printf("IP address assigned to WiFi: %s\n", ip);
         } else {
-            sleep(30);
             printf("Starting PPP connection...\n");
             run_cmd("sudo pon rnet");
-            sleep(10);
+            sleep(30);
             
             if(!get_ppp_ip(ip)) {
                 printf("No IP address assigned! Restarting PPP...\n");
                 run_cmd("sudo poff rnet");
                 sleep(5);
                 run_cmd("sudo pon rnet");
-                sleep(10);
+                sleep(30);
 
                 if(!get_ppp_ip(ip)) {
                     printf("PPP failed again. No IP assigned.\n");
@@ -218,7 +217,7 @@ int main() {
                     
                     if(tryRB >= 6) {
                         printf("CRITICAL: Network down for too long. Rebooting...\n");
-                        system("sudo reboot");
+                        system("sudo reboot now");
                     }
                 }
             } 
