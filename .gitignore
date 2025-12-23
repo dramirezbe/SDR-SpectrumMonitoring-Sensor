@@ -139,6 +139,7 @@ celerybeat.pid
 env/
 venv/
 dev-venv/
+audio-venv/
 ENV/
 env.bak/
 venv.bak/

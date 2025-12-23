@@ -55,7 +55,7 @@ echo -e "${CYAN}==============================================${NC}"
 # 1. Install Build Dependencies
 log "Step 1/6: Installing system dependencies via APT..."
 apt-get update -qq
-apt-get install -y libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv \
+apt-get install -y git cmake make libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv \
     autoconf automake libtool pkg-config git autoconf-archive libtool libusb-1.0-0-dev libfftw3-dev \
     python3-gi \
   python3-gst-1.0 \
