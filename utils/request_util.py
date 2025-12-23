@@ -193,6 +193,7 @@ class ZmqPairController:
         self.addr = addr
         self.is_server = is_server
         self.verbose = verbose
+        self.timeout_ms = 15000
         self.context = None
         self.socket = None
 
@@ -238,11 +239,18 @@ class ZmqPairController:
         if self.verbose: print(f"[PY] >> Comando enviado")
 
     async def wait_for_data(self) -> dict:
-        """Espera y recibe una respuesta JSON desde el socket."""
+        """Espera y recibe una respuesta con un timeout para evitar bloqueos."""
         if not self.socket: raise RuntimeError("Socket no iniciado.")
-        msg = await self.socket.recv_string()
-        if self.verbose: print(f"[PY] << Datos recibidos")
-        return json.loads(msg)
+        
+        # Use poller to wait with a timeout
+        if await self.socket.poll(self.timeout_ms, zmq.POLLIN):
+            msg = await self.socket.recv_string()
+            if self.verbose: print(f"[PY] << Datos recibidos")
+            return json.loads(msg)
+        else:
+            # Return None or raise error so run_realtime_logic can handle the silence
+            if self.verbose: print(f"[PY] !! Timeout esperando datos de C")
+            return None
 
     async def __aenter__(self):
         """Soporte para gestor de contexto asíncrono (`async with`)."""

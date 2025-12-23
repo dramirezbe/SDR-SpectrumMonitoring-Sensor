@@ -149,3 +149,39 @@ void print_config_summary_DEBUG(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *p
     }
     printf("────────────────────────────────────────────────────────────\n\n");
 }
+
+void print_config_summary_DEPLOY(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *psd, RB_cfg_t *rb) {
+    if (!des || !hw || !psd || !rb) return;
+
+    // Compact Lookup Tables
+    const char* m_n[] = {"PSD", "FM", "AM"};
+    const char* p_m[] = {"WCH", "PFB"};
+    const char* w_n[] = {"HMNG", "HANN", "RECT", "BLCK", "FTOP", "KSR", "TUKY", "BRTL"};
+
+    // Line 1: Hardware, Gain, and FFT Resolution
+    // Format: [CFG] MODE | FREQ (MHz) | SAMPLE RATE | GAIN | AMP | PSD POINTS
+    printf("[CFG] %s | %" PRIu64 "Hz (%.2fM) | FS:%.1fM | G:%d/%d | AMP:%c | PTS:%d\n",
+           m_n[des->rf_mode % 3], 
+           hw->center_freq, (double)hw->center_freq / 1e6,
+           hw->sample_rate / 1e6,
+           hw->lna_gain, hw->vga_gain,
+           des->amp_enabled ? 'Y' : 'N',
+           psd->nperseg);
+
+    // Line 2: DSP, Windowing, Buffer, and Filter Range
+    // Format: Method | RBW | Overlap | Window Name | Buffer Size | Filter Range
+    printf("      %s | RBW:%d | OVP:%.0f%% | WIN:%s | BUF:%zuMB",
+           p_m[des->method_psd % 2],
+           des->rbw,
+           des->overlap * 100.0,
+           w_n[psd->window_type % 8],
+           rb->total_bytes / (1024 * 1024));
+
+    if (des->filter_enabled) {
+        printf(" | FILT:%d-%dHz\n", 
+               des->filter_cfg.start_freq_hz, 
+               des->filter_cfg.end_freq_hz);
+    } else {
+        printf(" | FILT:OFF\n");
+    }
+}
