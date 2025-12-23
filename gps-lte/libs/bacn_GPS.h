@@ -7,7 +7,7 @@
 
 #define UART_BUFFER_SIZE    120
 
-#define SERIAL_DEV_GPS "/dev/ttyUSB1"
+#define SERIAL_DEV_GPS "usb-SimTech__Incorporated_SimTech__Incorporated_0123456789ABCDEF-if01-port0"
 
 typedef struct
 {

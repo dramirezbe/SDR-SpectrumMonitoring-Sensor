@@ -126,10 +126,11 @@ int main() {
     // 1. Hardware Init
     if(init_usart(&LTE) != 0) {
         fprintf(stderr, "Error: LTE Init failed (UART issue)\n");
+        system("sudo reboot now");
     }
     if(init_usart1(&GPS) != 0) {
         fprintf(stderr, "Error: GPS Init failed\n");
-        return -1;
+        system("sudo reboot now");
     }
 
     // 2. Network / Internet Setup

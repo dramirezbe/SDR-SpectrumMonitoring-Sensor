@@ -153,6 +153,7 @@ if [ -d "$DAEMONS_DIR" ]; then
 
     for f in "${FILES[@]}"; do
         cp "$f" /etc/systemd/system/
+        log "Copying daemons to systemd $f..."
         systemctl daemon-reload
         systemctl enable "$f"
         systemctl restart "$f"
