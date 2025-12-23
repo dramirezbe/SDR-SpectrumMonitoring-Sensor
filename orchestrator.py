@@ -89,8 +89,8 @@ def fetch_realtime_config(client):
 
         if json_payload.get("filter") is not None:
             config_obj.filter = FilterConfig(
-                start_freq_hz=int(json_payload.get("filter").get("start_freq_hz")),
-                end_freq_hz=int(json_payload.get("filter").get("end_freq_hz")),
+                start_freq_hz=int(88e6),
+                end_freq_hz=int(100e6),
             )
         else:
             config_obj.filter = None

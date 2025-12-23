@@ -21,6 +21,7 @@
 #include "zmq_util.h" 
 #include "utils.h"
 #include "parser.h"
+#include "chan_filter.h"
 
 #ifndef NO_COMMON_LIBS
     #include "bacn_gpio.h"
@@ -284,7 +285,18 @@ int main() {
                 printf("[RF] Filtering: %d Hz to %d Hz\n", 
                         local_desired_cfg.filter_cfg.start_freq_hz, 
                         local_desired_cfg.filter_cfg.end_freq_hz);
-                //filter_iq(sig, &local_desired_cfg.filter_cfg);
+                int res = chan_filter_apply_inplace_abs(
+                    sig,
+                    &local_desired_cfg.filter_cfg,
+                    local_hack_cfg.center_freq,
+                    local_hack_cfg.sample_rate
+                );
+                if (res < 0) {
+                    printf("[RF] Filter FAILED with code: %d\n", res);
+                } else {
+                    printf("[RF] Filter applied successfully to %zu samples\n", sig->n_signal);
+                }
+                
             }
             //Always execute PSD, but handle if AM or FM logic
             switch (local_desired_cfg.rf_mode) {
@@ -331,6 +343,7 @@ int main() {
     zpair_close(zmq_channel);
     if (ipc_addr) free(ipc_addr);
     rb_free(&rb);
+    chan_filter_free_cache();
     
     return 0;
 }
