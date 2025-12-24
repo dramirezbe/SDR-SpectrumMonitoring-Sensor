@@ -19,18 +19,20 @@ NC='\033[0m' # No Color
 # ---------------------------------------------------------
 # User Detection
 # ---------------------------------------------------------
-if [ -n "$SUDO_USER" ]; then
-    REAL_USER="$SUDO_USER"
-    REAL_GROUP=$(id -gn "$SUDO_USER")
-else
-    REAL_USER="$USER"
-    REAL_GROUP=$(id -gn "$USER")
-fi
+# We prioritize 'anepi' as the target user based on your requirements
+TARGET_USER="anepi"
+TARGET_GROUP="anepi"
 
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Error: This script must be run as root.${NC}"
   echo -e "${YELLOW}Usage: sudo ./install.sh${NC}"
   exit 1
+fi
+
+# Ensure the target user exists
+if ! id "$TARGET_USER" &>/dev/null; then
+    echo -e "${RED}Error: User '$TARGET_USER' not found.${NC}"
+    exit 1
 fi
 
 PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -57,21 +59,10 @@ log "Step 1/6: Installing system dependencies via APT..."
 apt-get update -qq
 apt-get install -y git cmake make libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv \
     autoconf automake libtool pkg-config git autoconf-archive libtool libusb-1.0-0-dev libfftw3-dev \
-    python3-gi \
-  python3-gst-1.0 \
-  gobject-introspection \
-  gir1.2-gstreamer-1.0 \
-  gir1.2-gst-plugins-base-1.0 \
-  gir1.2-gst-plugins-bad-1.0 \
-  gstreamer1.0-tools \
-  gstreamer1.0-plugins-base \
-  gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly \
-  gstreamer1.0-libav \
-  gstreamer1.0-nice \
-  libnice10 \
-  libopus-dev
+    python3-gi python3-gst-1.0 gobject-introspection gir1.2-gstreamer-1.0 \
+    gir1.2-gst-plugins-base-1.0 gir1.2-gst-plugins-bad-1.0 gstreamer1.0-tools \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libnice10 libopus-dev
 
 # 2. Install libgpiod v2 from source
 log "Step 2/6: Building and installing libgpiod v2..."
@@ -96,7 +87,7 @@ make > /dev/null
 make install > /dev/null
 
 # ---------------------------------------------------------
-# 4. Install venv, project, and Init System
+# 4. Environment Setup & Init System
 # ---------------------------------------------------------
 log "Step 4/6: Setting up Python environment..."
 
@@ -107,40 +98,53 @@ if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 
-log_sub "Activating venv and installing requirements..."
+log_sub "Installing requirements..."
 source venv/bin/activate
 pip install --upgrade pip --quiet
-
-if [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
-fi
-
-if [ -f "build.sh" ]; then
-    log_sub "Executing local build.sh..."
-    chmod +x build.sh
-    ./build.sh
-fi
-
-# Deactivate the venv shell session
-log_sub "Deactivating virtual environment session..."
+[ -f "requirements.txt" ] && pip install -r requirements.txt
+[ -f "build.sh" ] && { chmod +x build.sh; ./build.sh; }
 deactivate
 
-# RUN SYSTEM INITIALIZATION SCRIPT
+# CRITICAL: Adjust permissions BEFORE running init_sys.py
+# This allows 'anepi' to create the 'daemons/' directory
+log_sub "Applying directory permissions to $TARGET_USER..."
+chown -R "$TARGET_USER":"$TARGET_GROUP" "$PROJECT_DIR"
+chmod -R 755 "$PROJECT_DIR"
+
+# RUN SYSTEM INITIALIZATION AS 'anepi'
 if [ -f "init_sys.py" ]; then
-    log "Running System Initialization (init_sys.py)..."
-    # Use the python executable from the venv to run the script synchronously
-    "$PROJECT_DIR/venv/bin/python3" "$PROJECT_DIR/init_sys.py"
+    log "Running System Initialization (init_sys.py) as $TARGET_USER..."
+    sudo -u "$TARGET_USER" "$PROJECT_DIR/venv/bin/python3" "$PROJECT_DIR/init_sys.py"
     log_sub "Initialization complete."
 else
     log_warn "init_sys.py not found in $PROJECT_DIR, skipping..."
 fi
+
+# ---------------------------------------------------------
+# 4.5. Cleanup Legacy Services
+# ---------------------------------------------------------
+log "Step 4.5/6: Erasing legacy daemons..."
+LEGACY_SVCS=("monraf-client.service" "orchestrator-realtime.service" "monraf-main.service" "client-psd-gps.service")
+
+for svc in "${LEGACY_SVCS[@]}"; do
+    if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
+        log_sub "Stopping and removing $svc..."
+        systemctl stop "$svc" 2>/dev/null || true
+        systemctl disable "$svc" 2>/dev/null || true
+        rm -f "/etc/systemd/system/$svc"
+        rm -f "/etc/systemd/system/multi-user.target.wants/$svc"
+    fi
+done
+
+systemctl daemon-reload
+systemctl reset-failed
 
 # Set executable permissions for binary apps
 [ -f "$PROJECT_DIR/rf_app" ] && chmod +x "$PROJECT_DIR/rf_app"
 [ -f "$PROJECT_DIR/ltegps_app" ] && chmod +x "$PROJECT_DIR/ltegps_app"
 
 # ---------------------------------------------------------
-# 5. Install Daemons (Systemd)
+# 5. Install Daemons (Systemd) - Must be root
 # ---------------------------------------------------------
 log "Step 5/6: Installing Systemd Services & Timers..."
 DAEMONS_DIR="$PROJECT_DIR/daemons"
@@ -152,8 +156,8 @@ if [ -d "$DAEMONS_DIR" ]; then
     shopt -u nullglob
 
     for f in "${FILES[@]}"; do
+        log_sub "Deploying $f..."
         cp "$f" /etc/systemd/system/
-        log "Copying daemons to systemd $f..."
         systemctl daemon-reload
         systemctl enable "$f"
         systemctl restart "$f"
@@ -161,17 +165,18 @@ if [ -d "$DAEMONS_DIR" ]; then
 fi
 
 # ---------------------------------------------------------
-# 6. Final Permissions
+# 6. Shared Memory Configuration (anepi & root)
 # ---------------------------------------------------------
-log "Step 6/6: Applying Final Permissions for user '$REAL_USER'..."
-chown -R "$REAL_USER":"$REAL_GROUP" "$PROJECT_DIR"
-chmod -R 755 "$PROJECT_DIR" 
+log "Step 6/6: Configuring persistent shared memory..."
 
 SHM_FILE="/dev/shm/persistent.json"
 if [ ! -f "$SHM_FILE" ]; then
     echo "{}" > "$SHM_FILE"
 fi
-chown "$REAL_USER":"$REAL_GROUP" "$SHM_FILE"
+
+# Ownership to anepi, but 666 allows root and others to read/write
+chown "$TARGET_USER":"$TARGET_GROUP" "$SHM_FILE"
 chmod 666 "$SHM_FILE"
+log_sub "Shared memory file $SHM_FILE is now R/W for anepi and root."
 
 echo -e "\n${GREEN}   INSTALLATION COMPLETE SUCCESSFULLY         ${NC}"
