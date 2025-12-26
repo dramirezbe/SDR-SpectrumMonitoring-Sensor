@@ -44,6 +44,8 @@ def fetch_realtime_config(client):
             * Response: Objeto de respuesta HTTP completo.
             * int: Latencia de la petición en milisegundos (delta_t_ms).
     """
+    global RESET_DEMOD_CFG
+    global DEMOD_CFG_SENT
     delta_t_ms = 0 
     try:
         start_delta_t = time.perf_counter()
@@ -87,6 +89,7 @@ def fetch_realtime_config(client):
         else:
             config_obj.demodulation = None
 
+
         if json_payload.get("filter") is not None:
             config_obj.filter = FilterConfig(
                 start_freq_hz=int(json_payload.get("filter").get("start_freq_hz")),
@@ -96,7 +99,12 @@ def fetch_realtime_config(client):
         else:
             config_obj.filter = None
 
-        try:    
+        try:
+            #debug
+            config_obj.sample_rate_hz = int(2e6)
+            config_obj.antenna_amp = True
+            config_obj.vga_gain = 40    
+            config_obj.lna_gain = 0   
             return asdict(config_obj), resp, delta_t_ms
 
         except (ValueError, TypeError) as val_err:
@@ -155,6 +163,8 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     
     # 2. Lock State
     GlobalSys.set(SysState.REALTIME)
+    DEMOD_CFG_SENT = False
+    RESET_DEMOD_CFG = False
     store.add_to_persistent("delta_t_ms", delta_t_ms)
     
     timer_force_rotation = ElapsedTimer()
@@ -185,8 +195,16 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
 
                 if is_demod:
                     dsp_payload = await acquirer.acquire_raw(next_config)
+                    DEMOD_CFG_SENT = True
                 else:
                     dsp_payload = await acquirer.acquire_with_offset(next_config)
+                    if DEMOD_CFG_SENT:
+                        RESET_DEMOD_CFG = True
+                        DEMOD_CFG_SENT = False
+
+                if RESET_DEMOD_CFG:
+                    await zmq_ctrl.send_command({}) #Stop the audio demodulation in rf_engine just if demodulation changed
+                    RESET_DEMOD_CFG = False
                 
                 if dsp_payload:
                     final_payload = format_data_for_upload(dsp_payload)

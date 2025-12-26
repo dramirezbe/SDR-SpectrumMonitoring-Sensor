@@ -35,17 +35,48 @@ char* strdup_lowercase(const char *str) {
 // Configuration & Parsing
 // =========================================================
 
+// Helper to set specific default values as requested
+static void set_default_config(DesiredCfg_t *target) {
+    if (!target) return;
+
+    // Core Settings
+    target->rf_mode        = PSD_MODE;      // Default: PSD
+    target->method_psd     = WELCH;         // Default: Welch
+    
+    // Hardware Settings
+    target->center_freq    = 98000000ULL;   // Default: 98 MHz
+    target->sample_rate    = 8000000.0;     // Default: 8 MHz
+    target->lna_gain       = 0;
+    target->vga_gain       = 0;
+    target->amp_enabled    = true;          // Default: true
+    target->antenna_port   = 1;             // Default: 1
+    target->ppm_error      = 0;
+
+    // PSD Settings
+    target->rbw            = 100000;        // Default: 100 kHz
+    target->overlap        = 0.5;           // Standard 50% default
+    target->window_type    = HAMMING_TYPE;  // Default: 0
+
+    // Filter Settings
+    target->filter_enabled = false;         // Default: Filter NULL/Off
+    target->filter_cfg.start_freq_hz = 0;
+    target->filter_cfg.end_freq_hz   = 0;
+}
+
 int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
     if (json_string == NULL || target == NULL) return -1;
 
-    memset(target, 0, sizeof(DesiredCfg_t));
+    // 1. Initialize with your specific defaults
+    set_default_config(target);
     
     cJSON *root = cJSON_Parse(json_string);
-    if (root == NULL) return -1;
+    if (root == NULL) {
+        printf("===============================================JSON received NULL=========================================================\n");
+        return 0; // Return 0 because defaults are already loaded  
+    } 
 
-    // 1. rf_mode logic: Defaults to PSD_MODE. 
-    // If "demodulation" is "fm" or "am", it updates. If "None", it stays PSD.
-    target->rf_mode = PSD_MODE; 
+    // 2. Overwrite defaults ONLY if keys exist in JSON
+
     cJSON *demod = cJSON_GetObjectItemCaseSensitive(root, "demodulation");
     if (cJSON_IsString(demod) && demod->valuestring) {
         if (strcasecmp(demod->valuestring, "fm") == 0)      target->rf_mode = FM_MODE;

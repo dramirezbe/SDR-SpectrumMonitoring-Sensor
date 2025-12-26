@@ -62,6 +62,8 @@ hackrf_device* device = NULL;
 
 ring_buffer_t rb;
 ring_buffer_t audio_rb;
+// This actually allocates the memory for the variable
+atomic_bool audio_enabled = false;
 
 volatile bool stop_streaming = true; 
 volatile bool config_received = false; 
@@ -105,7 +107,9 @@ int rx_callback(hackrf_transfer* transfer) {
     if (stop_streaming) return 0; 
     if (transfer->valid_length > 0) {
         rb_write(&rb, transfer->buffer, transfer->valid_length);
-        rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
+        if (atomic_load(&audio_enabled)) {
+            rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
+        }
     }
     return 0;
 }
@@ -159,6 +163,18 @@ void on_command_received(const char *payload) {
 
     if (parse_config_rf(payload, &temp_desired) == 0) {
         printf("[RF]<<<<<zmq\n");
+
+        //Enable or disable audio based on RF mode
+        if (temp_desired.rf_mode == PSD_MODE) {
+            atomic_store(&audio_enabled, false);
+        } else {
+            // If we were OFF and are turning ON, reset the buffer to ensure fresh audio
+            if (!atomic_load(&audio_enabled)) {
+                rb_reset(&audio_rb); 
+            }
+            atomic_store(&audio_enabled, true);
+        }
+
         find_params_psd(temp_desired, &temp_hack, &temp_psd, &temp_rb);
         
         pthread_mutex_lock(&cfg_mutex);
