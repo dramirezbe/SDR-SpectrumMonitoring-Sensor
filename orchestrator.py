@@ -100,11 +100,7 @@ def fetch_realtime_config(client):
             config_obj.filter = None
 
         try:
-            #debug
-            config_obj.sample_rate_hz = int(2e6)
-            config_obj.antenna_amp = True
-            config_obj.vga_gain = 40    
-            config_obj.lna_gain = 0   
+            config_obj.rbw_hz = int(100e3) 
             return asdict(config_obj), resp, delta_t_ms
 
         except (ValueError, TypeError) as val_err:
