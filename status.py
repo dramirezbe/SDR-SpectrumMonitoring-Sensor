@@ -21,28 +21,16 @@ from utils import StatusDevice, ShmStore, RequestClient
 
 
 def get_last_ntp_sync_ms():
-    """
-    Obtiene la última sincronización NTP como un timestamp Unix en milisegundos.
-
-    Consulta el archivo de marca de tiempo del servicio systemd-timesyncd para 
-    determinar cuándo ocurrió la última sincronización de red con éxito.
-
-    Returns:
-        int: Timestamp Unix en milisegundos (ej. 1734395127137).
-        None: Si el archivo de sincronización no existe o no se puede leer.
-    """
-    # The file systemd uses to mark the last sync time
     SYNC_FILE = '/var/lib/systemd/timesync/clock'
+    OFFSET_MS = 5 * 60 * 60 * 1000
     
     try:
-        # getmtime returns seconds as a float (e.g., 1734395127.137)
+        # mtime es UTC
         timestamp_sec = os.path.getmtime(SYNC_FILE)
-        
-        # Convert to milliseconds and cast to integer (Absolute Timestamp)
-        return int(timestamp_sec * 1000)
+        # Convertimos a ms y restamos el offset para que coincida con Colombia
+        return int(timestamp_sec * 1000) - OFFSET_MS
         
     except FileNotFoundError:
-        # File doesn't exist implies sync never happened or service is off
         return None
 
 def build_status_final_payload(store, device):
