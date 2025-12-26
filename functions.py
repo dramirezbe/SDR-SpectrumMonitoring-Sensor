@@ -167,7 +167,8 @@ class CronSchedulerCampaign:
             "lna_gain": camp.get('lna_gain'),
             "vga_gain": camp.get('vga_gain'),
             "antenna_amp": camp.get('antenna_amp'),
-            "filter": camp.get('filter')
+            "filter": camp.get('filter'),
+            "method_psd": "pfb"
         }
         try:
             store.update_from_dict(dict_persist_params)
