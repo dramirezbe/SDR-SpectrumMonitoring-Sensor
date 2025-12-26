@@ -7,6 +7,7 @@ import traceback
 import time
 import cfg
 import sys
+import signal  # Added for signal handling
 
 # Initialize Logger
 log = cfg.set_logger()
@@ -20,7 +21,6 @@ from websockets.protocol import State
 try:
     from websockets.legacy.exceptions import InvalidStatusCode, InvalidHandshake
 except ImportError:
-    # Handle versions where legacy is merged or named differently
     from websockets.exceptions import InvalidStatusCode, InvalidHandshake
 
 import gi
@@ -33,7 +33,7 @@ from gi.repository import Gst, GstWebRTC, GstSdp, GLib
 # =========================
 # Config
 # =========================
-SENSOR_ID   = cfg.get_mac()
+SENSOR_ID   = "d8:3a:dd:f7:1a:cc"
 SIGNAL_URL  = f"wss://rsm.ane.gov.co:12443/ws/signal/{SENSOR_ID}"
 STUN_SERVER = "stun://stun.l.google.com:19302"
 
@@ -44,7 +44,7 @@ HDR_FMT  = "!IIIHH"
 HDR_SIZE = struct.calcsize(HDR_FMT)
 MAGIC    = 0x4F505530
 DEFAULT_FRAME_MS = 20
-RETRY_SECONDS = 5 # Increased slightly for stability
+RETRY_SECONDS = 5
 
 Gst.init(None)
 
@@ -62,7 +62,6 @@ class Publisher:
     def __init__(self, loop, ws):
         self.loop = loop
         self.ws = ws
-        self.cand_out = 0
         self.glib_loop = GLib.MainLoop()
         self.glib_thread = threading.Thread(target=self.glib_loop.run, daemon=True)
         
@@ -90,10 +89,19 @@ class Publisher:
         log.info("WebRTC Pipeline PLAYING")
 
     def stop(self):
+        log.info("Stopping Publisher...")
         self._running = False
-        self.pipe.set_state(Gst.State.NULL)
+        # Set state to NULL to release GStreamer resources
+        if self.pipe:
+            self.pipe.set_state(Gst.State.NULL)
+        
+        # Stop GLib loop
         if self.glib_loop.is_running():
             GLib.idle_add(self.glib_loop.quit)
+        
+        # We don't necessarily join the thread here to avoid blocking the event loop,
+        # but we ensure the pipeline is dead.
+        log.info("Publisher stopped.")
 
     def on_bus(self, bus, msg):
         if msg.type == Gst.MessageType.ERROR:
@@ -101,9 +109,10 @@ class Publisher:
             log.error(f"[GST] {err}")
 
     def _ws_send(self, obj):
-     # Check the internal state machine directly
-     if self.ws and self.ws.state is State.OPEN:
-         asyncio.run_coroutine_threadsafe(self.ws.send(json.dumps(obj)), self.loop)
+        if self.ws and self.ws.state is State.OPEN:
+            # Check if loop is still running before scheduling
+            if not self.loop.is_closed():
+                asyncio.run_coroutine_threadsafe(self.ws.send(json.dumps(obj)), self.loop)
 
     def on_ice_candidate(self, element, mline, candidate):
         self._ws_send({"type":"candidate","mlineindex":int(mline),"candidate":candidate})
@@ -135,6 +144,7 @@ class Publisher:
         if not self._running: return
         dur_ns = int(DEFAULT_FRAME_MS * 1e6)
         def _do():
+            if not self._running: return False
             buf = Gst.Buffer.new_allocate(None, len(opus_bytes), None)
             buf.fill(0, opus_bytes)
             buf.pts = buf.dts = self._pts
@@ -145,70 +155,126 @@ class Publisher:
         GLib.idle_add(_do)
 
 # =========================
-# Shared State for TCP -> WebRTC
+# Shared State
 # =========================
 current_publisher = None
+shutdown_event = None
 
 async def tcp_reader_task():
-    """ Keeps the TCP server alive regardless of WebRTC status """
     async def handle_client(reader, writer):
         log.info("[TCP] C Motor connected")
         try:
-            while True:
+            while not shutdown_event.is_set():
+                # Use wait_for so we can break on shutdown even if no data is coming
                 hdr = await reader.readexactly(HDR_SIZE)
                 magic, seq, sr, ch, plen = struct.unpack(HDR_FMT, hdr)
                 payload = await reader.readexactly(plen)
                 
-                # Push to the GLOBAL publisher if one is active
                 if current_publisher and current_publisher._running:
                     current_publisher.push_opus_frame(payload)
         except Exception as e:
-            log.warning(f"[TCP] Client disconnected: {e}")
+            if not shutdown_event.is_set():
+                log.warning(f"[TCP] Client disconnected: {e}")
         finally:
             writer.close()
+            await writer.wait_closed()
 
     server = await asyncio.start_server(handle_client, TCP_HOST, TCP_PORT)
+    log.info(f"[TCP] Server started on {TCP_HOST}:{TCP_PORT}")
+    
     async with server:
-        await server.serve_forever()
+        # Run until shutdown_event is set
+        await shutdown_event.wait()
+        log.info("[TCP] Shutting down server...")
+        server.close()
+        await server.wait_closed()
 
 async def run_signaling_session():
     global current_publisher
     
-    # added connect_timeout and start_timeout to prevent hanging if DNS is slow
-    async with websockets.connect(SIGNAL_URL, open_timeout=10, close_timeout=5) as ws:
-        await ws.send(json.dumps({"role":"sensor","sensor_id":SENSOR_ID}))
-        log.info("[WS] Connected and registered")
-        
-        loop = asyncio.get_running_loop()
-        pub = Publisher(loop, ws)
-        current_publisher = pub
-        pub.start()
+    try:
+        async with websockets.connect(SIGNAL_URL, open_timeout=10, close_timeout=5) as ws:
+            await ws.send(json.dumps({"role":"sensor","sensor_id":SENSOR_ID}))
+            log.info("[WS] Connected and registered")
+            
+            loop = asyncio.get_running_loop()
+            pub = Publisher(loop, ws)
+            current_publisher = pub
+            pub.start()
 
-        try:
-            async for msg in ws:
-                obj = json.loads(msg)
-                if obj.get("type") == "answer":
-                    pub.set_answer(obj["sdp"])
-                elif obj.get("type") == "candidate":
-                    pub.add_candidate(obj["mlineindex"], obj["candidate"])
-        finally:
-            log.info("[WS] Connection closed, cleaning up publisher...")
-            pub.stop()
-            current_publisher = None
+            try:
+                # We check shutdown_event inside the loop
+                while not shutdown_event.is_set():
+                    try:
+                        # Use wait_for to check the shutdown flag periodically 
+                        # or just rely on the connection closing
+                        msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        obj = json.loads(msg)
+                        if obj.get("type") == "answer":
+                            pub.set_answer(obj["sdp"])
+                        elif obj.get("type") == "candidate":
+                            pub.add_candidate(obj["mlineindex"], obj["candidate"])
+                    except asyncio.TimeoutError:
+                        continue
+            finally:
+                pub.stop()
+                current_publisher = None
+    except Exception as e:
+        if not shutdown_event.is_set():
+            raise e
 
 async def main():
-    # Start TCP server once and let it run forever
-    asyncio.create_task(tcp_reader_task())
+    global shutdown_event
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    exit_code = 0  # Default to success
+
+    # Define the shutdown handler
+    def ask_exit():
+        log.info("[SYSTEM] Shutdown signal received...")
+        shutdown_event.set()
+
+    # Register signals for graceful termination
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, ask_exit)
+
+    # Start TCP server
+    tcp_task = asyncio.create_task(tcp_reader_task())
     
-    while True:
-        try:
-            await run_signaling_session()
-        except (OSError, ConnectionClosed, InvalidStatusCode, InvalidHandshake, asyncio.TimeoutError) as e:
-            log.error(f"[SYSTEM] Connection failed: {type(e).__name__}. Retrying in {RETRY_SECONDS}s...")
-        except Exception as e:
-            log.critical(f"[SYSTEM] Unexpected error: {e}\n{traceback.format_exc()}")
+    try:
+        # Connection Retry Loop
+        while not shutdown_event.is_set():
+            try:
+                await run_signaling_session()
+            except (OSError, ConnectionClosed, InvalidStatusCode, InvalidHandshake, asyncio.TimeoutError) as e:
+                # These are "expected" network errors; we log and retry
+                if not shutdown_event.is_set():
+                    log.error(f"[SYSTEM] Connection failed: {type(e).__name__}. Retrying in {RETRY_SECONDS}s...")
+            except Exception as e:
+                # This is a critical, unexpected error
+                if not shutdown_event.is_set():
+                    log.critical(f"[SYSTEM] Unexpected error: {e}\n{traceback.format_exc()}")
+                    exit_code = 1  # Set error code
+                    shutdown_event.set()  # Trigger shutdown of other tasks
+                    break 
+            
+            if not shutdown_event.is_set():
+                # Wait with a check for the shutdown event
+                try:
+                    await asyncio.wait_for(shutdown_event.wait(), timeout=RETRY_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+
+    finally:
+        log.info("[SYSTEM] Cleaning up tasks...")
+        # Ensure the shutdown event is set so the TCP task knows to stop
+        shutdown_event.set() 
         
-        await asyncio.sleep(RETRY_SECONDS)
+        # Wait for the TCP task to finish its own cleanup
+        await tcp_task
+        log.info(f"[SYSTEM] Shutdown complete with exit code {exit_code}.")
+    
+    return exit_code
 
 if __name__ == "__main__":
     rc = cfg.run_and_capture(main)

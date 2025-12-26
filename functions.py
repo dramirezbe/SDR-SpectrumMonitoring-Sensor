@@ -244,83 +244,81 @@ class CronSchedulerCampaign:
         self._log.info("="*60)
         
         return any_active
-    
+
 class SimpleDCSpikeCleaner:
     """
-    Algoritmo de limpieza para eliminar el pico DC del centro del espectro.
-
-    Utiliza una técnica de interpolación lineal con ruido aleatorio basado en la 
-    desviación estándar de los bins vecinos para "rellenar" la zona afectada 
-    por el artefacto DC del hardware.
+    Limpia el artefacto DC reemplazando el 2% central con una línea 
+    que une los extremos, añadiendo ruido local que se adapta a 
+    la potencia de los vecinos.
     """
-    def __init__(self, search_frac=0.05, width_frac=0.005, neighbor_bins=20):
-        """
-        Args:
-            search_frac (float): Fracción del espectro donde buscar el pico máximo.
-            width_frac (float): Ancho de la zona a eliminar y reconstruir.
-            neighbor_bins (int): Cantidad de bins laterales para estimar el ruido base.
-        """
-        self.search_frac = search_frac
+    def __init__(self, width_frac=0.02, neighbor_bins=20):
         self.width_frac = width_frac
         self.neighbor_bins = neighbor_bins
+        self._eps_mw = 1e-18
+
+    def _dbm_to_mw(self, x_dbm):
+        return 10.0 ** (np.asarray(x_dbm, float) / 10.0)
+
+    def _mw_to_dbm(self, x_mw):
+        x = np.maximum(np.asarray(x_mw, float), self._eps_mw)
+        return 10.0 * np.log10(x)
+
+    def _get_local_stats(self, data_mw):
+        """Calcula mediana y sigma robusta."""
+        if data_mw.size == 0:
+            return 0.0, 0.0
+        med = np.median(data_mw)
+        # Sigma basada en MAD (Median Absolute Deviation)
+        mad = np.median(np.abs(data_mw - med))
+        sigma = 1.4826 * mad
+        return med, sigma
 
     def clean(self, Pxx):
-        """
-        Aplica el algoritmo de limpieza sobre un array de densidades espectrales.
-
-        Args:
-            Pxx (np.array): Array original con los datos de potencia (PSD).
-
-        Returns:
-            np.array: Array procesado con el pico DC mitigado.
-        """
-        Pxx = np.asarray(Pxx, float).copy()
-        n = len(Pxx)
-        if n < self.neighbor_bins * 2: 
-            return Pxx
-
+        # 1) Preparación y conversión a mW
+        Pxx_mw = self._dbm_to_mw(Pxx)
+        n = len(Pxx_mw)
         mid = n // 2
-        search_radius = int(n * (self.search_frac / 2))
-        s_start = max(0, mid - search_radius)
-        s_end = min(n, mid + search_radius)
-        peak_idx = s_start + np.argmax(Pxx[s_start:s_end])
-
-        width_radius = max(1, int(n * (self.width_frac / 2)))
-        idx0 = max(0, peak_idx - width_radius)
-        idx1 = min(n - 1, peak_idx + width_radius)
-
-        l_neighbor = Pxx[max(0, idx0 - self.neighbor_bins): idx0]
-        r_neighbor = Pxx[idx1 + 1: min(n, idx1 + 1 + self.neighbor_bins)]
-        neighbors = np.concatenate([l_neighbor, r_neighbor])
         
-        local_sigma = np.std(neighbors) if neighbors.size > 0 else 0.0
+        # Definir el rango del 2% central
+        half_width = max(1, int(n * (self.width_frac / 2)))
+        idx0 = mid - half_width
+        idx1 = mid + half_width
+        
+        if idx0 <= self.neighbor_bins or idx1 >= n - self.neighbor_bins:
+            return Pxx # Array muy pequeño para procesar
 
-        y0, y1 = Pxx[idx0], Pxx[idx1]
+        # 2) Analizar vecinos a la izquierda y derecha para detectar cambios de potencia
+        l_neighbor = Pxx_mw[idx0 - self.neighbor_bins : idx0]
+        r_neighbor = Pxx_mw[idx1 + 1 : idx1 + 1 + self.neighbor_bins]
+        
+        val_l, sig_l = self._get_local_stats(l_neighbor)
+        val_r, sig_r = self._get_local_stats(r_neighbor)
+
+        # 3) Reconstrucción
         num_points = idx1 - idx0 + 1
-        linear_trend = np.linspace(y0, y1, num_points)
-
-        safe_scale = max(0.0, local_sigma)
-        noise = np.random.normal(0, safe_scale, num_points)
         
-        Pxx[idx0:idx1 + 1] = linear_trend + noise
-        return Pxx
+        # Generar la línea base (la pendiente entre extremos)
+        # Usamos los valores exactos de los bordes para que no haya saltos
+        edge_l = Pxx_mw[idx0 - 1]
+        edge_r = Pxx_mw[idx1 + 1]
+        interp_line = np.linspace(edge_l, edge_r, num_points)
+        
+        # Generar un perfil de ruido que transiciona de sig_l a sig_r
+        # Esto hace que si un lado es más "ruidoso" que el otro, se note el cambio
+        sig_profile = np.linspace(sig_l, sig_r, num_points)
+        noise = np.random.normal(0, 1, num_points) * sig_profile
+        
+        # Combinar y asegurar que no haya valores negativos antes de volver a dBm
+        fill = interp_line + noise
+        fill = np.maximum(fill, self._eps_mw)
+        
+        # 4) Aplicar corrección
+        Pxx_mw[idx0 : idx1 + 1] = fill
+        
+        return self._mw_to_dbm(Pxx_mw)
     
 class AcquireRealtime:
-    """
-    Controlador de adquisición de alta fidelidad para tiempo real.
-
-    Implementa una técnica de desplazamiento de frecuencia (offset) y recorte 
-    (crop) para mover el artefacto DC fuera de la banda de interés del usuario,
-    garantizando un espectro más limpio.
-    """
-    def __init__(self, controller, cleaner, hardware_max_bw=20_000_000, user_safe_bw=18_000_000, log=cfg.set_logger()):
-        """
-        Args:
-            controller (ZmqPairController): Controlador de comunicación ZMQ.
-            cleaner (SimpleDCSpikeCleaner): Instancia del limpiador de picos.
-            hardware_max_bw (int): Ancho de banda máximo real del hardware.
-            user_safe_bw (int): Límite de ancho de banda para aplicar la técnica de offset.
-        """
+    def __init__(self, controller, cleaner, hardware_max_bw=20_000_000, user_safe_bw=18_000_000, log=None):
         self._log = log
         self.controller = controller
         self.cleaner = cleaner
@@ -330,33 +328,30 @@ class AcquireRealtime:
 
     async def acquire_with_offset(self, user_config):
         """
-        Adquiere datos aplicando un desplazamiento de frecuencia preventivo.
-
-        Si el ancho de banda solicitado es <= 18MHz, desplaza la frecuencia central 
-        del hardware 1MHz hacia arriba. Esto hace que el pico DC aparezca en +1MHz, 
-        el cual es limpiado y posteriormente recortado para entregar exactamente 
-        la frecuencia central que el usuario pidió sin el artefacto en el centro.
-
-        Args:
-            user_config (dict): Parámetros solicitados por el usuario.
-
-        Returns:
-            dict: Payload procesado, limpiado y recortado.
+        Aplica Offset + Limpieza Central + Recorte.
         """
         requested_fs = user_config.get("sample_rate_hz", 0)
         original_center = user_config.get("center_freq_hz")
 
+        # Caso A: BW pequeño permite mover el DC fuera del centro del usuario
         if requested_fs <= self.SAFE_BW:
             hw_config = user_config.copy()
             hw_config["sample_rate_hz"] = self.HW_BW
+            # Desplazamos el hardware para que su centro (y su spike) no coincida con el del usuario
             hw_config["center_freq_hz"] = original_center + self.OFFSET
             
             raw_payload = await self._send_and_receive(hw_config)
             if not raw_payload: return None
 
-            pxx = np.array(raw_payload["Pxx"])
-            pxx_cleaned = self.cleaner.clean(pxx)
+            # 1. Convertimos a array
+            pxx_raw = np.array(raw_payload["Pxx"])
+            
+            # 2. LIMPIEZA: El nuevo cleaner actúa sobre el 2% central del array de 20MHz.
+            # Aquí es donde se elimina el spike DC físico del hardware.
+            pxx_cleaned = self.cleaner.clean(pxx_raw)
 
+            # 3. RECORTE: Extraemos la zona que el usuario pidió del array ya limpio.
+            # IMPORTANTE: Usamos pxx_cleaned, no pxx_raw.
             final_data = self._extract_sub_region(
                 pxx_cleaned, 
                 hw_center=original_center + self.OFFSET,
@@ -365,28 +360,22 @@ class AcquireRealtime:
                 target_bw=requested_fs
             )
             return final_data
+
+        # Caso B: BW grande, solo podemos limpiar el centro y entregar todo
         else:
-            self._log.info(f"Requested BW {requested_fs} > 18MHz. Skipping offset/crop.")
+            if self._log: self._log.info(f"BW {requested_fs}Hz muy grande. Solo limpieza central.")
             raw_payload = await self._send_and_receive(user_config)
             if not raw_payload: return None
             
             pxx = np.array(raw_payload["Pxx"])
+            # Limpia el spike en el centro exacto del espectro solicitado
             raw_payload["Pxx"] = self.cleaner.clean(pxx).tolist()
             return raw_payload
-        
+
     async def acquire_raw(self, config):
-        """
-        Realiza una adquisición directa sin desplazamientos ni recortes.
-
-        Args:
-            config (dict): Parámetros de configuración de radio.
-
-        Returns:
-            dict: Payload con corrección básica de picos.
-        """
+        """Adquisición estándar con limpieza."""
         payload = await self._send_and_receive(config)
         if not payload or "Pxx" not in payload:
-            self._log.warning("Acquisition failed or returned empty payload.")
             return None
 
         pxx = np.array(payload["Pxx"])
@@ -394,7 +383,6 @@ class AcquireRealtime:
         return payload
 
     async def _send_and_receive(self, config):
-        """Envía comando al motor RF y espera la respuesta."""
         await self.controller.send_command(config)
         try:
             return await asyncio.wait_for(self.controller.wait_for_data(), timeout=10)
@@ -402,18 +390,18 @@ class AcquireRealtime:
             return None
 
     def _extract_sub_region(self, pxx, hw_center, hw_bw, target_center, target_bw):
-        """
-        Calcula y extrae los índices del array correspondientes a la sub-banda.
-        """
+        """Extrae la sub-banda del array ya procesado."""
         num_bins = len(pxx)
         hz_per_bin = hw_bw / num_bins
         hw_min_f = hw_center - (hw_bw / 2)
+        
         target_min_f = target_center - (target_bw / 2)
         target_max_f = target_center + (target_bw / 2)
 
         start_idx = int((target_min_f - hw_min_f) / hz_per_bin)
         end_idx = int((target_max_f - hw_min_f) / hz_per_bin)
 
+        # Clamp de índices
         start_idx = max(0, start_idx)
         end_idx = min(num_bins, end_idx)
 

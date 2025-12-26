@@ -174,7 +174,7 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     timer_force_rotation.init_count(300) 
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
-    cleaner = SimpleDCSpikeCleaner(search_frac=0.05, width_frac=0.005, neighbor_bins=2)
+    cleaner = SimpleDCSpikeCleaner(width_frac=0.02, neighbor_bins=10)
 
     try:
         async with controller as zmq_ctrl:
