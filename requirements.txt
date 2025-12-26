@@ -10,6 +10,7 @@ ntplib==0.4.0
 numpy==2.3.5
 packaging==25.0
 pillow==12.0.0
+PyGObject-stubs==2.16.0
 pyparsing==3.2.5
 python-crontab==3.3.0
 python-dateutil==2.9.0.post0
@@ -17,5 +18,7 @@ python-dotenv==1.2.1
 pyzmq==27.1.0
 requests==2.32.5
 six==1.17.0
+typing_extensions==4.15.0
 urllib3==2.5.0
+websockets==15.0.1
 zmq==0.0.0

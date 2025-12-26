@@ -10,6 +10,9 @@ import cfg
 # Initialize Logger
 log = cfg.set_logger()
 
+import site
+site.addsitedir('/usr/lib/python3/dist-packages')
+
 import websockets
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
