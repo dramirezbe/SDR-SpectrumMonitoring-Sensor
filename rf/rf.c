@@ -138,15 +138,25 @@ int recover_hackrf(void) {
     return -1;
 }
 
-void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack) {
+void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, int rf_mode, float am_depth, float fm_dev) {
     if (!zmq_channel || !psd_array || length <= 0) return;
+    
     cJSON *root = cJSON_CreateObject();
     double fs = local_hack->sample_rate;
     double start_freq = (double)local_hack->center_freq - (fs / 2.0);
     double end_freq   = (double)local_hack->center_freq + (fs / 2.0);
+    
     cJSON_AddNumberToObject(root, "start_freq_hz", start_freq);
     cJSON_AddNumberToObject(root, "end_freq_hz", end_freq);
+    
+    if (rf_mode == FM_MODE) {
+        cJSON_AddNumberToObject(root, "excursion_hz", (double)fm_dev);
+    } else if (rf_mode == AM_MODE){
+        cJSON_AddNumberToObject(root, "depth", (double)am_depth * 100.0);
+    }
+    
     cJSON_AddItemToObject(root, "Pxx", cJSON_CreateDoubleArray(psd_array, length));
+    
     char *json_string = cJSON_PrintUnformatted(root); 
     if (json_string) {
         zpair_send(zmq_channel, json_string);
@@ -580,7 +590,14 @@ int main() {
                     if (local_desired.method_psd == PFB) execute_pfb_psd(sig, &local_psd, freq, psd);
                     else execute_welch_psd(sig, &local_psd, freq, psd);
                     
-                    publish_results(psd, local_psd.nperseg, &local_hack);
+                    publish_results(
+                        psd, 
+                        local_psd.nperseg, 
+                        &local_hack, 
+                        (int)local_desired.rf_mode, 
+                        audio_ctx.am_depth.depth_ema, 
+                        audio_ctx.fm_dev.dev_ema_hz
+                    );
                 } else {
                     fprintf(stderr, "[RF] Error: PSD buffer allocation failed.\n");
                 }

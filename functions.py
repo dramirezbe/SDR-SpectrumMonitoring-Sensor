@@ -18,6 +18,7 @@ import logging
 import numpy as np
 import asyncio
 from copy import deepcopy
+import subprocess
 
 class SysState(Enum):
     """
@@ -97,8 +98,6 @@ def format_data_for_upload(payload):
         post_dict.update({"depth": int(payload.get("depth"))})
 
     return post_dict
-
-
 
 class CronSchedulerCampaign:
     """

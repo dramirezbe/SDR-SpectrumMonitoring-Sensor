@@ -87,7 +87,7 @@ def get_time_ms() -> int:
     """Timestamp en ms ajustado a Colombia (UTC-5)."""
     return int(time.time() * 1000) - (5 * 60 * 60 * 1000)
 
-def human_readable(ts_ms: int, target_tz: str = "America/Bogota") -> str:
+def human_readable(ts_ms: int, target_tz: str = "UTC") -> str:
     """Convierte un timestamp ms a cadena legible."""
     dt_utc = datetime.fromtimestamp(ts_ms / 1000, tz=ZoneInfo("UTC"))
     dt_local = dt_utc.astimezone(ZoneInfo(target_tz))

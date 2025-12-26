@@ -25,6 +25,10 @@ import sys
 import asyncio
 from dataclasses import asdict
 import time
+import subprocess
+
+WEBRTC_SCRIPT = cfg.PROJECT_ROOT / "server_webrtc.py"
+WEBRTC_CMD = ["/usr/bin/python3", str(WEBRTC_SCRIPT)]
 
 # --- CONFIG FETCHING ---
 def fetch_realtime_config(client):
@@ -44,8 +48,6 @@ def fetch_realtime_config(client):
             * Response: Objeto de respuesta HTTP completo.
             * int: Latencia de la petición en milisegundos (delta_t_ms).
     """
-    global RESET_DEMOD_CFG
-    global DEMOD_CFG_SENT
     delta_t_ms = 0 
     try:
         start_delta_t = time.perf_counter()
@@ -100,7 +102,6 @@ def fetch_realtime_config(client):
             config_obj.filter = None
 
         try:
-            config_obj.rbw_hz = int(100e3) 
             return asdict(config_obj), resp, delta_t_ms
 
         except (ValueError, TypeError) as val_err:
@@ -159,6 +160,7 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     
     # 2. Lock State
     GlobalSys.set(SysState.REALTIME)
+    webrtc_proc = None
     DEMOD_CFG_SENT = False
     RESET_DEMOD_CFG = False
     store.add_to_persistent("delta_t_ms", delta_t_ms)
@@ -187,12 +189,20 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                     break
 
                 #StateMachine Realtime
-                is_demod = bool(next_config.get("demodulation"))
+                is_demod = bool(next_config.get("demodulation", False))
 
                 if is_demod:
+                    if webrtc_proc is None or webrtc_proc.poll() is not None:
+                        log.info("[REALTIME] Starting WebRTC Server...")
+                        webrtc_proc = subprocess.Popen(WEBRTC_CMD)
                     dsp_payload = await acquirer.acquire_raw(next_config)
                     DEMOD_CFG_SENT = True
                 else:
+                    if webrtc_proc is not None:
+                        log.info("[REALTIME] Stopping WebRTC Server...")
+                        webrtc_proc.terminate()
+                        webrtc_proc.wait() # Ensure it's fully closed
+                        webrtc_proc = None # Reset the handle
                     dsp_payload = await acquirer.acquire_with_offset(next_config)
                     if DEMOD_CFG_SENT:
                         RESET_DEMOD_CFG = True
@@ -204,6 +214,10 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 
                 if dsp_payload:
                     final_payload = format_data_for_upload(dsp_payload)
+
+                    #debug
+                    if final_payload.get("excursion_hz", False):
+                        log.info(f"Excursion: {final_payload['excursion_hz']} Hz")
 
                     rc, _ = client.post_json(cfg.DATA_URL, final_payload)
                     if rc != 0:
@@ -223,9 +237,17 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 await asyncio.sleep(0.05)
 
     except Exception as e:
+        if webrtc_proc:
+            webrtc_proc.terminate()
         log.error(f"[REALTIME] Critical loop error: {e}")
     finally:
         log.info("[REALTIME] Reverting to IDLE.")
+        if webrtc_proc and webrtc_proc.poll() is None:
+            webrtc_proc.terminate()
+            try:
+                webrtc_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                webrtc_proc.kill() # Force kill if it won't stop
         GlobalSys.set(SysState.IDLE)
     
     return 0
@@ -301,35 +323,41 @@ async def main() -> int:
     Returns:
         int: Código de salida del script.
     """
-    time.sleep(1) 
-    store = ShmStore()
-    client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
-    scheduler = CronSchedulerCampaign(
-        poll_interval_s=cfg.INTERVAL_REQUEST_CAMPAIGNS_S, 
-        python_env=cfg.PYTHON_ENV_STR,
-        cmd=str((cfg.PROJECT_ROOT / "campaign_runner.py").absolute()), 
-        logger=log
-    )
-    
-    tim_check_realtime = ElapsedTimer()
-    tim_check_campaign = ElapsedTimer()
-    
-    tim_check_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
-    tim_check_campaign.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
-    
-    log.info("Orchestrator online. Monitoring tasks...")
+    try:
+        time.sleep(1) 
+        store = ShmStore()
+        client = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=True, logger=log)
+        scheduler = CronSchedulerCampaign(
+            poll_interval_s=cfg.INTERVAL_REQUEST_CAMPAIGNS_S, 
+            python_env=cfg.PYTHON_ENV_STR,
+            cmd=str((cfg.PROJECT_ROOT / "campaign_runner.py").absolute()), 
+            logger=log
+        )
+        
+        tim_check_realtime = ElapsedTimer()
+        tim_check_campaign = ElapsedTimer()
+        
+        tim_check_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
+        tim_check_campaign.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
+        
+        log.info("Orchestrator online. Monitoring tasks...")
 
-    while True:
-        if GlobalSys.is_idle() and tim_check_realtime.time_elapsed():
-            await run_realtime_logic(client, store)
-            tim_check_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
+        while True:
+            if GlobalSys.is_idle() and tim_check_realtime.time_elapsed():
+                await run_realtime_logic(client, store)
+                tim_check_realtime.init_count(cfg.INTERVAL_REQUEST_REALTIME_S)
 
-        if GlobalSys.is_idle() and tim_check_campaign.time_elapsed():
-            await run_campaigns_logic(client, store, scheduler)
-            tim_check_campaign.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
+            if GlobalSys.is_idle() and tim_check_campaign.time_elapsed():
+                await run_campaigns_logic(client, store, scheduler)
+                tim_check_campaign.init_count(cfg.INTERVAL_REQUEST_CAMPAIGNS_S)
 
-        await asyncio.sleep(0.1)
-    return 0
+            await asyncio.sleep(0.1)
+    except Exception as e:
+        log.error(f"Error in Orchestrator: {e}")
+        return 1
+    finally:
+        log.info("Orchestrator offline.")
+        return 0
 
 if __name__ == "__main__":
     rc = cfg.run_and_capture(main)
