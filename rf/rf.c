@@ -33,9 +33,6 @@
 #include "utils.h"
 #include "parser.h"
 #include "chan_filter.h"
-#include "am_radio_local.h"
-#include "net_audio_retry.h"
-#include "fm_radio.h"
 #include "audio_stream_ctx.h"
 #include "am_radio_local.h"
 #include "net_audio_retry.h"
@@ -45,24 +42,24 @@
 #ifndef NO_COMMON_LIBS
     #include "bacn_gpio.h"
 #endif
-// ========================= IQ Channel Filter (rf_audio.c variables)
-static int    IQ_FILTER_ENABLE        = 1;
-// Recommended two-sided channel BW:
-// AM voice-like channel BW ~10kHz (±5kHz)
-static float  IQ_FILTER_BW_AM_HZ      = 10000.0f;
-// Optional: apply same channel filter to IQ before PSD in FM/AM (default OFF to preserve current PSD behavior)
-static int    IQ_FILTER_APPLY_TO_PSD  = 1;
 // =========================================================
 // GLOBAL VARIABLES
 // =========================================================
 
+// ========================= IQ Channel Filter (rf_audio.c variables)
+static int    IQ_FILTER_ENABLE        = 1;
+
+// Recommended two-sided channel BW:
+
+// AM voice-like channel BW ~10kHz (±5kHz)
+static float  IQ_FILTER_BW_AM_HZ      = 10000.0f;
+
+// Optional: apply same channel filter to IQ before PSD in FM/AM (default OFF to preserve current PSD behavior)
+static int    IQ_FILTER_APPLY_TO_PSD  = 1;
+
 zpair_t *zmq_channel = NULL;
 hackrf_device* device = NULL;
-ring_buffer_t rb;
 
-// Two ring buffers:
-//   rb         = large buffer used for acquisition/full-PSD (main thread reads)
-//   audio_rb   = small buffer used only by audio thread (audio thread reads)
 ring_buffer_t rb;
 ring_buffer_t audio_rb;
 
@@ -78,15 +75,26 @@ RB_cfg_t rb_cfg = {0};
 // Track the ACTUAL hardware state for Lazy Tuning
 SDR_cfg_t current_hw_cfg = {0};
 
-pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-// Audio thread control
 pthread_t audio_thread;
 volatile bool audio_thread_running = false;
+
+pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // =========================================================
 // UTILITY FUNCTIONS
 // =========================================================
+// =========================================================
+// HELPERS
+static inline uint64_t now_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
+}
+
+static inline void msleep_int(int ms) {
+    if (ms <= 0) return;
+    usleep((useconds_t)ms * 1000);
+}
 
 void handle_sigint(int sig) {
     (void)sig;
@@ -95,8 +103,10 @@ void handle_sigint(int sig) {
 
 int rx_callback(hackrf_transfer* transfer) {
     if (stop_streaming) return 0; 
-    rb_write(&rb, transfer->buffer, transfer->valid_length);
-    rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
+    if (transfer->valid_length > 0) {
+        rb_write(&rb, transfer->buffer, transfer->valid_length);
+        rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
+    }
     return 0;
 }
 
@@ -167,18 +177,6 @@ void on_command_received(const char *payload) {
             printf("[GPIO] selected port: %d\n", temp_desired.antenna_port);
         #endif
     }
-}
-
-// HELPERS
-static inline uint64_t now_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
-}
-
-static inline void msleep_int(int ms) {
-    if (ms <= 0) return;
-    usleep((useconds_t)ms * 1000);
 }
 
 void* audio_thread_fn(void* arg) {
@@ -384,6 +382,7 @@ void* audio_thread_fn(void* arg) {
 int main() {
     signal(SIGINT, handle_sigint);
     signal(SIGTERM, handle_sigint);
+    signal(SIGPIPE, SIG_IGN); // Added to prevent crash on broken TCP audio pipes
 
     char *ipc_addr = getenv_c("IPC_ADDR");
     if (!ipc_addr) ipc_addr = strdup("ipc:///tmp/rf_engine");
@@ -394,10 +393,41 @@ int main() {
     if (!zmq_channel) return 1;
     zpair_start(zmq_channel); 
 
-    if (hackrf_init() != HACKRF_SUCCESS) return 1;
+    printf("[RF] Initializing HackRF Library...\n");
+    while (hackrf_init() != HACKRF_SUCCESS) {
+        fprintf(stderr, "[RF] Error: HackRF Init failed. Retrying in 5s...\n");
+        sleep(5);
+    }
+    printf("[RF] HackRF Library Initialized.\n");
 
+    // --- AUDIO & RING BUFFER INIT ---
     size_t FIXED_BUFFER_SIZE = 100 * 1024 * 1024; 
     rb_init(&rb, FIXED_BUFFER_SIZE);
+    
+    // Audio ring buffer initialization
+    size_t AUDIO_BUFFER_SIZE = AUDIO_CHUNK_SAMPLES * 2 * 8;
+    rb_init(&audio_rb, AUDIO_BUFFER_SIZE);
+
+    // Audio resource allocation
+    fm_radio_t *radio_ptr = (fm_radio_t*)malloc(sizeof(fm_radio_t));
+    am_radio_local_t *am_ptr = (am_radio_local_t*)malloc(sizeof(am_radio_local_t));
+    if (!radio_ptr || !am_ptr) {
+        fprintf(stderr, "[RF] FATAL: malloc radio resources failed\n");
+        return 1;
+    }
+    memset(radio_ptr, 0, sizeof(fm_radio_t));
+    memset(am_ptr, 0, sizeof(am_radio_local_t));
+
+    bool audio_thread_created = false;
+    double last_radio_sample_rate = 0.0;
+
+    // Audio streaming context setup
+    audio_stream_ctx_t audio_ctx;
+    audio_stream_ctx_defaults(&audio_ctx, radio_ptr, am_ptr);
+
+    fprintf(stderr, "[AUDIO] Stream target TCP %s:%d (Opus sr=%d ch=%d)\n",
+            audio_ctx.tcp_host, audio_ctx.tcp_port,
+            audio_ctx.opus_sample_rate, audio_ctx.opus_channels);
 
     struct timespec last_activity_time;
     clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
@@ -408,7 +438,7 @@ int main() {
     DesiredCfg_t local_desired;
 
     while (keep_running) {
-        // --- 1. IDLE / TIMEOUT MANAGEMENT ---
+        // --- 1. IDLE / TIMEOUT MANAGEMENT (Preserved) ---
         if (!config_received) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -434,7 +464,12 @@ int main() {
         memcpy(&local_rb, &rb_cfg, sizeof(RB_cfg_t));
         memcpy(&local_psd, &psd_cfg, sizeof(PsdConfig_t));
         memcpy(&local_desired, &desired_config, sizeof(DesiredCfg_t));
-        config_received = false; // Reset inside mutex to prevent race condition
+        
+        // Audio Logic: Update audio thread mode/fs atomics
+        atomic_store(&audio_ctx.current_mode, (int)local_desired.rf_mode);
+        atomic_store(&audio_ctx.current_fs_hz, (double)local_hack.sample_rate);
+
+        config_received = false; 
         pthread_mutex_unlock(&cfg_mutex);
         clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
 
@@ -452,19 +487,42 @@ int main() {
                            local_hack.vga_gain    != current_hw_cfg.vga_gain);
 
         if (needs_tune) {
-            // Fixed formatting string
             printf("[HAL] Tuning: %" PRIu64 " Hz | LNA: %u | VGA: %u\n", 
                     local_hack.center_freq, local_hack.lna_gain, local_hack.vga_gain);
             hackrf_apply_cfg(device, &local_hack);
             memcpy(&current_hw_cfg, &local_hack, sizeof(SDR_cfg_t));
             
-            // Allow hardware to settle before flushing buffer
             usleep(150000); 
             rb_reset(&rb); 
+            rb_reset(&audio_rb); // Also reset audio buffer on tune
+        }
+
+        // --- AUDIO THREAD & RADIO INIT ---
+        // Initialize or re-init radios only if sample_rate changed
+        if (!audio_thread_created || fabs(last_radio_sample_rate - local_hack.sample_rate) > 1e-6) {
+            fm_radio_init(radio_ptr, local_hack.sample_rate, audio_ctx.opus_sample_rate, 75);
+            am_radio_local_init(am_ptr, local_hack.sample_rate, audio_ctx.opus_sample_rate);
+            last_radio_sample_rate = local_hack.sample_rate;
+
+            // Reset metrics window state
+            memset(&audio_ctx.fm_dev, 0, sizeof(audio_ctx.fm_dev));
+            memset(&audio_ctx.am_depth, 0, sizeof(audio_ctx.am_depth));
+            audio_ctx.am_depth.env_min = 1e9f;
+            audio_ctx.am_depth.report_samples = (uint32_t)audio_ctx.opus_sample_rate;
+        }
+
+        // Start audio thread once
+        if (!audio_thread_created) {
+            if (pthread_create(&audio_thread, NULL, audio_thread_fn, (void*)&audio_ctx) == 0) {
+                audio_thread_created = true;
+            } else {
+                fprintf(stderr, "[RF] Warning: failed to create audio thread\n");
+            }
         }
 
         if (stop_streaming) {
             rb_reset(&rb);
+            rb_reset(&audio_rb);
             stop_streaming = false;
             if (hackrf_start_rx(device, rx_callback, NULL) != HACKRF_SUCCESS) {
                 recover_hackrf();
@@ -527,14 +585,22 @@ int main() {
 
     // --- CLEANUP ---
     printf("[RF] Shutting down...\n");
+    audio_thread_running = false; // Flag for audio thread to exit
+    if (audio_thread_created) pthread_join(audio_thread, NULL);
+    
     zpair_close(zmq_channel);
     rb_free(&rb);
+    rb_free(&audio_rb);
+    
     if (device) { 
         hackrf_stop_rx(device); 
         hackrf_close(device); 
     }
     hackrf_exit();
+    
     if (ipc_addr) free(ipc_addr);
+    if (radio_ptr) free(radio_ptr);
+    if (am_ptr) free(am_ptr);
     chan_filter_free_cache();
     
     return 0;

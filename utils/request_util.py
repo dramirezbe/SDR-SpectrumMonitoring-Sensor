@@ -49,14 +49,27 @@ class ServerRealtimeConfig:
         """Valida las restricciones físicas del hardware SDR."""
         # Validación de rango de frecuencia (1MHz a 6GHz)
         if not (1_000_000 <= self.center_freq_hz <= 6_000_000_000):
+            if self.center_freq_hz < 1_000_000:
+                self.center_freq_hz = 1_000_000
+            if self.center_freq_hz > 6_000_000_000:
+                self.center_freq_hz = 6_000_000_000
             raise ValueError(f"Frecuencia central {self.center_freq_hz} Hz fuera de rango.")
+        
+        if not (2_000_000 <= self.sample_rate_hz <= 20_000_000):
+            if self.center_freq_hz < 2_000_000:
+                self.center_freq_hz = 2_000_000
+            if self.center_freq_hz > 20_000_000_000:
+                self.center_freq_hz = 20_000_000_000
+            raise ValueError(f"Sample rate {self.sample_rate_hz} Hz fuera de rango.")
         
         # Validación de puertos de antena
         if self.antenna_port not in [1, 2, 3, 4]:
+            self.antenna_port = 1 #Default
             raise ValueError(f"Puerto de antena {self.antenna_port} inválido.")
         
         # Validación de métodos de Densidad Espectral de Potencia (PSD)
         if self.method_psd not in ["pfb", "welch"]:
+            self.method_psd = "pfb"
             raise ValueError(f"Método PSD {self.method_psd} inválido. Debe ser pfb o welch.")
 
         if self.filter is not None:
