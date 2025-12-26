@@ -30,8 +30,10 @@ import subprocess
 WEBRTC_SCRIPT = cfg.PROJECT_ROOT / "server_webrtc.py"
 if cfg.DEVELOPMENT:
     WEBRTC_CMD = ["/usr/bin/python3", str(WEBRTC_SCRIPT)]
+    log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
 else:
     WEBRTC_CMD = [cfg.PYTHON_ENV_STR, str(WEBRTC_SCRIPT)]
+    log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
 
 # --- CONFIG FETCHING ---
 def fetch_realtime_config(client):

@@ -6,6 +6,7 @@ import struct
 import traceback
 import time
 import cfg
+import sys
 
 # Initialize Logger
 log = cfg.set_logger()
@@ -86,7 +87,7 @@ class Publisher:
         self.glib_thread.start()
         self.pipe.set_state(Gst.State.PLAYING)
         self._running = True
-        log.info("[SENSOR] WebRTC Pipeline PLAYING")
+        log.info("WebRTC Pipeline PLAYING")
 
     def stop(self):
         self._running = False
@@ -210,7 +211,5 @@ async def main():
         await asyncio.sleep(RETRY_SECONDS)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    rc = cfg.run_and_capture(main)
+    sys.exit(rc)
