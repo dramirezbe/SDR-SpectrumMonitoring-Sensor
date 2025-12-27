@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 from copy import deepcopy
 
-class AcquireCampaign:
+class AcquireDual:
     """
     Production-grade class to acquire RF data and remove DC spike artifacts 
     via spectral stitching with an offset capture.

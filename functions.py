@@ -245,257 +245,105 @@ class CronSchedulerCampaign:
         
         return any_active
 
-class SimpleDCSpikeCleaner:
-    """
-    Elimina el DC Spike creando un puente adaptativo que sigue la tendencia
-    (creciente/decreciente) y el nivel de ruido de los alrededores.
-    """
-    def __init__(self, width_frac=0.009):
-        # 0.003 es el 0.3% central
-        self.width_frac = width_frac
-
-    def clean(self, Pxx):
-        Pxx_clean = np.array(Pxx, copy=True)
-        n = len(Pxx_clean)
-        mid = n // 2
-        
-        # 1. Definir la zona a remover (0.3%)
-        half_width = int(n * (self.width_frac / 2))
-        if half_width < 1: half_width = 1
-        
-        idx0 = mid - half_width
-        idx1 = mid + half_width
-
-        # 2. Definir "Zonas de Seguridad" para calcular la tendencia
-        # Tomamos un pequeño bloque justo antes y justo después del hueco
-        # para promediar y que un solo punto de ruido no arruine la tendencia.
-        buffer_size = max(4, int(n * 0.002)) # Bloque del 0.2% para promediar
-        
-        # Puntos de anclaje (A y B)
-        # Usamos mediana en lugar de media para ser más robustos a picos
-        left_anchor_zone = Pxx_clean[idx0 - buffer_size : idx0]
-        right_anchor_zone = Pxx_clean[idx1 : idx1 + buffer_size]
-        
-        if left_anchor_zone.size == 0 or right_anchor_zone.size == 0:
-            return Pxx_clean # Seguridad por si el array es muy corto
-
-        val_a = np.median(left_anchor_zone)
-        val_b = np.median(right_anchor_zone)
-
-        # 3. Calcular la "personalidad" del ruido local
-        # Queremos que el parche tenga el mismo nivel de agitación que los vecinos
-        std_l = np.std(left_anchor_zone)
-        std_r = np.std(right_anchor_zone)
-        avg_sigma = (std_l + std_r) / 2
-
-        # 4. Crear el puente (Autajustable)
-        num_points = idx1 - idx0
-        
-        # La tendencia lineal entre A y B (maneja subidas y bajadas)
-        trend_line = np.linspace(val_a, val_b, num_points)
-        
-        # El ruido que se adapta a la tendencia
-        # Generamos ruido normal con la potencia (sigma) de los vecinos
-        noise = np.random.normal(0, avg_sigma, num_points)
-        
-        # Combinamos: El puente ahora sigue la tendencia y tiene ruido
-        patch = trend_line + noise
-
-        # 5. Insertar el parche en la señal
-        Pxx_clean[idx0 : idx1] = patch
-        
-        return Pxx_clean
-    
-class AcquireRealtime:
-    def __init__(self, controller, cleaner, hardware_max_bw=20_000_000, user_safe_bw=18_000_000, log=None):
-        self._log = log
-        self.controller = controller
-        self.cleaner = cleaner
-        self.HW_BW = hardware_max_bw      
-        self.SAFE_BW = user_safe_bw       
-        self.OFFSET = 1_000_000           
-
-    async def acquire_with_offset(self, user_config):
-        """
-        Aplica Offset + Limpieza Central + Recorte.
-        """
-        requested_fs = user_config.get("sample_rate_hz", 0)
-        original_center = user_config.get("center_freq_hz")
-
-        # Caso A: BW pequeño permite mover el DC fuera del centro del usuario
-        if requested_fs <= self.SAFE_BW:
-            hw_config = user_config.copy()
-            hw_config["sample_rate_hz"] = self.HW_BW
-            # Desplazamos el hardware para que su centro (y su spike) no coincida con el del usuario
-            hw_config["center_freq_hz"] = original_center + self.OFFSET
-            
-            raw_payload = await self._send_and_receive(hw_config)
-            if not raw_payload: return None
-
-            # 1. Convertimos a array
-            pxx_raw = np.array(raw_payload["Pxx"])
-            
-            # 2. LIMPIEZA: El nuevo cleaner actúa sobre el 2% central del array de 20MHz.
-            # Aquí es donde se elimina el spike DC físico del hardware.
-            pxx_cleaned = self.cleaner.clean(pxx_raw)
-
-            # 3. RECORTE: Extraemos la zona que el usuario pidió del array ya limpio.
-            # IMPORTANTE: Usamos pxx_cleaned, no pxx_raw.
-            final_data = self._extract_sub_region(
-                pxx_raw, 
-                hw_center=original_center + self.OFFSET,
-                hw_bw=self.HW_BW,
-                target_center=original_center,
-                target_bw=requested_fs
-            )
-            return final_data
-
-        # Caso B: BW grande, solo podemos limpiar el centro y entregar todo
-        else:
-            if self._log: self._log.info(f"BW {requested_fs}Hz muy grande. Solo limpieza central.")
-            raw_payload = await self._send_and_receive(user_config)
-            if not raw_payload: return None
-            
-            pxx = np.array(raw_payload["Pxx"])
-            # Limpia el spike en el centro exacto del espectro solicitado
-            raw_payload["Pxx"] = self.cleaner.clean(pxx).tolist()
-            return raw_payload
-
-    async def acquire_raw(self, config):
-        """Adquisición estándar con limpieza."""
-        payload = await self._send_and_receive(config)
-        if not payload or "Pxx" not in payload:
-            return None
-
-        pxx = np.array(payload["Pxx"])
-        payload["Pxx"] = self.cleaner.clean(pxx).tolist()
-        return payload
-
-    async def _send_and_receive(self, config):
-        await self.controller.send_command(config)
-        try:
-            return await asyncio.wait_for(self.controller.wait_for_data(), timeout=10)
-        except asyncio.TimeoutError:
-            return None
-
-    def _extract_sub_region(self, pxx, hw_center, hw_bw, target_center, target_bw):
-        """Extrae la sub-banda del array ya procesado."""
-        num_bins = len(pxx)
-        hz_per_bin = hw_bw / num_bins
-        hw_min_f = hw_center - (hw_bw / 2)
-        
-        target_min_f = target_center - (target_bw / 2)
-        target_max_f = target_center + (target_bw / 2)
-
-        start_idx = int((target_min_f - hw_min_f) / hz_per_bin)
-        end_idx = int((target_max_f - hw_min_f) / hz_per_bin)
-
-        # Clamp de índices
-        start_idx = max(0, start_idx)
-        end_idx = min(num_bins, end_idx)
-
-        return {
-            "Pxx": pxx[start_idx:end_idx].tolist(),
-            "start_freq_hz": int(target_min_f),
-            "end_freq_hz": int(target_max_f),
-            "sample_rate_hz": target_bw
-        }
-
-class AcquireCampaign:
-    """
-    Estrategia de adquisición de grado campaña mediante costura espectral (Spectral Stitching).
-
-    Realiza dos capturas: una en la frecuencia objetivo y otra desplazada 2MHz. 
-    Posteriormente, reemplaza ("parchea") la sección central contaminada de la primera 
-    captura con datos limpios de la segunda.
-    """
+class AcquireDual:
     def __init__(self, controller, log):
-        """
-        Args:
-            controller (ZmqPairController): Controlador de hardware.
-            log (logging.Logger): Logger de sistema.
-        """
         self.controller = controller
         self._log = log
+        # These are initialized as defaults but updated dynamically
         self.OFFSET_HZ = 2e6  
         self.PATCH_BW_HZ = 1e6 
 
+    def _update_stitching_params(self, sample_rate_hz):
+        """
+        Dynamically adjusts stitching constants based on hardware bandwidth.
+        Prevents using an offset larger than the available Nyquist zone.
+        """
+        if sample_rate_hz >= 4_000_000:
+            self.OFFSET_HZ = 2_000_000
+            self.PATCH_BW_HZ = 1_000_000
+            self._log.info(f"Stitching: Wide-Band Logic (Offset 2MHz, Patch 1MHz)")
+        else:
+            # For lower rates like 2MHz, a smaller offset is required to stay in-band
+            self.OFFSET_HZ = 500_000
+            self.PATCH_BW_HZ = 200_000 
+            self._log.info(f"Stitching: Narrow-Band Logic (Offset 0.5MHz, Patch 0.2MHz)")
+
     async def _single_acquire(self, rf_params):
-        """Adquisición de bajo nivel con tiempo de enfriamiento para el PLL."""
+        """Low-level acquisition with PLL cooling time."""
         await self.controller.send_command(rf_params)
         self._log.debug(f"Acquiring CF: {rf_params['center_freq_hz']/1e6} MHz")
-        data = await asyncio.wait_for(self.controller.wait_for_data(), timeout=20)
-        await asyncio.sleep(0.2) 
+        data = await asyncio.wait_for(self.controller.wait_for_data(), timeout=10)
+        # PLL/Hardware settle time
+        await asyncio.sleep(0.05) 
         return data
 
     async def get_corrected_data(self, rf_params):
-        """
-        Smarter acquisition using Level Normalization and Alpha Blending
-        to eliminate patching artifacts and DC spikes.
-        """
+        sr = rf_params.get("sample_rate_hz", 8e6)
+        self._update_stitching_params(sr)
+        
         orig_params = deepcopy(rf_params)
         orig_cf = orig_params["center_freq_hz"]
 
-        # 1. Double Acquisition
+        # 1. Adquisiciones
         data1 = await self._single_acquire(orig_params)
         offset_params = deepcopy(orig_params)
         offset_params["center_freq_hz"] = orig_cf + self.OFFSET_HZ
-        await asyncio.sleep(0.5)
         data2 = await self._single_acquire(offset_params)
 
         try:
             pxx1 = np.array(data1['Pxx'])
             pxx2 = np.array(data2['Pxx'])
+            total_bins = len(pxx1)
             
-            df = (data1['end_freq_hz'] - data1['start_freq_hz']) / len(pxx1)
+            df = (data1['end_freq_hz'] - data1['start_freq_hz']) / total_bins
             bin_shift = int(self.OFFSET_HZ / df)
             
-            # 1. Define the center and half-width
-            center_idx = len(pxx1) // 2
+            center_idx = total_bins // 2
             half_patch = int((self.PATCH_BW_HZ / df) // 2)
-
-            # 2. Calculate indices for Capture 1 (The target)
             s1, e1 = center_idx - half_patch, center_idx + half_patch
             
-            # 3. Calculate indices for Capture 2 (The source)
-            s2, e2 = s1 - bin_shift, e1 - bin_shift
+            s2 = s1 - bin_shift
+            e2 = s2 + (e1 - s1)
 
-            # 4. DETERMINE ACTUAL SLICE LENGTH (This prevents the 818 vs 819 error)
-            actual_len = e1 - s1 
-
-            if s2 < 0 or e2 > len(pxx2):
-                self._log.warning("Offset capture indices out of range.")
-                return data1
-
-            # --- STEP 1: LEVEL MATCHING ---
-            guard_bins = int(100e3 / df)
-            ref_s, ref_e = s1 - guard_bins, s1
+            # --- MEJORA: VENTANA DE REFERENCIA POR PORCENTAJE (0.5%) ---
             
-            if ref_s > 0:
-                level1 = np.median(pxx1[ref_s:ref_e])
-                level2 = np.median(pxx2[ref_s - bin_shift : ref_e - bin_shift])
-                gain_corr = level1 / level2
-                # Use actual_len to slice Capture 2
-                pxx2_patch = pxx2[s2 : s2 + actual_len] * gain_corr
-            else:
-                pxx2_patch = pxx2[s2 : s2 + actual_len]
+            # Calculamos k como el 0.5% del total de bins del espectro
+            k = max(1, int(total_bins * 0.005))
+            self._log.debug(f"Stitching: Usando ventana de referencia de {k} puntos ({0.5}%)")
+            
+            # Validación de límites para evitar IndexError en los bordes del array
+            idx_start_min = max(0, s1 - k)
+            idx_end_max = min(total_bins, e1 + k)
 
-            # --- STEP 2: ALPHA BLENDING ---
-            # Create mask based on ACTUAL length of the slice
+            # Calculamos el delta al inicio del parche (usando mediana para robustez)
+            ref_start1 = np.median(pxx1[idx_start_min : s1])
+            ref_start2 = np.median(pxx2[s2 - (s1 - idx_start_min) : s2])
+            delta_start = ref_start1 - ref_start2
+            
+            # Calculamos el delta al final del parche
+            ref_end1 = np.median(pxx1[e1 : idx_end_max])
+            ref_end2 = np.median(pxx2[e2 : e2 + (idx_end_max - e1)])
+            delta_end = ref_end1 - ref_end2
+            
+            # --- ALINEACIÓN DE PENDIENTE Y BLENDING ---
+            
+            # Rampa de corrección lineal para unir ambos deltas
+            correction_slope = np.linspace(delta_start, delta_end, (e1 - s1))
+            pxx2_patch = pxx2[s2:e2] + correction_slope
+
+            actual_len = e1 - s1
+            blend_width = max(2, int(actual_len * 0.15)) 
             mask = np.ones(actual_len)
-            blend_width = max(1, int(actual_len * 0.1)) 
-            
-            ramp = np.linspace(0, 1, blend_width)
+            ramp = 0.5 * (1 - np.cos(np.pi * np.linspace(0, 1, blend_width)))
             mask[:blend_width] = ramp
             mask[-blend_width:] = ramp[::-1]
 
-            # Now all arrays are guaranteed to be (actual_len,)
+            # Inserción del parche corregido
             pxx1[s1:e1] = (pxx1[s1:e1] * (1 - mask)) + (pxx2_patch * mask)
 
-            self._log.info(f"Smart DC correction applied at {orig_cf/1e6} MHz. Slice size: {actual_len}")
             data1['Pxx'] = pxx1.tolist()
             return data1
 
         except Exception as e:
-            self._log.error(f"Failed smart DC spike correction: {e}")
+            self._log.error(f"Spectral correction failed: {e}")
             return data1

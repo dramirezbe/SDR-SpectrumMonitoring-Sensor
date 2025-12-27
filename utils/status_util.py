@@ -20,6 +20,7 @@ import subprocess
 import logging
 from pathlib import Path
 from typing import Dict, List, Any
+from datetime import datetime
 
 @dataclass
 class StatusPost:
@@ -355,13 +356,8 @@ class StatusDevice:
 
     def get_logs(self):
         """
-        Extrae las últimas 10 líneas de log relevantes.
-
-        Busca en la carpeta de logs de forma cronológica inversa, omitiendo 
-        marcas de éxito irrelevantes para el diagnóstico.
-
-        Returns:
-            tuple: (None, None, logs_text) para mantener compatibilidad de firma.
+        Extrae las últimas 10 líneas de log relevantes basándose en el nombre del archivo.
+        Formato esperado: DD-MM-YYYY_HH:MM:SS_tipo.log
         """
         result_logs = "Sistema operando normalmente"
         max_lines = 10
@@ -373,19 +369,34 @@ class StatusDevice:
         log_files = []
         for p in self.logs_dir.glob("*.log"):
             try:
-                ts_part = p.stem.split('_')[0]
-                if ts_part.isdigit(): log_files.append((int(ts_part), p))
-            except Exception: continue
+                # Separamos el nombre: ['27-12-2025', '09:32:10', 'tipo']
+                parts = p.stem.split('_')
+                if len(parts) >= 2:
+                    # Unimos fecha y hora para crear el objeto datetime
+                    ts_str = f"{parts[0]}_{parts[1]}"
+                    # El formato es Día-Mes-Año_Hora:Minuto:Segundo
+                    dt = datetime.strptime(ts_str, "%d-%m-%Y_%H:%M:%S")
+                    log_files.append((dt, p))
+            except (ValueError, IndexError):
+                # Ignora archivos que no cumplan el formato de fecha exacto
+                continue
         
+        # Ordenamos por el objeto datetime (del más nuevo al más viejo)
         log_files.sort(key=lambda x: x[0], reverse=True)
 
         for _, p in log_files:
             try:
+                # Leemos las líneas y filtramos
                 lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
                 valid_lines = [line for line in lines if "[[OK]]" not in line]
-                if not valid_lines: continue
+                
+                if not valid_lines:
+                    continue
 
+                # Agregamos las líneas nuevas AL PRINCIPIO de nuestra lista 
+                # para que las más recientes queden al final del texto resultante
                 collected_lines = valid_lines + collected_lines
+                
                 if len(collected_lines) >= max_lines:
                     collected_lines = collected_lines[-max_lines:]
                     break
@@ -393,5 +404,7 @@ class StatusDevice:
                 self._log.error(f"Error al leer log {p}: {e}")
                 continue
 
-        if collected_lines: result_logs = "\n".join(collected_lines)
+        if collected_lines:
+            result_logs = "\n".join(collected_lines)
+            
         return None, None, result_logs

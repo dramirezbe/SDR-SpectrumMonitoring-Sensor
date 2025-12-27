@@ -178,30 +178,37 @@ class SimpleFormatter(logging.Formatter):
 def set_logger(rotator: AtomicRotator | None = None) -> logging.Logger:
     """
     Configura logger asimétrico.
-    Si se pasa un rotator, se añade el handler de archivo con el nivel según DEBUG.
+    Si DEBUG es True, ambos canales (consola y archivo) muestran nivel DEBUG.
     """
     try: name = pathlib.Path(sys.argv[0]).stem.upper()
     except: name = "SENSOR"
 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG) # El logger permite todo, los handlers filtran
+    logger.setLevel(logging.DEBUG) # Permitir que todo fluya hacia los handlers
     
     fmt = SimpleFormatter("%(asctime)s[%(name)s]%(levelname)s %(message)s", "%d-%b-%y(%H:%M:%S)")
 
-    # 1. Configurar Consola (si no existe)
+    # --- Lógica de Niveles ---
+    if DEBUG:
+        # Si DEBUG está activo, máxima verbosidad en todo
+        console_level = logging.DEBUG
+        file_level = logging.DEBUG
+    else:
+        # Si no, usamos VERBOSE para consola y WARNING (por defecto) para archivos
+        console_level = logging.INFO if VERBOSE else logging.ERROR
+        file_level = logging.WARNING
+
+    # 1. Configurar Consola
     if not any(isinstance(h, logging.StreamHandler) and not hasattr(h, 'is_rotator') for h in logger.handlers):
         c_handler = logging.StreamHandler(sys.stdout)
-        c_handler.setLevel(logging.INFO if VERBOSE else logging.ERROR)
+        c_handler.setLevel(console_level)
         c_handler.setFormatter(fmt)
         logger.addHandler(c_handler)
 
-    # 2. Configurar Archivo (si se provee rotator y no existe uno ya)
+    # 2. Configurar Archivo (Rotator)
     if rotator and not any(hasattr(h, 'is_rotator') for h in logger.handlers):
         f_handler = logging.StreamHandler(rotator)
-        f_handler.is_rotator = True # Marca para evitar duplicados
-        
-        # Requisito: Si DEBUG es True, guardar nivel INFO en archivo
-        file_level = logging.INFO if DEBUG else logging.WARNING
+        f_handler.is_rotator = True 
         f_handler.setLevel(file_level)
         f_handler.setFormatter(fmt)
         logger.addHandler(f_handler)

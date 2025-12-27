@@ -18,7 +18,7 @@ from utils import (
 )
 from functions import (
     format_data_for_upload, CronSchedulerCampaign, GlobalSys, 
-    SysState,  SimpleDCSpikeCleaner, AcquireRealtime
+    SysState, AcquireDual
 )
 
 import sys
@@ -59,7 +59,7 @@ def fetch_realtime_config(client):
             return {}, resp, delta_t_ms 
         
         #DEBUG
-        log.info(f"---REALTIME--- :{resp.json()}")
+        log.debug(f"---REALTIME--- :{resp.json()}")
         
         try:
             json_payload = resp.json()
@@ -169,18 +169,9 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     timer_force_rotation.init_count(300) 
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
-    cleaner = SimpleDCSpikeCleaner(width_frac=0.009)
-    
-
     try:
         async with controller as zmq_ctrl:
-            # Initialize the specialized acquirer
-            acquirer = AcquireRealtime(
-                controller=zmq_ctrl, 
-                cleaner=cleaner,
-                hardware_max_bw=20_000_000, 
-                user_safe_bw=18_000_000
-            )
+            acquirer = AcquireDual(controller=zmq_ctrl, log=log)
 
             log.info("[REALTIME] Connection established. Processing stream...")
             
@@ -196,7 +187,6 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                     if webrtc_proc is None or webrtc_proc.poll() is not None:
                         log.info("[REALTIME] Starting WebRTC Server...")
                         webrtc_proc = subprocess.Popen(WEBRTC_CMD)
-                    dsp_payload = await acquirer.acquire_raw(next_config)
                     DEMOD_CFG_SENT = True
                 else:
                     if webrtc_proc is not None:
@@ -204,7 +194,6 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                         webrtc_proc.terminate()
                         webrtc_proc.wait() # Ensure it's fully closed
                         webrtc_proc = None # Reset the handle
-                    dsp_payload = await acquirer.acquire_with_offset(next_config)
                     if DEMOD_CFG_SENT:
                         RESET_DEMOD_CFG = True
                         DEMOD_CFG_SENT = False
@@ -212,6 +201,8 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 if RESET_DEMOD_CFG:
                     await zmq_ctrl.send_command({}) #Stop the audio demodulation in rf_engine just if demodulation changed
                     RESET_DEMOD_CFG = False
+
+                dsp_payload = await acquirer.get_corrected_data(next_config)
                 
                 if dsp_payload:
                     final_payload = format_data_for_upload(dsp_payload)
@@ -229,7 +220,7 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 # --- STEP D: Heartbeat / Config Update ---
                 new_conf, _, dt = fetch_realtime_config(client)
                 if not new_conf:
-                    log.error("[REALTIME] Stop command received. Breaking.")
+                    log.info("[REALTIME] Stop command received. Breaking.")
                     break 
                 
                 next_config = new_conf
@@ -273,7 +264,7 @@ async def run_campaigns_logic(client: RequestClient, store: ShmStore, scheduler:
     def _validate_camp_arr(resp):
         if resp is not None:
             #DEBUG
-            log.info(f"---CAMPAIGNS--- :{resp.json()}")
+            log.debug(f"---CAMPAIGNS--- :{resp.json()}")
             camps_arr = resp.json().get("campaigns", [])
             if not camps_arr: return 1, None
             else: return 0, camps_arr

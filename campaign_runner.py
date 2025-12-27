@@ -18,7 +18,7 @@ import asyncio
 import time
 from pathlib import Path
 from utils import atomic_write_bytes, RequestClient, StatusDevice, ShmStore, ZmqPairController
-from functions import format_data_for_upload, AcquireCampaign
+from functions import format_data_for_upload, AcquireDual
 
 # Configuración del registrador de eventos
 log = cfg.set_logger()
@@ -123,8 +123,8 @@ class CampaignRunner:
         try:
             async with ZmqPairController(addr=cfg.IPC_ADDR, is_server=True) as zmq_ctrl:
                 await asyncio.sleep(0.5)
-                # AcquireCampaign aplica la lógica de "patching" para corregir el centro
-                acquirer = AcquireCampaign(zmq_ctrl, log)
+                # AcquireDual aplica la lógica de "patching" para corregir el centro
+                acquirer = AcquireDual(zmq_ctrl, log)
                 log.info(f"Starting Campaign Acquisition ID: {self.campaign_id}")
                 return await acquirer.get_corrected_data(rf_cfg)
         except OSError as e:

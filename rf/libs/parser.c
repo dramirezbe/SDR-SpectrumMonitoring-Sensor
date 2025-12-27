@@ -66,46 +66,65 @@ static void set_default_config(DesiredCfg_t *target) {
 int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
     if (json_string == NULL || target == NULL) return -1;
 
-    // 1. Initialize with your specific defaults
+    // 1. Initialize with hardcoded defaults
     set_default_config(target);
     
     cJSON *root = cJSON_Parse(json_string);
     if (root == NULL) {
-        printf("===============================================JSON received NULL=========================================================\n");
-        return 0; // Return 0 because defaults are already loaded  
+        // Log error but keep defaults
+        printf("[PARSER] Warning: JSON is NULL or invalid. Using defaults.\n");
+        return 0; 
     } 
 
-    // 2. Overwrite defaults ONLY if keys exist in JSON
-
-    cJSON *demod = cJSON_GetObjectItemCaseSensitive(root, "demodulation");
-    if (cJSON_IsString(demod) && demod->valuestring) {
-        if (strcasecmp(demod->valuestring, "fm") == 0)      target->rf_mode = FM_MODE;
-        else if (strcasecmp(demod->valuestring, "am") == 0) target->rf_mode = AM_MODE;
-    }
-
-    // 2. Filter logic: If "filter" is an object, parse it. 
-    // If it is "None" (a string), cJSON_IsObject is false, filter_enabled stays false.
-    cJSON *filt_obj = cJSON_GetObjectItemCaseSensitive(root, "filter");
-    if (cJSON_IsObject(filt_obj)) {
-        target->filter_enabled = true;
-        cJSON *start = cJSON_GetObjectItemCaseSensitive(filt_obj, "start_freq_hz");
-        cJSON *end   = cJSON_GetObjectItemCaseSensitive(filt_obj, "end_freq_hz");
-        if (cJSON_IsNumber(start)) target->filter_cfg.start_freq_hz = (int)start->valuedouble;
-        if (cJSON_IsNumber(end))   target->filter_cfg.end_freq_hz   = (int)end->valuedouble;
-    }
-
-    // 3. PSD Method (PFB vs Welch)
-    cJSON *m_psd = cJSON_GetObjectItemCaseSensitive(root, "method_psd");
-    if (cJSON_IsString(m_psd)) {
-        target->method_psd = (strcasecmp(m_psd->valuestring, "pfb") == 0) ? PFB : WELCH;
-    }
-
-    // 4. Acquisition & PSD Parameters
+    // 2. Parse Core Hardware Parameters FIRST (Required for clamping logic)
     cJSON *cf = cJSON_GetObjectItemCaseSensitive(root, "center_freq_hz");
     if (cJSON_IsNumber(cf)) target->center_freq = (uint64_t)cf->valuedouble;
 
     cJSON *sr = cJSON_GetObjectItemCaseSensitive(root, "sample_rate_hz");
     if (cJSON_IsNumber(sr)) target->sample_rate = sr->valuedouble;
+
+    // 3. Filter logic with Boundary Validation (Clamping)
+    cJSON *filt_obj = cJSON_GetObjectItemCaseSensitive(root, "filter");
+    if (cJSON_IsObject(filt_obj)) {
+        target->filter_enabled = true;
+        
+        cJSON *start = cJSON_GetObjectItemCaseSensitive(filt_obj, "start_freq_hz");
+        cJSON *end   = cJSON_GetObjectItemCaseSensitive(filt_obj, "end_freq_hz");
+
+        // Temporary storage for requested values
+        int req_start = cJSON_IsNumber(start) ? (int)start->valuedouble : 0;
+        int req_end   = cJSON_IsNumber(end)   ? (int)end->valuedouble : 0;
+
+        // Calculate Nyquist Boundaries [Fc - Fs/2, Fc + Fs/2]
+        double lower_bound = (double)target->center_freq - (target->sample_rate / 2.0);
+        double upper_bound = (double)target->center_freq + (target->sample_rate / 2.0);
+
+        // --- CLAMPING LOGIC ---
+        // Force start frequency to be no lower than the hardware floor
+        target->filter_cfg.start_freq_hz = (req_start < lower_bound) ? (int)lower_bound : req_start;
+
+        // Force end frequency to be no higher than the hardware ceiling
+        target->filter_cfg.end_freq_hz = (req_end > upper_bound) ? (int)upper_bound : req_end;
+        
+        // Safety: Ensure end is not less than start after clamping
+        if (target->filter_cfg.end_freq_hz < target->filter_cfg.start_freq_hz) {
+             target->filter_cfg.end_freq_hz = target->filter_cfg.start_freq_hz;
+        }
+    }
+
+    // 4. Engine Mode / Demodulation
+    cJSON *demod = cJSON_GetObjectItemCaseSensitive(root, "demodulation");
+    if (cJSON_IsString(demod) && demod->valuestring) {
+        if (strcasecmp(demod->valuestring, "fm") == 0)      target->rf_mode = FM_MODE;
+        else if (strcasecmp(demod->valuestring, "am") == 0) target->rf_mode = AM_MODE;
+        else target->rf_mode = PSD_MODE;
+    }
+
+    // 5. PSD & Windowing
+    cJSON *m_psd = cJSON_GetObjectItemCaseSensitive(root, "method_psd");
+    if (cJSON_IsString(m_psd)) {
+        target->method_psd = (strcasecmp(m_psd->valuestring, "pfb") == 0) ? PFB : WELCH;
+    }
 
     cJSON *rbw = cJSON_GetObjectItemCaseSensitive(root, "rbw_hz");
     if (cJSON_IsNumber(rbw)) target->rbw = (int)rbw->valuedouble;
@@ -113,7 +132,6 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
     cJSON *ov = cJSON_GetObjectItemCaseSensitive(root, "overlap");
     if (cJSON_IsNumber(ov)) target->overlap = ov->valuedouble;
 
-    // 5. Windowing
     cJSON *win = cJSON_GetObjectItemCaseSensitive(root, "window");
     if (cJSON_IsString(win)) {
         char *clean_win = strdup_lowercase(win->valuestring);
@@ -121,7 +139,7 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
         free(clean_win);
     }
 
-    // 6. Hardware Gains & Antenna
+    // 6. Hardware Gains & Peripheral Settings
     cJSON *lna = cJSON_GetObjectItemCaseSensitive(root, "lna_gain");
     if (cJSON_IsNumber(lna)) target->lna_gain = (int)lna->valuedouble;
 

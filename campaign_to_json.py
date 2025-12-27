@@ -5,7 +5,7 @@ import json
 import datetime
 from pathlib import Path
 from utils import ZmqPairController
-from functions import AcquireCampaign
+from functions import AcquireDual
 
 async def main():
     # Configuración del registrador de eventos
@@ -28,7 +28,7 @@ async def main():
     try:
         async with ZmqPairController(addr=cfg.IPC_ADDR, is_server=True) as controller:
             log.info("Iniciando captura con corrección de DC Spike...")
-            campaign = AcquireCampaign(controller, log)
+            campaign = AcquireDual(controller, log)
             
             # Adquisición de datos procesados (Stitched/Patched)
             data_dict = await campaign.get_corrected_data(rf_params)
