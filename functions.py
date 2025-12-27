@@ -247,75 +247,64 @@ class CronSchedulerCampaign:
 
 class SimpleDCSpikeCleaner:
     """
-    Limpia el artefacto DC reemplazando el 2% central con una línea 
-    que une los extremos, añadiendo ruido local que se adapta a 
-    la potencia de los vecinos.
+    Elimina el DC Spike creando un puente adaptativo que sigue la tendencia
+    (creciente/decreciente) y el nivel de ruido de los alrededores.
     """
-    def __init__(self, width_frac=0.02, neighbor_bins=20):
+    def __init__(self, width_frac=0.009):
+        # 0.003 es el 0.3% central
         self.width_frac = width_frac
-        self.neighbor_bins = neighbor_bins
-        self._eps_mw = 1e-18
-
-    def _dbm_to_mw(self, x_dbm):
-        return 10.0 ** (np.asarray(x_dbm, float) / 10.0)
-
-    def _mw_to_dbm(self, x_mw):
-        x = np.maximum(np.asarray(x_mw, float), self._eps_mw)
-        return 10.0 * np.log10(x)
-
-    def _get_local_stats(self, data_mw):
-        """Calcula mediana y sigma robusta."""
-        if data_mw.size == 0:
-            return 0.0, 0.0
-        med = np.median(data_mw)
-        # Sigma basada en MAD (Median Absolute Deviation)
-        mad = np.median(np.abs(data_mw - med))
-        sigma = 1.4826 * mad
-        return med, sigma
 
     def clean(self, Pxx):
-        # 1) Preparación y conversión a mW
-        Pxx_mw = self._dbm_to_mw(Pxx)
-        n = len(Pxx_mw)
+        Pxx_clean = np.array(Pxx, copy=True)
+        n = len(Pxx_clean)
         mid = n // 2
         
-        # Definir el rango del 2% central
-        half_width = max(1, int(n * (self.width_frac / 2)))
+        # 1. Definir la zona a remover (0.3%)
+        half_width = int(n * (self.width_frac / 2))
+        if half_width < 1: half_width = 1
+        
         idx0 = mid - half_width
         idx1 = mid + half_width
-        
-        if idx0 <= self.neighbor_bins or idx1 >= n - self.neighbor_bins:
-            return Pxx # Array muy pequeño para procesar
 
-        # 2) Analizar vecinos a la izquierda y derecha para detectar cambios de potencia
-        l_neighbor = Pxx_mw[idx0 - self.neighbor_bins : idx0]
-        r_neighbor = Pxx_mw[idx1 + 1 : idx1 + 1 + self.neighbor_bins]
+        # 2. Definir "Zonas de Seguridad" para calcular la tendencia
+        # Tomamos un pequeño bloque justo antes y justo después del hueco
+        # para promediar y que un solo punto de ruido no arruine la tendencia.
+        buffer_size = max(4, int(n * 0.002)) # Bloque del 0.2% para promediar
         
-        val_l, sig_l = self._get_local_stats(l_neighbor)
-        val_r, sig_r = self._get_local_stats(r_neighbor)
+        # Puntos de anclaje (A y B)
+        # Usamos mediana en lugar de media para ser más robustos a picos
+        left_anchor_zone = Pxx_clean[idx0 - buffer_size : idx0]
+        right_anchor_zone = Pxx_clean[idx1 : idx1 + buffer_size]
+        
+        if left_anchor_zone.size == 0 or right_anchor_zone.size == 0:
+            return Pxx_clean # Seguridad por si el array es muy corto
 
-        # 3) Reconstrucción
-        num_points = idx1 - idx0 + 1
+        val_a = np.median(left_anchor_zone)
+        val_b = np.median(right_anchor_zone)
+
+        # 3. Calcular la "personalidad" del ruido local
+        # Queremos que el parche tenga el mismo nivel de agitación que los vecinos
+        std_l = np.std(left_anchor_zone)
+        std_r = np.std(right_anchor_zone)
+        avg_sigma = (std_l + std_r) / 2
+
+        # 4. Crear el puente (Autajustable)
+        num_points = idx1 - idx0
         
-        # Generar la línea base (la pendiente entre extremos)
-        # Usamos los valores exactos de los bordes para que no haya saltos
-        edge_l = Pxx_mw[idx0 - 1]
-        edge_r = Pxx_mw[idx1 + 1]
-        interp_line = np.linspace(edge_l, edge_r, num_points)
+        # La tendencia lineal entre A y B (maneja subidas y bajadas)
+        trend_line = np.linspace(val_a, val_b, num_points)
         
-        # Generar un perfil de ruido que transiciona de sig_l a sig_r
-        # Esto hace que si un lado es más "ruidoso" que el otro, se note el cambio
-        sig_profile = np.linspace(sig_l, sig_r, num_points)
-        noise = np.random.normal(0, 1, num_points) * sig_profile
+        # El ruido que se adapta a la tendencia
+        # Generamos ruido normal con la potencia (sigma) de los vecinos
+        noise = np.random.normal(0, avg_sigma, num_points)
         
-        # Combinar y asegurar que no haya valores negativos antes de volver a dBm
-        fill = interp_line + noise
-        fill = np.maximum(fill, self._eps_mw)
+        # Combinamos: El puente ahora sigue la tendencia y tiene ruido
+        patch = trend_line + noise
+
+        # 5. Insertar el parche en la señal
+        Pxx_clean[idx0 : idx1] = patch
         
-        # 4) Aplicar corrección
-        Pxx_mw[idx0 : idx1 + 1] = fill
-        
-        return self._mw_to_dbm(Pxx_mw)
+        return Pxx_clean
     
 class AcquireRealtime:
     def __init__(self, controller, cleaner, hardware_max_bw=20_000_000, user_safe_bw=18_000_000, log=None):
@@ -353,7 +342,7 @@ class AcquireRealtime:
             # 3. RECORTE: Extraemos la zona que el usuario pidió del array ya limpio.
             # IMPORTANTE: Usamos pxx_cleaned, no pxx_raw.
             final_data = self._extract_sub_region(
-                pxx_cleaned, 
+                pxx_raw, 
                 hw_center=original_center + self.OFFSET,
                 hw_bw=self.HW_BW,
                 target_center=original_center,

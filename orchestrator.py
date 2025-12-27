@@ -18,7 +18,7 @@ from utils import (
 )
 from functions import (
     format_data_for_upload, CronSchedulerCampaign, GlobalSys, 
-    SysState, SimpleDCSpikeCleaner, AcquireRealtime
+    SysState,  SimpleDCSpikeCleaner, AcquireRealtime
 )
 
 import sys
@@ -174,7 +174,8 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     timer_force_rotation.init_count(300) 
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
-    cleaner = SimpleDCSpikeCleaner(width_frac=0.02, neighbor_bins=10)
+    cleaner = SimpleDCSpikeCleaner(width_frac=0.009)
+    
 
     try:
         async with controller as zmq_ctrl:

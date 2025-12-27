@@ -33,7 +33,7 @@ from gi.repository import Gst, GstWebRTC, GstSdp, GLib
 # =========================
 # Config
 # =========================
-SENSOR_ID   = "d8:3a:dd:f7:1a:cc"
+SENSOR_ID   = cfg.get_mac()
 SIGNAL_URL  = f"wss://rsm.ane.gov.co:12443/ws/signal/{SENSOR_ID}"
 STUN_SERVER = "stun://stun.l.google.com:19302"
 
