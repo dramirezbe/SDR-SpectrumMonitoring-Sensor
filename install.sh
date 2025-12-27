@@ -44,7 +44,7 @@ apt-get install -y git cmake make libzmq3-dev libcjson-dev libcurl4-openssl-dev 
     gir1.2-gst-plugins-base-1.0 gir1.2-gst-plugins-bad-1.0 gstreamer1.0-tools \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libnice10 libopus-dev \
-    libcairo2-dev python3-dev
+    libcairo2-dev python3-dev gyp
 
 log "Step 2/6: Building libgpiod v2..."
 cd "$BUILD_DIR"
