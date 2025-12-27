@@ -39,7 +39,7 @@ trap cleanup EXIT
 log "Step 1/6: Installing system dependencies..."
 apt-get update -qq
 apt-get install -y git cmake make libzmq3-dev libcjson-dev libcurl4-openssl-dev python3-venv \
-    autoconf automake libtool pkg-config git autoconf-archive libtool libusb-1.0-0-dev libfftw3-dev \
+    autoconf automake libtool pkg-config autoconf-archive libtool libusb-1.0-0-dev libfftw3-dev \
     python3-gi python3-gst-1.0 python3-dotenv python3-zmq python3-websockets gobject-introspection gir1.2-gstreamer-1.0 \
     gir1.2-gst-plugins-base-1.0 gir1.2-gst-plugins-bad-1.0 gstreamer1.0-tools \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
