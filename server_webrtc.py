@@ -12,8 +12,8 @@ import signal  # Added for signal handling
 # Initialize Logger
 log = cfg.set_logger()
 
-import site
-site.addsitedir('/usr/lib/python3/dist-packages')
+#import site
+#site.addsitedir('/usr/lib/python3/dist-packages')
 
 import websockets
 from websockets.exceptions import ConnectionClosed
