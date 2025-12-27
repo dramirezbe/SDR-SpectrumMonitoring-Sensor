@@ -91,16 +91,14 @@ class Publisher:
     def stop(self):
         log.info("Stopping Publisher...")
         self._running = False
-        # Set state to NULL to release GStreamer resources
         if self.pipe:
             self.pipe.set_state(Gst.State.NULL)
         
-        # Stop GLib loop
         if self.glib_loop.is_running():
             GLib.idle_add(self.glib_loop.quit)
-        
-        # We don't necessarily join the thread here to avoid blocking the event loop,
-        # but we ensure the pipeline is dead.
+            # Add this to ensure the thread finishes:
+            if self.glib_thread.is_alive():
+                self.glib_thread.join(timeout=2.0)
         log.info("Publisher stopped.")
 
     def on_bus(self, bus, msg):
@@ -179,7 +177,13 @@ async def tcp_reader_task():
             writer.close()
             await writer.wait_closed()
 
-    server = await asyncio.start_server(handle_client, TCP_HOST, TCP_PORT)
+    server = await asyncio.start_server(
+        handle_client, 
+        TCP_HOST, 
+        TCP_PORT,
+        reuse_address=True, # Standard cleanup
+        reuse_port=True     # Allows immediate rebinding on most Linux systems
+    )
     log.info(f"[TCP] Server started on {TCP_HOST}:{TCP_PORT}")
     
     async with server:
@@ -252,11 +256,10 @@ async def main():
                     log.error(f"[SYSTEM] Connection failed: {type(e).__name__}. Retrying in {RETRY_SECONDS}s...")
             except Exception as e:
                 # This is a critical, unexpected error
-                if not shutdown_event.is_set():
-                    log.critical(f"[SYSTEM] Unexpected error: {e}\n{traceback.format_exc()}")
-                    exit_code = 1  # Set error code
-                    shutdown_event.set()  # Trigger shutdown of other tasks
-                    break 
+                # If a CRITICAL error occurs, we set exit_code and break
+                log.critical(f"[SYSTEM] Unexpected error: {e}")
+                exit_code = 1
+                break # Exit the while loop to trigger cleanup
             
             if not shutdown_event.is_set():
                 # Wait with a check for the shutdown event
@@ -266,13 +269,24 @@ async def main():
                     pass
 
     finally:
-        log.info("[SYSTEM] Cleaning up tasks...")
-        # Ensure the shutdown event is set so the TCP task knows to stop
-        shutdown_event.set() 
+        # --- CRITICAL CLEANUP START ---
+        log.info("[SYSTEM] Initializing global cleanup...")
+        shutdown_event.set()
         
-        # Wait for the TCP task to finish its own cleanup
-        await tcp_task
-        log.info(f"[SYSTEM] Shutdown complete with exit code {exit_code}.")
+        # Stop GStreamer/Publisher if it's still hanging
+        if current_publisher:
+            current_publisher.stop()
+
+        # Cancel all running tasks (including the TCP server)
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for t in tasks:
+            t.cancel()
+        
+        # Give tasks a moment to finish cancelling/closing sockets
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        log.info(f"[SYSTEM] Port {TCP_PORT} released. Exit code: {exit_code}")
+        # --- CRITICAL CLEANUP END ---
     
     return exit_code
 

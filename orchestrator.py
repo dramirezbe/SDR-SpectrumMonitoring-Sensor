@@ -188,12 +188,14 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                         log.info("[REALTIME] Starting WebRTC Server...")
                         webrtc_proc = subprocess.Popen(WEBRTC_CMD)
                     DEMOD_CFG_SENT = True
+                    dsp_payload = await acquirer.raw_acquire(next_config)
                 else:
                     if webrtc_proc is not None:
                         log.info("[REALTIME] Stopping WebRTC Server...")
                         webrtc_proc.terminate()
                         webrtc_proc.wait() # Ensure it's fully closed
                         webrtc_proc = None # Reset the handle
+                    dsp_payload = await acquirer.get_corrected_data(next_config)
                     if DEMOD_CFG_SENT:
                         RESET_DEMOD_CFG = True
                         DEMOD_CFG_SENT = False
@@ -202,7 +204,7 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                     await zmq_ctrl.send_command({}) #Stop the audio demodulation in rf_engine just if demodulation changed
                     RESET_DEMOD_CFG = False
 
-                dsp_payload = await acquirer.get_corrected_data(next_config)
+                
                 
                 if dsp_payload:
                     final_payload = format_data_for_upload(dsp_payload)

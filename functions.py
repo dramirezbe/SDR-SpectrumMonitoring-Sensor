@@ -276,6 +276,58 @@ class AcquireDual:
         # PLL/Hardware settle time
         await asyncio.sleep(0.05) 
         return data
+    
+    async def raw_acquire(self, rf_params):
+        """
+        Performs a single acquisition and removes the central DC spike 
+        by interpolating neighbor noise over the center 0.2% of the spectrum.
+        """
+        # 1. Perform a single standard acquisition
+        data = await self._single_acquire(rf_params)
+        
+        try:
+            pxx = np.array(data['Pxx'])
+            total_bins = len(pxx)
+            center_idx = total_bins // 2
+            
+            # 2. Define the spike width (0.2% of total bandwidth)
+            # We ensure at least 1 bin is removed
+            spike_width = max(1, int(total_bins * 0.002))
+            half_width = spike_width // 2
+            
+            start_idx = center_idx - half_width
+            end_idx = center_idx + half_width
+            
+            # 3. Define neighbor windows to sample the noise floor
+            # We'll take a small sample (same size as the spike) from both sides
+            sample_size = max(5, spike_width) 
+            
+            left_neighbor = pxx[max(0, start_idx - sample_size) : start_idx]
+            right_neighbor = pxx[end_idx : min(total_bins, end_idx + sample_size)]
+            
+            # Concatenate neighbors to find the statistical noise floor
+            neighbors = np.concatenate([left_neighbor, right_neighbor])
+            noise_mean = np.mean(neighbors)
+            noise_std = np.std(neighbors)
+            
+            # 4. Generate and inject synthetic noise
+            # This replaces the spike with values that match the local noise profile
+            simulated_noise = np.random.normal(noise_mean, noise_std, size=(end_idx - start_idx))
+            
+            # Ensure we don't produce negative values if Pxx is in linear power
+            # (Optional: skip if you are working exclusively in dB)
+            simulated_noise = np.clip(simulated_noise, a_min=np.min(neighbors), a_max=None)
+            
+            pxx[start_idx:end_idx] = simulated_noise
+            
+            # 5. Package and return
+            data['Pxx'] = pxx.tolist()
+            self._log.debug(f"DC Spike removed: {spike_width} bins replaced at center.")
+            return data
+
+        except Exception as e:
+            self._log.error(f"DC spike removal failed: {e}")
+            return data
 
     async def get_corrected_data(self, rf_params):
         sr = rf_params.get("sample_rate_hz", 8e6)
