@@ -43,7 +43,8 @@ apt-get install -y git cmake make libzmq3-dev libcjson-dev libcurl4-openssl-dev 
     python3-gi python3-gst-1.0 python3-dotenv python3-zmq python3-websockets gobject-introspection gir1.2-gstreamer-1.0 \
     gir1.2-gst-plugins-base-1.0 gir1.2-gst-plugins-bad-1.0 gstreamer1.0-tools \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libnice10 libopus-dev
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-nice libnice10 libopus-dev \
+    libcairo2-dev python3-dev
 
 log "Step 2/6: Building libgpiod v2..."
 cd "$BUILD_DIR"
