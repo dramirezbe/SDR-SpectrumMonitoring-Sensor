@@ -1,223 +1,189 @@
-#!/usr/bin/env python3
-#kal_sync.py
-
-from __future__ import annotations
 import subprocess
-import traceback
-import sys
 import re
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+import time
+import sys
+import traceback
 
+# Custom imports from your project
 import cfg
 from utils import ShmStore
 
 log = cfg.set_logger()
 
-@dataclass
-class CalResult:
-    rc: int
-    offset_ppm: Optional[float] = None
-    offset_hz: Optional[float] = None
+# HackRF often needs gain to see signals clearly. Adjust 0-40 as needed.
+DEFAULT_GAIN = "40" 
 
+def check_hackrf_status():
+    """
+    Checks if the HackRF is available.
+    Returns: (bool, message)
+    """
+    try:
+        result = subprocess.run(['hackrf_info'], capture_output=True, text=True, timeout=10)
+        output = (result.stdout + result.stderr).lower()
+        if "busy" in output:
+            return False, "HackRF is currently busy."
+        if "not found" in output:
+            return False, "No HackRF detected."
+        return True, "HackRF Ready."
+    except Exception as e:
+        return False, f"Error checking HackRF: {str(e)}"
 
-class KalSync:
-    UNIT_MAP = {"MHz": 1e6, "kHz": 1e3, "Hz": 1.0}
-    # regex to capture lines like:
-    # chan:  123 (959.6MHz - 17.082kHz)    power:  222034.66
-    LINE_RE = re.compile(
-        r"chan:\s*(\d+)\s*\(\s*([\d.]+)\s*(MHz|kHz|Hz)\s*[+-]\s*([\d.]+)\s*(MHz|kHz|Hz)?\s*\)\s*power:\s*([\d.]+)",
-        re.IGNORECASE,
+def run_kal_scan(band, start_time, time_limit):
+    """
+    Runs kal -s and prints output in real-time.
+    Returns: list of (channel, power)
+    """
+    log.info(f"Scanning band: {band}")
+    print(f"\n--- Scanning band: {band} ---")
+    found_in_band = []
+    
+    cmd = ['kal', '-s', band, '-g', DEFAULT_GAIN]
+    
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True
     )
-    # regex to capture lines like:
-    # average: 17.082kHz
-    NUM_UNIT_RE = re.compile(r"([+-]?\s*[\d.]+)\s*(kHz|Hz|MHz|ppm)\b", re.IGNORECASE)
 
-    def __init__(self):
-        self.cmds = self._build_cmds()
-
-    @staticmethod
-    def _build_cmds() -> List[List[str]]:
-        if cfg.VERBOSE:
-            return [["kal", "-s", "GSM900", "-v"], ["kal", "-s", "GSM850", "-v"], ["kal", "-s", "GSM-R", "-v"]]
-        return [["kal", "-s", "GSM900"], ["kal", "-s", "GSM850"], ["kal", "-s", "GSM-R"]]
-
-    def _run(self, cmd: List[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(cmd, capture_output=True, text=True)
-
-    def scan_and_find_first(self) -> Optional[Dict[str, Any]]:
-        """
-        Runs kalibrate scans. Reads output in real-time.
-        As soon as a peak is found, terminates the subprocess and returns the peak info.
-        """
-        log.info("Starting GSM Scan (stopping on first peak)...")
-
-        for cmd in self.cmds:
-            scan_name = " ".join(cmd)
-            log.info(f"Running: {scan_name}")
+    try:
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
             
-            # Use Popen to read output line-by-line
-            try:
-                # bufsize=1 means line buffered
-                with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
-                    found_peak = None
-                    
-                    try:
-                        # Read line by line
-                        for line in proc.stdout:
-                            # Check for channel info
-                            m = self.LINE_RE.search(line)
-                            if m:
-                                chan = int(m.group(1))
-                                freq_val = float(m.group(2))
-                                freq_unit = m.group(3)
-                                power = float(m.group(6))
-                                freq_hz = freq_val * self.UNIT_MAP.get(freq_unit, 1e6)
+            if line:
+                clean_line = line.strip()
+                print(f"  [scan]: {clean_line}")
+                match = re.search(r"chan:\s+(\d+).*power:\s+([\d.]+)", clean_line)
+                if match:
+                    found_in_band.append((match.group(1), float(match.group(2))))
 
-                                found_peak = {
-                                    "scan": scan_name, 
-                                    "chan": chan, 
-                                    "freq_hz": freq_hz, 
-                                    "power": power
-                                }
-                                log.info(f"Peak found: {line.strip()}")
-                                break  # Break the loop to terminate
-                    except Exception as e:
-                        log.error(f"Error reading output from {scan_name}: {e}")
-                    
-                    # If we broke out or finished, we're here. 
-                    # Terminate the process if it's still running.
-                    if proc.poll() is None:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=1)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                    
-                    if found_peak:
-                        return found_peak
+            if time.time() - start_time > time_limit:
+                log.warning(f"Scan timeout reached for {band}")
+                process.terminate()
+                break
+    except Exception as e:
+        log.error(f"Error during scan: {e}")
+        process.kill()
 
-            except FileNotFoundError:
-                log.error("'kal' not found. Please install kalibrate-hackrf.")
-                return None
-            except Exception:
-                log.error(f"Unexpected error running {scan_name}:\n{traceback.format_exc()}")
-                continue
+    return found_in_band
 
-        log.info("No GSM channels found after checking all bands.")
-        return None
+def calibrate_channel(channel):
+    """
+    Runs kal -c and prints output in real-time.
+    Returns: (success_bool, ppm_float_or_none, display_string)
+    """
+    log.info(f"Calibrating on Channel {channel}")
+    print(f"\n--- Starting Real-Time Calibration on Channel {channel} ---")
+    cmd = ['kal', '-c', str(channel), '-g', DEFAULT_GAIN]
+    
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True
+    )
 
-    def _parse_offset_from_output(self, out: str, freq_hz: float) -> Optional[float]:
-        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-        
-        # search for lines containing "average" first
-        for i, ln in enumerate(lines):
-            if "average" in ln.lower():
-                m = self.NUM_UNIT_RE.search(ln)
-                if not m:
-                    # look ahead slightly
-                    for j in range(i + 1, min(i + 4, len(lines))):
-                        m = self.NUM_UNIT_RE.search(lines[j])
-                        if m:
-                            break
-                if m:
-                    return self._convert_to_hz(m, freq_hz)
+    ppm_val = None
+    cal_start = time.time()
 
-        # fallback to first number found
-        for ln in lines:
-            m = self.NUM_UNIT_RE.search(ln)
-            if m:
-                return self._convert_to_hz(m, freq_hz)
-        return None
-
-    def _convert_to_hz(self, m: re.Match, freq_hz: float) -> Optional[float]:
-        val_str = m.group(1).replace(" ", "")
-        unit = m.group(2).lower()
-        try:
-            val = float(val_str)
-        except Exception:
-            return None
-        
-        if unit == "ppm":
-            return val * freq_hz / 1e6
-        if unit == "khz":
-            return val * 1e3
-        if unit == "mhz":
-            return val * 1e6
-        return val * 1.0  # Hz
-
-    def execute_calibration(self, best_peak: Dict[str, Any]) -> CalResult:
-        chan = best_peak["chan"]
-        freq_hz = best_peak["freq_hz"]
-        power = best_peak["power"]
-        
-        log.info(f"Calibrating against found peak: Chan {chan} ({freq_hz/1e6:.1f} MHz) Power: {power}")
-
-        try:
-            # Run calibration on specific channel
-            proc = self._run(["kal", "-c", str(chan)])
-        except FileNotFoundError:
-            log.error("'kal' not found.")
-            return CalResult(1)
-        except Exception:
-            log.error(f"Unexpected error running kal for calibration:\n{traceback.format_exc()}")
-            return CalResult(1)
-
-        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        
-        # Get Offset in Hz
-        offset_hz = self._parse_offset_from_output(out, freq_hz)
-
-        if offset_hz is None:
-            log.error("Could not parse offset from kal output.")
-            log.debug("kal stdout/stderr:\n" + out)
-            return CalResult(1)
-
-        # Calculate PPM
-        if freq_hz == 0:
-            log.error("Frequency is zero, cannot calculate PPM.")
-            return CalResult(1)
-
-        ppm = (offset_hz / freq_hz) * 1e6
-        
-        log.info(f"Result: {offset_hz:.2f} Hz offset @ {freq_hz/1e6:.1f} MHz = {ppm:.3f} PPM")
-        
-        return CalResult(0, offset_ppm=ppm, offset_hz=offset_hz)
-
-    def run(self) -> int:
-        store = ShmStore()
-        # Step 1: Scan and find FIRST peak in memory
-        first_peak = self.scan_and_find_first()
-        
-        if not first_peak:
-            log.warning("No GSM peaks found. Skipping calibration.")
-            return 1 
-
-        # Step 2: Calibrate using that peak
-        res = self.execute_calibration(first_peak)
-
-        if res.rc != 0 or res.offset_ppm is None:
-            log.error("Calibration failed. Variables will not be updated.")
-            return res.rc
-
-        # Step 3: Persist Result (Only on success)
-        try:
-            # Save PPM
-            store.add_to_persistent("ppm_error", float(res.offset_ppm))
-            # Save Timestamp
-            store.add_to_persistent("last_kal_ms", cfg.get_time_ms())
+    try:
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
             
-            log.info(f"Calibration successful. Offset {res.offset_ppm:.3f} ppm saved.")
-            return 0
-        except Exception:
-            log.error(f"Unexpected error saving offset:\n{traceback.format_exc()}")
-            return 1
+            if line:
+                print(f"  [kal]: {line.strip()}")
+                match = re.search(r"average absolute error:\s+([-+]?[\d.]+)\s+ppm", line)
+                if match:
+                    ppm_val = float(match.group(1))
 
+            if time.time() - cal_start > 60:
+                log.error("Calibration timeout (60s) exceeded.")
+                process.terminate()
+                return False, None, "0 (error calibrating - timeout)"
+
+    except Exception as e:
+        log.error(f"Unexpected error in calibration: {traceback.format_exc()}")
+        process.kill()
+        return False, None, f"0 (error calibrating - {str(e)})"
+
+    if ppm_val is not None:
+        return True, ppm_val, f"{ppm_val} ppm"
+    else:
+        return False, None, "0 (error calibrating - no ppm found)"
 
 def main() -> int:
-    return KalSync().run()
+    # 1. Hardware Check
+    success, msg = check_hackrf_status()
+    if not success:
+        log.error(f"Abort: {msg}")
+        print(f"ABORT: {msg}")
+        return 1
 
+    bands = ["GSM850", "GSM-R", "GSM900"]
+    all_peaks = []
+    start_program = time.time()
+    
+    SCAN_TIME_LIMIT = 90
+    PEAK_LIMIT = 10
+
+    # 2. Scanning Phase
+    for band in bands:
+        if (time.time() - start_program) > SCAN_TIME_LIMIT:
+            break
+        if len(all_peaks) >= PEAK_LIMIT:
+            break
+            
+        found = run_kal_scan(band, start_program, SCAN_TIME_LIMIT)
+        all_peaks.extend(found)
+
+    if not all_peaks:
+        log.warning("No GSM peaks found. Skipping calibration.")
+        print("\nResult: No peaks found across all bands.")
+        return 1
+
+    # 3. Sort and Select Best
+    all_peaks.sort(key=lambda x: x[1], reverse=True)
+    best_channel = all_peaks[0][0]
+    
+    log.info(f"Strongest peak found on Channel {best_channel}")
+    
+    # 4. Calibration Phase
+    cal_success, ppm_float, ppm_display = calibrate_channel(best_channel)
+
+    # 5. Result and Persistence
+    print("\n" + "="*40)
+    print(f"FINAL CALIBRATION REPORT")
+    print(f"Status:        {'SUCCESS' if cal_success else 'FAILED'}")
+    print(f"Channel Used:  {best_channel}")
+    print(f"PPM Error:     {ppm_display}")
+    print("="*40)
+
+    if cal_success and ppm_float is not None:
+        try:
+            store = ShmStore()
+            # Persist PPM float
+            store.add_to_persistent("ppm_error", float(ppm_float))
+            # Persist Timestamp using cfg helper
+            store.add_to_persistent("last_kal_ms", cfg.get_time_ms())
+            
+            log.info(f"Calibration successful. Saved {ppm_float:.3f} ppm to shared memory.")
+            return 0
+        except Exception:
+            log.error(f"Error saving to ShmStore:\n{traceback.format_exc()}")
+            return 1
+    else:
+        log.error(f"Calibration failed or returned no value. Result: {ppm_display}")
+        return 1
 
 if __name__ == "__main__":
-    rc = cfg.run_and_capture(main, cfg.LOG_FILES_NUM)
+    rc = cfg.run_and_capture(main)
     sys.exit(rc)
