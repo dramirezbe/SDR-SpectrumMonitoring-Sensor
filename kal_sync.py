@@ -12,12 +12,10 @@ log = cfg.set_logger()
 
 # HackRF often needs gain to see signals clearly. Adjust 0-40 as needed.
 DEFAULT_GAIN = "40" 
+GLOBAL_TIMEOUT = 105  # 1 minute 45 seconds
 
 def check_hackrf_status():
-    """
-    Checks if the HackRF is available.
-    Returns: (bool, message)
-    """
+    """Checks if the HackRF is available."""
     try:
         result = subprocess.run(['hackrf_info'], capture_output=True, text=True, timeout=10)
         output = (result.stdout + result.stderr).lower()
@@ -29,11 +27,8 @@ def check_hackrf_status():
     except Exception as e:
         return False, f"Error checking HackRF: {str(e)}"
 
-def run_kal_scan(band, start_time, time_limit):
-    """
-    Runs kal -s and prints output in real-time.
-    Returns: list of (channel, power)
-    """
+def run_kal_scan(band, deadline):
+    """Runs kal -s and prints output in real-time, respecting global deadline."""
     log.info(f"Scanning band: {band}")
     print(f"\n--- Scanning band: {band} ---")
     found_in_band = []
@@ -51,6 +46,12 @@ def run_kal_scan(band, start_time, time_limit):
 
     try:
         while True:
+            # Check Global Timeout
+            if time.time() > deadline:
+                log.warning(f"Global timeout reached during scan of {band}. Terminating.")
+                process.terminate()
+                return found_in_band, True # Return what we have + Timeout flag
+
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break
@@ -62,21 +63,14 @@ def run_kal_scan(band, start_time, time_limit):
                 if match:
                     found_in_band.append((match.group(1), float(match.group(2))))
 
-            if time.time() - start_time > time_limit:
-                log.warning(f"Scan timeout reached for {band}")
-                process.terminate()
-                break
     except Exception as e:
         log.error(f"Error during scan: {e}")
         process.kill()
 
-    return found_in_band
+    return found_in_band, False
 
-def calibrate_channel(channel):
-    """
-    Runs kal -c and prints output in real-time.
-    Returns: (success_bool, ppm_float_or_none, display_string)
-    """
+def calibrate_channel(channel, deadline):
+    """Runs kal -c and prints output in real-time, respecting global deadline."""
     log.info(f"Calibrating on Channel {channel}")
     print(f"\n--- Starting Real-Time Calibration on Channel {channel} ---")
     cmd = ['kal', '-c', str(channel), '-g', DEFAULT_GAIN]
@@ -91,10 +85,15 @@ def calibrate_channel(channel):
     )
 
     ppm_val = None
-    cal_start = time.time()
 
     try:
         while True:
+            # Check Global Timeout
+            if time.time() > deadline:
+                log.warning("Global timeout reached during calibration. Terminating.")
+                process.terminate()
+                return False, None, "0 (Global Timeout reached)", True
+
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break
@@ -105,59 +104,62 @@ def calibrate_channel(channel):
                 if match:
                     ppm_val = float(match.group(1))
 
-            if time.time() - cal_start > 60:
-                log.error("Calibration timeout (60s) exceeded.")
-                process.terminate()
-                return False, None, "0 (error calibrating - timeout)"
-
     except Exception as e:
         log.error(f"Unexpected error in calibration: {traceback.format_exc()}")
         process.kill()
-        return False, None, f"0 (error calibrating - {str(e)})"
+        return False, None, f"0 (error: {str(e)})", False
 
     if ppm_val is not None:
-        return True, ppm_val, f"{ppm_val} ppm"
+        return True, ppm_val, f"{ppm_val} ppm", False
     else:
-        return False, None, "0 (error calibrating - no ppm found)"
+        return False, None, "0 (no ppm found)", False
 
 def main() -> int:
+    start_program = time.time()
+    deadline = start_program + GLOBAL_TIMEOUT
+
     # 1. Hardware Check
     success, msg = check_hackrf_status()
     if not success:
         log.error(f"Abort: {msg}")
-        print(f"ABORT: {msg}")
         return 1
 
     bands = ["GSM850", "GSM-R", "GSM900"]
     all_peaks = []
-    start_program = time.time()
-    
-    SCAN_TIME_LIMIT = 90
     PEAK_LIMIT = 10
 
     # 2. Scanning Phase
     for band in bands:
-        if (time.time() - start_program) > SCAN_TIME_LIMIT:
-            break
-        if len(all_peaks) >= PEAK_LIMIT:
-            break
+        if time.time() > deadline:
+            log.warning("Global timeout reached before starting next band.")
+            print("\n!!! Global Timeout Reached - Graceful Exit !!!")
+            return 0 # User requested 0 on timeout
             
-        found = run_kal_scan(band, start_program, SCAN_TIME_LIMIT)
+        found, timed_out = run_kal_scan(band, deadline)
         all_peaks.extend(found)
+        
+        if timed_out or len(all_peaks) >= PEAK_LIMIT:
+            break
 
     if not all_peaks:
-        log.warning("No GSM peaks found. Skipping calibration.")
-        print("\nResult: No peaks found across all bands.")
+        if time.time() > deadline:
+            return 0
+        log.warning("No GSM peaks found.")
         return 1
 
     # 3. Sort and Select Best
     all_peaks.sort(key=lambda x: x[1], reverse=True)
     best_channel = all_peaks[0][0]
     
-    log.info(f"Strongest peak found on Channel {best_channel}")
-    
     # 4. Calibration Phase
-    cal_success, ppm_float, ppm_display = calibrate_channel(best_channel)
+    if time.time() > deadline:
+        return 0
+
+    cal_success, ppm_float, ppm_display, timed_out = calibrate_channel(best_channel, deadline)
+
+    if timed_out:
+        print("\n!!! Global Timeout Reached During Calibration - Graceful Exit !!!")
+        return 0
 
     # 5. Result and Persistence
     print("\n" + "="*40)
@@ -170,20 +172,17 @@ def main() -> int:
     if cal_success and ppm_float is not None:
         try:
             store = ShmStore()
-            # Persist PPM float
             store.add_to_persistent("ppm_error", float(ppm_float))
-            # Persist Timestamp using cfg helper
             store.add_to_persistent("last_kal_ms", cfg.get_time_ms())
-            
-            log.info(f"Calibration successful. Saved {ppm_float:.3f} ppm to shared memory.")
+            log.info(f"Calibration successful: {ppm_float:.3f} ppm")
             return 0
         except Exception:
             log.error(f"Error saving to ShmStore:\n{traceback.format_exc()}")
             return 1
     else:
-        log.error(f"Calibration failed or returned no value. Result: {ppm_display}")
         return 1
 
 if __name__ == "__main__":
+    # Ensure even if cfg.run_and_capture is used, we wrap the exit logic
     rc = cfg.run_and_capture(main)
     sys.exit(rc)

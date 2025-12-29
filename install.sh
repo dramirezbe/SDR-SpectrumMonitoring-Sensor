@@ -63,6 +63,7 @@ cd kalibrate-hackrf && ./bootstrap > /dev/null && ./configure > /dev/null && mak
 # ---------------------------------------------------------
 log "Step 4/6: Setting up Python environment..."
 cd "$PROJECT_DIR"
+rm -rf "venv"
 [ ! -d "venv" ] && python3 -m venv --system-site-packages venv 
 source venv/bin/activate
 pip install --upgrade pip --quiet

@@ -19,6 +19,7 @@
 #include "utils.h"       
 #include "bacn_LTE.h"
 #include "bacn_GPS.h"
+#include "bacn_gpio.h"
 
 // =========================================================
 // DEFINITIONS & MACROS
@@ -44,14 +45,148 @@ bool GPSRDY = false;
 // =========================================================
 // FUNCTION PROTOTYPES
 // =========================================================
+void connection_LTE(void);
 void run_cmd(const char *cmd);
 int get_wlan_ip(char *ip);
 int get_eth_ip(char *ip);
 int get_ppp_ip(char *ip);
 
 // =========================================================
+// MAIN ORCHESTRATION
+// =========================================================
+
+int main(void)
+{
+    char *api_url = getenv_c("API_URL"); 
+    const char *ip_address = "10.10.1.254";
+    char ping_cmd[100];
+    int count = 0;
+    int tryRB = 0;
+    int status = 0;
+    int ping_result = 0;
+
+    system("clear");
+    system("sudo poff rnet");
+
+    // Check if module LTE is ON
+	if(status_LTE()) {               
+		printf("LTE module is ON\r\n");
+	} else {
+    	power_ON_LTE();
+	}
+
+    if(init_usart(&LTE) != 0)
+    {
+        printf("Error : LTE open failed\r\n");
+        return -1;
+    }
+
+    printf("LTE module ready\r\n");
+
+    while(!LTE_Start(&LTE));
+    printf("LTE response OK\n");
+
+    if(init_usart1(&GPS) != 0)
+    {
+        printf("Error : GPS open failed\r\n");
+        return -1;
+    }
+
+    close_usart(&LTE);
+
+    // 2. Network / Internet Setup    
+    connection_LTE();
+
+    // 3. Environment Setup    
+    if (api_url == NULL) {
+        printf("WARN: API_URL not set. Data sending will be skipped.\n");
+    } else {
+        printf("API URL found: %s\n", api_url);
+    }
+
+    // 4. Main Loop Variables    
+    snprintf(ping_cmd, sizeof(ping_cmd), "ping -c 1 -W 1 %s", ip_address);
+    
+    while (1)
+    {
+        // Assume GPSRDY is set by an Interrupt Service Routine (ISR) or separate RX handler
+        if(GPSRDY) {
+            GPSRDY = false;
+            count++;
+
+            // Trigger every 10 GPS updates
+            if(count >= 10) { 
+                count = 0; // Reset counter
+		        printf("Latitude: %s, Longitude: %s, Altitude: %s\n", GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
+                // --- A. SEND DATA ---
+                if(GPSInfo.Latitude != NULL) {
+                    status = post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
+                }
+
+                if (status == 0) {
+                        printf("Success: Data posted to %s\n", api_url);
+                } else {
+                	fprintf(stderr, "Failed with error code: %d\n", status);
+                }
+
+                // --- B. CHECK CONNECTIVITY ---
+                // We run the ping command HERE to get the current status
+                ping_result = system(ping_cmd); 
+
+                if (ping_result == 0) {
+                    // Success (0 return code)
+                    printf("Ping to %s successful.\n", ip_address);
+                    tryRB = 0;
+                } else {
+                    // Failure
+                    printf("Ping to %s failed. Retry count: %d\n", ip_address, tryRB + 1);
+                    tryRB++;
+                    
+                    if(tryRB >= 6) {
+                        tryRB = 0;
+                        printf("CRITICAL: Network down for too long. Rebooting...\n");
+                        system("sudo poff rnet");
+                        sleep(15);
+                        connection_LTE();
+                    }
+                }
+            } 
+        }
+        
+        // Slight delay to prevent 100% CPU usage if GPSRDY is polling based
+        sleep(1); 
+    }    
+
+    return 0;
+}
+
+// =========================================================
 // HELPER IMPLEMENTATIONS
 // =========================================================
+
+void connection_LTE(void)
+{
+    char ip[IP_BUF];
+
+    // 2. Network / Internet Setup    
+    run_cmd("sudo pon rnet");
+    sleep(15);
+    
+    if(!get_ppp_ip(ip)) {
+        printf("No IP address assigned! Restarting PPP...\n");
+        run_cmd("sudo poff rnet");
+        sleep(5);
+        run_cmd("sudo pon rnet");
+        sleep(15);
+
+        if(!get_ppp_ip(ip)) {
+            printf("PPP failed again. No IP assigned.\n");
+        }
+    }
+    if(strlen(ip) > 0) {
+        printf("PPP connected. IP = %s\n", ip);
+    }
+}
 
 void run_cmd(const char *cmd) {
     printf("[CMD] %s\n", cmd);
@@ -115,118 +250,5 @@ int get_ppp_ip(char *ip) {
         }
     }
     pclose(fp);
-    return 0;
-}
-
-// =========================================================
-// MAIN ORCHESTRATION
-// =========================================================
-
-int main() {
-    // 1. Hardware Init
-    if(init_usart(&LTE) != 0) {
-        fprintf(stderr, "Error: LTE Init failed (UART issue)\n");
-        return -1;
-    }
-    if(init_usart1(&GPS) != 0) {
-        fprintf(stderr, "Error: GPS Init failed\n");
-        return -1;
-    }
-
-    // 2. Network / Internet Setup
-    char ip[IP_BUF];
-    sleep(30); // Give interfaces a moment
-
-    if(get_eth_ip(ip)) {
-        printf("IP address assigned to Ethernet: %s\n", ip);
-    } else {
-        sleep(30);
-        if(get_wlan_ip(ip)) {
-            printf("IP address assigned to WiFi: %s\n", ip);
-        } else {
-            printf("Starting PPP connection...\n");
-            run_cmd("sudo pon rnet");
-            sleep(30);
-            
-            if(!get_ppp_ip(ip)) {
-                printf("No IP address assigned! Restarting PPP...\n");
-                run_cmd("sudo poff rnet");
-                sleep(5);
-                run_cmd("sudo pon rnet");
-                sleep(30);
-
-                if(!get_ppp_ip(ip)) {
-                    printf("PPP failed again. No IP assigned.\n");
-                }
-            }
-            if(strlen(ip) > 0) {
-                printf("PPP connected. IP = %s\n", ip);
-            }
-        }
-    } 
-    
-    // 3. Environment Setup
-    char *api_url = getenv_c("API_URL"); 
-    if (api_url == NULL) {
-        printf("WARN: API_URL not set. Data sending will be skipped.\n");
-    } else {
-        printf("API URL found: %s\n", api_url);
-    }
-
-    // 4. Main Loop Variables
-    const char *ip_address = "8.8.8.8";
-    char ping_cmd[100];
-    snprintf(ping_cmd, sizeof(ping_cmd), "ping -c 1 -W 1 %s", ip_address);
-    
-    int count = 0;
-    int tryRB = 0;
-    int status = 0;
-    int ping_result = 0;
-    printf("System Running. Press Ctrl+C to exit.\n");
-
-    while (1) {
-        // Assume GPSRDY is set by an Interrupt Service Routine (ISR) or separate RX handler
-        if(GPSRDY) {
-            GPSRDY = false;
-            count++;
-
-            // Trigger every 10 GPS updates
-            if(count >= 10) { 
-                count = 0; // Reset counter
-		printf("Latitude: %s, Longitude: %s, Altitude: %s\n", GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
-                // --- A. SEND DATA ---
-                status = post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
-
-                if (status == 0) {
-                        printf("Success: Data posted to %s\n", api_url);
-                } else {
-                	fprintf(stderr, "Failed with error code: %d\n", status);
-                }
-
-                // --- B. CHECK CONNECTIVITY ---
-                // We run the ping command HERE to get the current status
-                ping_result = system(ping_cmd); 
-
-                if (ping_result == 0) {
-                    // Success (0 return code)
-                    printf("Ping to %s successful.\n", ip_address);
-                    tryRB = 0;
-                } else {
-                    // Failure
-                    printf("Ping to %s failed. Retry count: %d\n", ip_address, tryRB + 1);
-                    tryRB++;
-                    
-                    if(tryRB >= 6) {
-                        printf("CRITICAL: Network down for too long. Rebooting...\n");
-                        system("sudo reboot now");
-                    }
-                }
-            } 
-        }
-        
-        // Slight delay to prevent 100% CPU usage if GPSRDY is polling based
-        usleep(1000); 
-    }
-
     return 0;
 }
