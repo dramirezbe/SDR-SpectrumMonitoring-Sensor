@@ -215,6 +215,8 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                     #debug
                     if final_payload.get("excursion_hz", False):
                         log.info(f"Excursion: {final_payload['excursion_hz']} Hz")
+                    if final_payload.get("depth", False):
+                        log.info(f"Depth: {final_payload['depth']} %")
 
                     rc, _ = client.post_json(cfg.DATA_URL, final_payload)
                     if rc != 0:
