@@ -99,6 +99,19 @@ int post_gps_data(
     const char *latitude_str,
     const char *longitude_str)
 {
+    // --- 1. VALIDACIÓN DE SEGURIDAD (Evita el Segmentation Fault) ---
+    // Si cualquiera de estos punteros es NULL o el string está vacío, salimos de la función.
+    if (base_api_url == NULL || altitude_str == NULL || 
+        latitude_str == NULL || longitude_str == NULL) {
+        fprintf(stderr, "[UTILS] Error: Datos NULL recibidos. Saltando envío...\n");
+        return -1;
+    }
+
+    if (strlen(latitude_str) == 0 || strlen(longitude_str) == 0) {
+        fprintf(stderr, "[UTILS] Esperando fijación de GPS (strings vacíos). Saltando...\n");
+        return -1;
+    }
+
     CURL *curl;
     CURLcode res;
     char full_url[256];
@@ -107,36 +120,25 @@ int post_gps_data(
 
     // Obtener MAC
     if (get_wlan0_mac(mac_address) != 0) {
-        fprintf(stderr, "[UTILS] Error: Could not retrieve wlan0 MAC address.\n");
+        fprintf(stderr, "[UTILS] Error: No se pudo obtener la MAC de wlan0.\n");
         return 1; 
     }
 
     // --- 2. Parseo y Conversión ---
-    
-    // Convertimos el string a double crudo (ej: 501.7238)
+    // atof es seguro aquí porque ya validamos que no sean NULL
     double raw_lat = atof(latitude_str);
     double raw_lng = atof(longitude_str);
-    double alt = atof(altitude_str); // La altitud no necesita conversión de minutos
+    double alt = atof(altitude_str);
 
-    // Aplicamos la fórmula matemática
     double final_lat = nmea_to_decimal(raw_lat);
     double final_lng = nmea_to_decimal(raw_lng);
 
-    // --- 3. Corrección de Signo (Hemisferios) ---
-    // El formato NMEA puro suele ser positivo. 
-    // Si estás en Colombia (u Occidente), la Longitud debe ser negativa.
-    // Si estás al Sur del ecuador, la Latitud debe ser negativa.
-    
-    // FORZAR OESTE (W): Si la longitud es positiva, la volvemos negativa
+    // --- 3. Corrección de Hemisferio (Oeste para Colombia) ---
     if (final_lng > 0) {
         final_lng = -final_lng; 
     }
-    
-    // Opcional: Si estuvieras al sur (ej. Leticia), descomenta esto:
-    // if (strcmp(lat_direction, "S") == 0) final_lat = -final_lat;
 
     // --- 4. Formatear JSON ---
-    // Usamos %.6f para tener suficiente precisión en coordenadas GPS
     int written = snprintf(json_payload, MAX_JSON_LENGTH, 
         "{\"mac\": \"%s\", \"lat\": %.6f, \"lng\": %.6f, \"alt\": %.1f}",
         mac_address, final_lat, final_lng, alt);
@@ -146,10 +148,10 @@ int post_gps_data(
         return 2;
     }
 
-    // Construir URL
+    // Construir URL completa
     snprintf(full_url, sizeof(full_url), "%s/gps", base_api_url);
 
-    // --- 5. Enviar Request (CURL) ---
+    // --- 5. Enviar con CURL ---
     curl = curl_easy_init();
     if(curl) {
         curl_easy_setopt(curl, CURLOPT_URL, full_url);
@@ -160,11 +162,13 @@ int post_gps_data(
         headers = curl_slist_append(headers, "Content-Type: application/json");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
+        // Timeout para evitar que el programa se quede colgado si no hay internet
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+
         res = curl_easy_perform(curl);
 
         if(res != CURLE_OK) {
-            fprintf(stderr, "[UTILS] curl_easy_perform() failed: %s\n", 
-                    curl_easy_strerror(res));
+            fprintf(stderr, "[UTILS] Error en CURL: %s\n", curl_easy_strerror(res));
             curl_slist_free_all(headers);
             curl_easy_cleanup(curl);
             return 3;
@@ -173,8 +177,8 @@ int post_gps_data(
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
     } else {
-        return 4; // Curl init failed
+        return 4;
     }
 
-    return 0; // Success
+    return 0; // Éxito
 }
