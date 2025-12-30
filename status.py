@@ -12,6 +12,7 @@ y enviarlo al servidor central a través de una API REST.
 import cfg
 import sys
 import os
+import time
 
 # Setup Logger
 log = cfg.set_logger()
@@ -89,21 +90,23 @@ def main() -> int:
     """
     store = ShmStore()
     device = StatusDevice(logs_dir=cfg.LOGS_DIR, logger=log)
-    cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=cfg.VERBOSE, logger=log)
-    
+    cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(),
+                        timeout=(5, 15), verbose=cfg.VERBOSE, logger=log)
+
     try:
         metrics_dict = build_status_final_payload(store, device)
-    except Exception as e:
-        log.error(f"Error building final payload: {e}")
-        return 1
-    
-    log.debug(f"Final Payload: {metrics_dict}")
-    
-    # Send data
-    rc, _ = cli.post_json(cfg.STATUS_URL, metrics_dict)
-    if rc != 0:
-        log.error(f"Error sending status: {rc}")
-        return 1
+    except Exception:
+        return 0
+
+    # retry up to 10 times, every 0.5s, no logs, finish on success
+    attempts = 0
+    while attempts < 10:
+        rc, _ = cli.post_json(cfg.STATUS_URL, metrics_dict)
+        if rc == 0:
+            log.debug(f"Payload sent succesfully after {attempts} attempts")
+            break
+        attempts += 1
+        time.sleep(0.5)
 
     return 0
 
