@@ -31,7 +31,7 @@
 // - WBFM broadcast channel ~200kHz (±100kHz). If you use 75k, audio usually gets worse.
 static float  IQ_FILTER_BW_FM_HZ      = 200000.0f;
 // Butterworth order (will be forced to even internally). Typical: 4,6,8
-static int    IQ_FILTER_ORDER         = 8;
+static int    IQ_FILTER_ORDER         = 6;
 
 
 #ifdef __cplusplus

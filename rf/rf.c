@@ -52,7 +52,7 @@ static int    IQ_FILTER_ENABLE        = 1;
 // Recommended two-sided channel BW:
 
 // AM voice-like channel BW ~10kHz (±5kHz)
-static float  IQ_FILTER_BW_AM_HZ      = 10000.0f;
+static float  IQ_FILTER_BW_AM_HZ      = 20000.0f;
 
 // Optional: apply same channel filter to IQ before PSD in FM/AM (default OFF to preserve current PSD behavior)
 static int    IQ_FILTER_APPLY_TO_PSD  = 1;

@@ -7,7 +7,7 @@
 #endif
 
 // AM audio LPF (conservative voice-style)
-#define AM_AUDIO_LPF_HZ   5000.0f
+#define AM_AUDIO_LPF_HZ   4000.0f
 #define AM_AUDIO_Q        0.707f
 
 // EMA alpha for depth update (applied once per report window)
