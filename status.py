@@ -98,12 +98,14 @@ def main() -> int:
     except Exception:
         return 0
 
+    log.debug(f"Sending payload: {metrics_dict}")
+
     # retry up to 10 times, every 0.5s, no logs, finish on success
     attempts = 0
     while attempts < 10:
         rc, _ = cli.post_json(cfg.STATUS_URL, metrics_dict)
         if rc == 0:
-            log.debug(f"Payload sent succesfully after {attempts} attempts")
+            log.info(f"Payload sent succesfully after {attempts} attempts")
             break
         attempts += 1
         time.sleep(0.5)
