@@ -2,11 +2,11 @@
 # cfg.py
 
 """
-Módulo de Configuración y Logging Optimizado.
+Módulo de Configuración y Gestión de Entorno.
 
-Este módulo centraliza constantes, rutas y herramientas de sistema. 
-Integra seguridad atómica para archivos y gestión de niveles de log diferenciados
-para proteger la vida útil de la tarjeta SD en Raspberry Pi.
+Centraliza las constantes de la API, rutas de directorios y la lógica de 
+identificación del sensor. Incluye un sistema de logging especializado que 
+minimiza el riesgo de corrupción de datos en sistemas embebidos.
 """
 
 from __future__ import annotations
@@ -88,7 +88,15 @@ LOG_ROTATION_LINES = int(os.getenv("LOG_ROTATION_LINES", "100"))
 # =============================
 
 def get_time_ms() -> int:
-    """Timestamp en ms ajustado a Colombia (UTC-5)."""
+    """
+    Obtiene el tiempo actual en milisegundos.
+    
+    Ajusta el timestamp de Unix al desfase horario de Colombia (UTC-5) para 
+    mantener consistencia con el servidor central.
+    
+    Returns:
+        int: Timestamp en milisegundos.
+    """
     return int(time.time() * 1000) - (5 * 60 * 60 * 1000)
 
 def human_readable(ts_ms: int, target_tz: str = "UTC") -> str:
@@ -98,7 +106,15 @@ def human_readable(ts_ms: int, target_tz: str = "UTC") -> str:
     return dt_local.strftime('%Y-%m-%d %H:%M:%S')
 
 def get_mac() -> str:
-    """Obtiene MAC física priorizando interfaces wlan."""
+    """
+    Escanea las interfaces de red del sistema para obtener la MAC física.
+    
+    Ignora interfaces virtuales (docker, loopback, tun) y prioriza 'wlan' 
+    para asegurar una identificación única del hardware del sensor.
+    
+    Returns:
+        str: Dirección MAC en formato 'xx:xx:xx:xx:xx:xx'.
+    """
     if DEVELOPMENT: return DUMMY_MAC
     try:
         interfaces = os.listdir("/sys/class/net")
@@ -118,6 +134,12 @@ def get_mac() -> str:
 # =============================
 
 class AtomicRotator:
+    """
+    Manejador de archivos de log con rotación y escritura segura.
+    
+    Monitorea el número de líneas escritas y gestiona un ciclo de vida de 
+    archivos (N archivos máximos) para evitar el llenado del almacenamiento.
+    """
     def __init__(self, module_name: str, max_lines: int, max_files: int):
         self.module_name = module_name
         self.max_lines = max_lines
@@ -222,6 +244,20 @@ def set_logger(rotator: AtomicRotator | None = None) -> logging.Logger:
 TargetFunc = Union[Callable[[], int], Callable[[], Coroutine[Any, Any, int]]]
 
 def run_and_capture(func: TargetFunc, num_files=LOG_FILES_NUM) -> int:
+    """
+    Wrapper de ejecución segura para puntos de entrada (main).
+    
+    Configura automáticamente el logger del módulo, inicializa el rotador 
+    atómico y captura cualquier excepción no controlada o señal de 
+    interrupción (Ctrl+C) para cerrar el programa limpiamente.
+
+    Args:
+        func: Función o Corrutina a ejecutar.
+        num_files: Cantidad máxima de archivos de log a conservar.
+
+    Returns:
+        int: Código de salida (0 para éxito, 1 para error).
+    """
     try: module = pathlib.Path(sys.argv[0]).stem
     except: module = "app"
     

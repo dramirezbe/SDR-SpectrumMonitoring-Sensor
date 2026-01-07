@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# kal_sync.py
+
+"""
+Módulo de Sincronización de Frecuencia (Kalibrate).
+
+Este script actúa como una utilidad de autocalibración para el SDR. Utiliza la 
+herramienta externa `kalibrate-hackrf` para encontrar canales GSM y calcular 
+el desplazamiento de frecuencia (PPM error) del oscilador local.
+"""
+
 import subprocess
 import re
 import time
@@ -15,7 +26,12 @@ DEFAULT_GAIN = "40"
 GLOBAL_TIMEOUT = 105  # 1 minute 45 seconds
 
 def check_hackrf_status():
-    """Checks if the HackRF is available."""
+    """
+    Verifica la disponibilidad del hardware HackRF.
+    
+    Returns:
+        tuple: (bool, str) True si el hardware responde, y un mensaje descriptivo.
+    """
     try:
         result = subprocess.run(['hackrf_info'], capture_output=True, text=True, timeout=10)
         output = (result.stdout + result.stderr).lower()
@@ -28,7 +44,16 @@ def check_hackrf_status():
         return False, f"Error checking HackRF: {str(e)}"
 
 def run_kal_scan(band, deadline):
-    """Runs kal -s and prints output in real-time, respecting global deadline."""
+    """
+    Escanea una banda GSM específica en busca de estaciones base.
+
+    Args:
+        band (str): Nombre de la banda (ej. 'GSM900').
+        deadline (float): Timestamp límite para finalizar la operación.
+
+    Returns:
+        tuple: (list, bool) Lista de canales encontrados y un flag de timeout.
+    """
     log.info(f"Scanning band: {band}")
     print(f"\n--- Scanning band: {band} ---")
     found_in_band = []
@@ -69,7 +94,16 @@ def run_kal_scan(band, deadline):
     return found_in_band, False
 
 def calibrate_channel(channel, deadline):
-    """Runs kal -c and prints output in real-time, respecting global deadline."""
+    """
+    Calcula el error de frecuencia PPM usando un canal específico.
+
+    Args:
+        channel (str): Canal GSM detectado.
+        deadline (float): Timestamp límite de seguridad.
+
+    Returns:
+        tuple: (bool, float, str, bool) Éxito, valor PPM, mensaje y flag de timeout.
+    """
     log.info(f"Calibrating on Channel {channel}")
     print(f"\n--- Starting Real-Time Calibration on Channel {channel} ---")
     cmd = ['kal', '-c', str(channel), '-g', DEFAULT_GAIN]
@@ -114,6 +148,18 @@ def calibrate_channel(channel, deadline):
         return False, None, "0 (no ppm found)", False
 
 def main() -> int:
+    """
+    Lógica principal de la campaña de calibración.
+
+    Coordina el escaneo de múltiples bandas, selecciona el canal más fuerte
+    y persiste el error PPM en el `ShmStore`. Si se alcanza el tiempo límite 
+    establecido en `GLOBAL_TIMEOUT`, el script finaliza de forma segura para 
+    no bloquear el sistema.
+
+    Returns:
+        int: 0 si la calibración fue exitosa o se manejó un timeout, 
+             1 en caso de error crítico de hardware o falta de señal.
+    """
     start_program = time.time()
     deadline = start_program + GLOBAL_TIMEOUT
 

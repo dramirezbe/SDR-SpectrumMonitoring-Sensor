@@ -35,6 +35,8 @@ breathe_projects = {
 }
 breathe_default_project = "spectrum_sensor"
 
+language = 'es'
+
 html_theme = "furo"
 html_logo = "_static/Logo_GCPDS_spanish.png"
 

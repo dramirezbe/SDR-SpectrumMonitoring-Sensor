@@ -1,10 +1,10 @@
-Python Orchestration & Utils
-============================
+Python Orquestrador & Utilidades
+================================
 
 Este proyecto gestiona la orquestación de sensores, el streaming de audio WebRTC y la sincronización de datos con el servidor central.
 
-Main Orchestrator
------------------
+Orquestrador Principal
+----------------------
 .. automodule:: orchestrator
    :members:
    :undoc-members:
@@ -20,8 +20,8 @@ WebRTC Gateway (Audio Streaming)
 .. note::
    Este módulo recibe audio Opus vía TCP (puerto 9000) y lo retransmite mediante GStreamer.
 
-Campaign Runner
----------------
+Adquisición de Campañas
+-----------------------
 .. automodule:: campaign_runner
    :members:
    :undoc-members:
@@ -29,47 +29,50 @@ Campaign Runner
 .. note::
    Captura datos PSD y los sube a la API según la demanda de campañas.
 
-Calibration & Sync
----------------------------
+Calibración en frecuencia
+-------------------------
 .. automodule:: kal_sync
    :members:
 
 .. note::
    Usa la utilidad `kalibrate-hackrf` para realizar la calibración en frecuencia del hardware HackRF.
 
-Device Status & Health
-----------------------
+Estado de Sensor
+----------------
 .. automodule:: status
    :members:
 
 .. note::
    Recopila telemetría crítica: sincronización NTP, uso de recursos (CPU/RAM) y tiempos de calibración.
 
-Global System Config
---------------------
+Configuración global y Logging
+------------------------------
 .. automodule:: cfg
    :members:
 
 .. note::
    Maneja el logger global, la validación de la MAC del sensor y la carga de variables de entorno (.env).
 
-Init System Script
-------------------
+Script de Instalación e Inicialización
+--------------------------------------
 .. automodule:: init_sys
    :members:
 
-Retry Queue Manager
--------------------
+.. note::
+   Instala las dependencias y realiza la configuración inicial del sistema.
+
+Cola de Reintentos
+------------------
 .. automodule:: retry_queue
    :members:
 
-General Purpose Functions
--------------------------
+Funciones Principales
+---------------------
 .. automodule:: functions
    :members:
 
-Utilities Package
------------------
+Paquete de Utilidades
+---------------------
 
 .. automodule:: utils.io_util
    :members:

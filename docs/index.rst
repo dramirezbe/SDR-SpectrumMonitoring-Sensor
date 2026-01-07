@@ -1,5 +1,5 @@
-Spectrum Monitoring Sensor
-==========================
+Sensor de Monitoreo Espectral
+=============================
 
 .. toctree::
    :maxdepth: 2
@@ -9,6 +9,6 @@ Spectrum Monitoring Sensor
 
 .. toctree::
    :maxdepth: 2
-   :caption: Orchestration (Python):
+   :caption: Orquestación (Python):
 
    python_modules

@@ -18,7 +18,6 @@ import logging
 import numpy as np
 import asyncio
 from copy import deepcopy
-import subprocess
 
 class SysState(Enum):
     """
@@ -39,10 +38,10 @@ class SysState(Enum):
 
 class GlobalSys:
     """
-    Controlador estático del estado global del sistema.
-
-    Proporciona métodos de clase para gestionar las transiciones de estado 
-    y verificar la disponibilidad del sistema de manera centralizada.
+    Controlador de la Máquina de Estados del Sistema.
+    
+    Asegura que el sensor no intente realizar dos tareas excluyentes simultáneamente 
+    (ej. calibrar mientras se ejecuta una campaña).
     """
     current = SysState.IDLE
     log = cfg.set_logger()
@@ -101,10 +100,11 @@ def format_data_for_upload(payload):
 
 class CronSchedulerCampaign:
     """
-    Gestor de programación de campañas basado en Crontab.
-
-    Esta clase se encarga de traducir las ventanas de tiempo de las campañas 
-    recibidas desde la API en tareas programadas del sistema operativo.
+    Gestor de Sincronización entre API y Crontab.
+    
+    Analiza la lista de campañas del servidor y decide cuáles deben ser 
+    agendadas, actualizadas o eliminadas del sistema operativo basado en la 
+    ventana de tiempo de activación.
     """
     def __init__(self, poll_interval_s, python_env=None, cmd=None, logger=None):
         """
@@ -187,7 +187,10 @@ class CronSchedulerCampaign:
 
     def sync_jobs(self, campaigns: list, current_time_ms: int, store: ShmStore) -> bool:
         """
-        Sincroniza campañas con mayor verbosidad y logs legibles.
+        Sincroniza el estado local del cron con la base de datos central.
+        
+        Calcula una 'ventana de activación' restando el intervalo de consulta 
+        al tiempo de inicio, permitiendo que el sensor esté listo justo a tiempo.
         """
         any_active = False
         now_human = cfg.human_readable(current_time_ms)
@@ -246,6 +249,13 @@ class CronSchedulerCampaign:
         return any_active
 
 class AcquireDual:
+    """
+    Motor de Adquisición de Datos y Limpieza Espectral.
+    
+    Esta clase resuelve los dos problemas principales de los SDR de bajo costo:
+    1. El 'DC Spike' (pico central).
+    2. La caída de amplitud en los extremos del filtro de paso bajo (roll-off).
+    """
     def __init__(self, controller, log):
         self.controller = controller
         self._log = log
@@ -279,8 +289,10 @@ class AcquireDual:
     
     async def raw_acquire(self, rf_params):
         """
-        Performs a single acquisition and removes the central DC spike 
-        by interpolating neighbor noise over the center 0.2% of the spectrum.
+        Adquisición con eliminación de artefacto DC.
+        
+        Calcula la media y desviación estándar del ruido circundante al centro
+        e inyecta ruido sintético en el 0.2% central del espectro.
         """
         # 1. Perform a single standard acquisition
         data = await self._single_acquire(rf_params)
@@ -330,6 +342,13 @@ class AcquireDual:
             return data
 
     async def get_corrected_data(self, rf_params):
+        """
+        Adquisición mediante técnica de 'Stitching' (Cosido).
+        
+        Realiza una captura en la frecuencia central y otra con offset. Luego 
+        aplica una rampa de corrección lineal y un fundido de coseno para 
+        sustituir el centro ruidoso de la primera con datos limpios de la segunda.
+        """
         sr = rf_params.get("sample_rate_hz", 8e6)
         self._update_stitching_params(sr)
         

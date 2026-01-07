@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # init_sys.py
 
+"""
+Módulo de Inicialización y Provisionamiento del Sistema.
+
+Este script configura el entorno de ejecución del sensor, creando la estructura
+de directorios necesaria, limpiando estados previos (Cron y SHM) y generando
+los archivos de configuración para systemd.
+"""
+
 import sys
 import cfg
 from functions import CronSchedulerCampaign, ShmStore
@@ -133,6 +141,13 @@ WantedBy=timers.target
 """
 
 def save_daemon_file(filename: str, content: str):
+    """
+    Escribe el contenido de un archivo de unidad systemd en el directorio de daemons.
+
+    Args:
+        filename (str): Nombre del archivo (ej. 'rf-ane2.service').
+        content (str): Texto plano con la configuración del servicio.
+    """
     file_path = DAEMONS_DIR / filename
     try:
         with open(file_path, "w") as f:
@@ -142,6 +157,18 @@ def save_daemon_file(filename: str, content: str):
         log.error(f"Failed to write {filename}: {e}")
 
 def main() -> int:
+    """
+    Flujo principal de inicialización.
+
+    1. Crea directorios de trabajo (logs, queue, etc.).
+    2. Limpia las campañas antiguas del Crontab del usuario.
+    3. Reinicia la memoria compartida persistente.
+    4. Genera los archivos .service y .timer basados en las plantillas 
+       definidas y las rutas del archivo `cfg`.
+
+    Returns:
+        int: 0 si la inicialización fue exitosa, 1 si ocurrió un error crítico.
+    """
     log.info("Starting System Initialization...")
 
     for p in [cfg.QUEUE_DIR, cfg.LOGS_DIR, cfg.HISTORIC_DIR, DAEMONS_DIR]:
