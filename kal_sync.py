@@ -51,7 +51,6 @@ def run_kal_scan(band, deadline):
                 log.warning(f"Global timeout reached during scan of {band}. Terminating.")
                 process.terminate()
                 return found_in_band, True # Return what we have + Timeout flag
-
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break

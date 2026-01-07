@@ -3,6 +3,7 @@
 Módulo de Utilidades de E/S e Integridad de Datos.
 
 Este módulo provee herramientas para el manejo seguro de archivos y persistencia:
+
 1. **Escritura Atómica**: Evita la corrupción de archivos en caso de fallos.
 2. **ShmStore**: Almacenamiento basado en RAM (/dev/shm) con bloqueo de archivos 
    (file locking) para comunicación segura entre procesos.

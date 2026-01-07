@@ -1,0 +1,14 @@
+# Doxyfile
+PROJECT_NAME = spectrum_sensor
+
+# Search for code relative to the Doxyfile
+INPUT             = common/ gps-lte/ rf/
+RECURSIVE         = YES
+
+# FIX: Tell Doxygen to put everything inside the docs folder
+OUTPUT_DIRECTORY  = docs
+GENERATE_XML      = YES
+XML_OUTPUT        = xml
+
+GENERATE_HTML     = NO
+GENERATE_LATEX    = NO

@@ -42,6 +42,12 @@
 #ifndef NO_COMMON_LIBS
     #include "bacn_gpio.h"
 #endif
+
+/** * @defgroup rf_binary RF Binary
+ * @brief Logic, Digital Signal Processing, and Audio streaming for the Radio module.
+ * @{ 
+ */
+
 // =========================================================
 // GLOBAL VARIABLES
 // =========================================================
@@ -400,6 +406,8 @@ void* audio_thread_fn(void* arg) {
     free(pcm_accum);
     return NULL;
 }
+
+/** @} */
 
 // =========================================================
 // MAIN EXECUTION

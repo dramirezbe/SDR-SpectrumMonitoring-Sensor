@@ -45,11 +45,16 @@ bool GPSRDY = false;
 // =========================================================
 // FUNCTION PROTOTYPES
 // =========================================================
+
+/** @defgroup gps_binary GPS-LTE Binary
+ * @brief Logic and helper functions for the GPS/LTE module.
+ * @{ */
 void connection_LTE(void);
 void run_cmd(const char *cmd);
 int get_wlan_ip(char *ip);
 int get_eth_ip(char *ip);
 int get_ppp_ip(char *ip);
+/** @} */
 
 // =========================================================
 // MAIN ORCHESTRATION

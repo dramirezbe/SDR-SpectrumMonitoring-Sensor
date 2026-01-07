@@ -1,0 +1,16 @@
+version: 2
+
+build:
+  os: debian
+  tools:
+    python: "3.11"
+  apt_packages:
+    - doxygen  # This allows the subprocess.call in conf.py to work
+
+python:
+  install:
+    - requirements: docs/requirements.txt
+
+formats:
+  - pdf
+  - htmlzip

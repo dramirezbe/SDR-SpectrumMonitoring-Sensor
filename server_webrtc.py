@@ -59,6 +59,16 @@ appsrc name=opussrc is-live=true format=time do-timestamp=true !
 """
 
 class Publisher:
+    """
+    Maneja el pipeline de GStreamer para procesar y transmitir audio Opus vía WebRTC.
+
+    Esta clase inicializa un elemento 'webrtcbin', gestiona la generación de ofertas SDP,
+    el intercambio de candidatos ICE y la inyección de frames de audio en el flujo.
+
+    Args:
+        loop (asyncio.AbstractEventLoop): El bucle de eventos de asyncio para tareas asíncronas.
+        ws (websockets.WebSocketClientProtocol): La conexión activa del socket de señalización.
+    """
     def __init__(self, loop, ws):
         self.loop = loop
         self.ws = ws
@@ -159,6 +169,15 @@ current_publisher = None
 shutdown_event = None
 
 async def tcp_reader_task():
+    """
+    Servidor asíncrono que escucha conexiones TCP entrantes para recibir audio.
+
+    Lee los encabezados definidos en HDR_FMT (!IIIHH) para validar los paquetes y 
+    extrae el payload de audio para entregarlo al Publisher activo.
+
+    Raises:
+        IncompleteReadError: Si la conexión se cierra antes de recibir el encabezado completo.
+    """
     async def handle_client(reader, writer):
         log.info("[TCP] C Motor connected")
         try:
@@ -194,6 +213,15 @@ async def tcp_reader_task():
         await server.wait_closed()
 
 async def run_signaling_session():
+    """
+    Establece y mantiene la conexión con el servidor de señalización WebRTC.
+
+    Registra el dispositivo como 'sensor', instancia el Publisher y maneja los 
+    mensajes entrantes de tipo 'answer' (respuesta SDP) y 'candidate' (ICE).
+
+    Returns:
+        None: La función se ejecuta indefinidamente hasta un error o cierre de sesión.
+    """
     global current_publisher
     
     try:
@@ -228,6 +256,15 @@ async def run_signaling_session():
             raise e
 
 async def main():
+    """
+    Punto de entrada principal que coordina el ciclo de vida de la aplicación.
+
+    Configura los manejadores de señales (SIGINT, SIGTERM), inicia el servidor TCP
+    y ejecuta un bucle de reintento para la sesión de señalización en caso de fallos de red.
+
+    Returns:
+            int: Código de salida (0 para éxito, 1 para errores críticos).
+    """
     global shutdown_event
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
