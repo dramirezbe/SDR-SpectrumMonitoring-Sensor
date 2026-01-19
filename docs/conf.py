@@ -42,4 +42,4 @@ html_logo = "_static/Logo_GCPDS_spanish.png"
 
 project = 'Sensor con tecnologías SDR para el monitoreo del espectro'
 copyright = '2026, ANE'
-author = 'BACN, dramirezbe'
+author = 'BACN, GCPDS'

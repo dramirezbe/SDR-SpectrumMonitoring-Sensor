@@ -1,14 +1,21 @@
-# Doxyfile
-PROJECT_NAME = spectrum_sensor
+# --- Project Settings ---
+PROJECT_NAME      = "Spectrum Sensor"
+OUTPUT_LANGUAGE   = Spanish
+OUTPUT_DIRECTORY  = docs
 
-# Search for code relative to the Doxyfile
+# --- Input Settings ---
 INPUT             = common/ gps-lte/ rf/
 RECURSIVE         = YES
+INPUT_ENCODING    = UTF-8
+# Exclude the output directory to avoid infinite loops/warnings
+EXCLUDE           = docs/
 
-# FIX: Tell Doxygen to put everything inside the docs folder
-OUTPUT_DIRECTORY  = docs
+# --- XML Output Settings ---
 GENERATE_XML      = YES
 XML_OUTPUT        = xml
+# Set to YES if you want the XML to include the full source code
+XML_PROGRAMLISTING = YES
 
+# --- Disable Other Formats ---
 GENERATE_HTML     = NO
 GENERATE_LATEX    = NO

@@ -1,14 +1,24 @@
 /**
  * @file rf.c
- * @brief Main entry point for the Radio module. 
- * @details It has hackrf HAL libraries, FM and AM demodulation, PSD calculation, and audio streaming.
+ * @brief Implementación del módulo principal de Radio para el procesamiento y transmisión de señales SDR.
+ *
+ * @details Este módulo actúa como el controlador primario del sistema de Radio. 
+ * Coordina el ciclo de vida del hardware HackRF a través de la capa HAL, gestiona 
+ * la ingesta de datos IQ de alta velocidad en memorias intermedias circulares (ring buffers) 
+ * y maneja el flujo de procesamiento de señales digitales (demodulación AM/FM y cálculo de PSD).
+ * * El módulo también facilita la transmisión de audio en tiempo real a través de la red 
+ * utilizando codificación Opus y ZMQ para el comando y control.
+ *
+ * @author GCPDS
+ * @date 2026
  */
 
-/** Enable GNU extensions for specific socket and thread features. */
 #ifndef _GNU_SOURCE
+/** @brief Habilita las extensiones GNU para afinidad de CPU y funciones avanzadas de sockets. */
 #define _GNU_SOURCE
 #endif
 
+/* Librerías Estándar e Incluidos del Sistema ... */
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -31,7 +41,6 @@
 #include <libhackrf/hackrf.h>
 #include <cjson/cJSON.h>
 
-// Project Includes
 #include "psd.h"
 #include "datatypes.h" 
 #include "sdr_HAL.h"     
@@ -50,49 +59,68 @@
     #include "bacn_gpio.h"
 #endif
 
-/** * @defgroup rf_binary RF Binary
- * @brief Logic, Digital Signal Processing, and Audio streaming for the Radio module.
+/** * @defgroup rf_binary Binario RF
+ * @brief Lógica, Procesamiento de Señales Digitales (DSP) y transmisión de Audio para el módulo de Radio.
  * @{ 
  */
 
-
-/**Filter in IQ data to demod */
-static int    IQ_FILTER_ENABLE        = 1;
-
-/** Order of the IQ IIR filter  to demod AM */
-static float  IQ_FILTER_BW_AM_HZ      = 20000.0f;
-
-// Optional: apply same channel filter to IQ before PSD in FM/AM (default OFF to preserve current PSD behavior)
-static int    IQ_FILTER_APPLY_TO_PSD  = 1;
-
-zpair_t *zmq_channel = NULL;
-hackrf_device* device = NULL;
-
-ring_buffer_t rb;
-ring_buffer_t audio_rb;
-// This actually allocates the memory for the variable
-atomic_bool audio_enabled = false;
-
-volatile bool stop_streaming = true; 
-volatile bool config_received = false; 
-volatile bool keep_running = true;
-
-DesiredCfg_t desired_config = {0};
-PsdConfig_t psd_cfg = {0};
-SDR_cfg_t hack_cfg = {0};
-RB_cfg_t rb_cfg = {0};
-
-// Track the ACTUAL hardware state for Lazy Tuning
-SDR_cfg_t current_hw_cfg = {0};
-
-pthread_t audio_thread;
-volatile bool audio_thread_running = false;
-
-pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
+/** * @name Configuración DSP
+ * Constantes y selectores para el flujo de procesamiento de señales.
+ * @{ 
+ */
+static int    IQ_FILTER_ENABLE        = 1;      /**< Interruptor para habilitar/deshabilitar el filtrado IIR en datos IQ crudos. */
+static float  IQ_FILTER_BW_AM_HZ      = 20000.0f; /**< Ancho de banda en Hz para el pre-filtro de demodulación AM. */
+static int    IQ_FILTER_APPLY_TO_PSD  = 1;      /**< Si es verdadero, aplica el filtrado de canal antes del cálculo de PSD. */
+/** @} */
 
 /**
- * @brief Get current system time in milliseconds.
- * @return 64-bit unsigned integer representing milliseconds since the Epoch.
+ * @name Comunicación y Manejadores de Hardware
+ * Interfaces para mensajería de red y hardware físico SDR.
+ * @{
+ */
+zpair_t *zmq_channel = NULL;          /**< Par de sockets ZMQ para comando y control de red/IPC. */
+hackrf_device* device = NULL;         /**< Puntero a la instancia inicializada del hardware HackRF. */
+/** @} */
+
+/**
+ * @name Sistema de Buffers
+ * Buffers circulares utilizados para desacoplar el muestreo de hardware de alta velocidad de los hilos de procesamiento.
+ * @{
+ */
+ring_buffer_t rb;                     /**< Buffer circular primario para muestras IQ crudas del HackRF. */
+ring_buffer_t audio_rb;               /**< Buffer circular para muestras de audio demoduladas, listas para transmitir. */
+/** @} */
+
+/**
+ * @name Estado Global e Hilos (Threading)
+ * Banderas y primitivas que gestionan el flujo de ejecución y la seguridad entre hilos.
+ * @{
+ */
+atomic_bool   audio_enabled = false;  /**< Bandera atómica que indica si el subsistema de audio está activo. */
+volatile bool stop_streaming = true;  /**< Señal para detener la adquisición de datos del hardware. */
+volatile bool config_received = false;/**< Se activa cuando se procesa un nuevo paquete de configuración. */
+volatile bool keep_running = true;    /**< Bandera maestra de salida para el bucle principal de la aplicación. */
+
+pthread_t       audio_thread;         /**< Identificador del hilo para la tarea de red/audio Opus. */
+volatile bool   audio_thread_running = false; /**< Bandera de estado para el ciclo de vida del hilo de audio. */
+pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER; /**< Protege el acceso a @ref desired_config. */
+/** @} */
+
+/**
+ * @name Estructuras de Configuración
+ * Instantáneas de los ajustes deseados, de hardware y de procesamiento.
+ * @{
+ */
+DesiredCfg_t desired_config = {0};    /**< Configuración objetivo solicitada por el usuario o la red. */
+PsdConfig_t  psd_cfg = {0};           /**< Parámetros para FFT y Densidad Espectral de Potencia (PSD). */
+SDR_cfg_t    hack_cfg = {0};          /**< Ajustes de bajo nivel del hardware HackRF (Ganancia, IF, etc.). */
+RB_cfg_t     rb_cfg = {0};            /**< Parámetros de configuración para el tamaño del buffer circular. */
+SDR_cfg_t    current_hw_cfg = {0};    /**< Estado actual real del hardware para comparaciones de sintonización optimizada. */
+/** @} */
+
+/**
+ * @brief Obtiene el tiempo actual del sistema en milisegundos.
+ * @return Entero de 64 bits sin signo que representa los milisegundos desde la Época (Epoch).
  */
 static inline uint64_t now_ms(void) {
     struct timeval tv;
@@ -101,8 +129,8 @@ static inline uint64_t now_ms(void) {
 }
 
 /**
- * @brief Wrapper for usleep to provide millisecond precision.
- * @param[in] ms Time to sleep in milliseconds.
+ * @brief Envoltura (Wrapper) de usleep para proporcionar precisión en milisegundos.
+ * @param[in] ms Tiempo a dormir en milisegundos.
  */
 static inline void msleep_int(int ms) {
     if (ms <= 0) return;
@@ -110,20 +138,24 @@ static inline void msleep_int(int ms) {
 }
 
 /**
- * @brief Signal handler for SIGINT (Ctrl+C).
- * @details Sets the global @ref keep_running flag to false to initiate a graceful shutdown.
- * @param[in] sig The signal number (ignored).
+ * @brief Manejador de señales para SIGINT (Ctrl+C).
+ * @details Cambia la bandera global @ref keep_running a falso para iniciar un apagado controlado.
+ * @param[in] sig El número de señal (ignorado).
  */
 void handle_sigint(int sig) {
     (void)sig;
     keep_running = false;
 }
+
 /**
- * @brief Callback function triggered by libhackrf when new samples are available.
- * @details High-frequency callback. It writes raw IQ data into the primary ring buffer 
- * and, if enabled, the audio ring buffer.
- * @param[in] transfer Pointer to the hackrf_transfer structure containing the IQ buffer.
- * @return Always returns 0 as per HackRF API requirements.
+ * @brief Función de retorno (Callback) activada por libhackrf cuando hay nuevas muestras disponibles.
+ * @details Esta función se ejecuta en el contexto del hilo del controlador HackRF. Realiza 
+ * un procesamiento mínimo para evitar la pérdida de muestras:
+ * 1. Escribe los datos IQ crudos en el buffer primario (@ref rb).
+ * 2. Si @ref audio_enabled es verdadero, clona los datos en @ref audio_rb.
+ * @param[in] transfer Puntero a la estructura hackrf_transfer que contiene los bytes crudos.
+ * @return 0 para continuar la transmisión, distinto de cero para detenerla.
+ * @note Ejecución de alta frecuencia; evite llamadas bloqueantes o lógica pesada aquí.
  */
 int rx_callback(hackrf_transfer* transfer) {
     if (stop_streaming) return 0; 
@@ -137,11 +169,11 @@ int rx_callback(hackrf_transfer* transfer) {
 }
 
 /**
- * @brief Attempts to recover the HackRF device after a connection loss.
- * @details This function stops existing streams, closes the device, and attempts 
- * to re-open it up to 3 times with a 1-second delay between attempts.
- * @return 0 on success, -1 if the device could not be recovered.
- * @note This is a blocking call.
+ * @brief Intenta recuperar el dispositivo HackRF tras una pérdida de conexión.
+ * @details Esta función detiene las transmisiones existentes, cierra el dispositivo e intenta 
+ * volver a abrirlo hasta 3 veces con un retraso de 1 segundo entre intentos.
+ * @return 0 si tiene éxito, -1 si el dispositivo no pudo recuperarse.
+ * @note Esta es una llamada bloqueante.
  */
 int recover_hackrf(void) {
     printf("\n[RECOVERY] Initiating Hardware Reset sequence...\n");
@@ -168,15 +200,15 @@ int recover_hackrf(void) {
 }
 
 /**
- * @brief Serializes PSD data and RF metadata into JSON and sends it via ZMQ.
- * @details Uses cJSON to construct a payload containing frequency bounds, mode-specific 
- * metrics (AM depth or FM excursion), and the raw PSD array.
- * @param[in] psd_array Array of double-precision power spectral density values.
- * @param[in] length Size of the psd_array.
- * @param[in] local_hack Current hardware configuration for frequency calculations.
- * @param[in] rf_mode Current operating mode (e.g., FM_MODE, AM_MODE, PSD_MODE).
- * @param[in] am_depth Calculated AM modulation depth.
- * @param[in] fm_dev Calculated FM frequency deviation.
+ * @brief Serializa los datos de PSD y metadatos de RF en JSON y los envía vía ZMQ.
+ * @details Utiliza cJSON para construir una carga útil que contiene los límites de frecuencia, 
+ * métricas específicas del modo (profundidad AM o excursión FM) y el arreglo de PSD crudo.
+ * @param[in] psd_array Arreglo de valores de densidad espectral de potencia en doble precisión.
+ * @param[in] length Tamaño del arreglo psd_array.
+ * @param[in] local_hack Configuración actual del hardware para cálculos de frecuencia.
+ * @param[in] rf_mode Modo de operación actual (ej. FM_MODE, AM_MODE, PSD_MODE).
+ * @param[in] am_depth Profundidad de modulación AM calculada.
+ * @param[in] fm_dev Desviación de frecuencia FM calculada.
  */
 void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, int rf_mode, float am_depth, float fm_dev) {
     if (!zmq_channel || !psd_array || length <= 0) return;
@@ -206,10 +238,10 @@ void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, int r
 }
 
 /**
- * @brief Processes incoming ZMQ configuration commands.
- * @details Parses the JSON payload, updates the global configuration structs 
- * using @ref cfg_mutex for thread safety, and manages the @ref audio_enabled state.
- * @param[in] payload The raw JSON string received from ZMQ.
+ * @brief Procesa comandos de configuración entrantes de ZMQ.
+ * @details Analiza la carga útil JSON, actualiza las estructuras de configuración globales 
+ * utilizando @ref cfg_mutex para seguridad entre hilos y gestiona el estado de @ref audio_enabled.
+ * @param[in] payload La cadena JSON cruda recibida de ZMQ.
  */
 void on_command_received(const char *payload) {
     DesiredCfg_t temp_desired;
@@ -252,19 +284,16 @@ void on_command_received(const char *payload) {
 }
 
 /**
- * @brief Main audio processing thread.
- * * @details This thread implements a complete DSP and streaming pipeline:
- * 1. **Data Acquisition**: Consumes raw 8-bit IQ samples from the @ref audio_rb ring buffer.
- * 2. **Normalization**: Converts `int8_t` IQ to `double complex` range [-1.0, 1.0].
- * 3. **IQ Filtering**: Applies a configurable IIR bandpass filter to isolate the target signal.
- * 4. **Demodulation**: Performs FM or AM demodulation based on the current mode, yielding 16-bit PCM.
- * 5. **Framing**: Accumulates PCM samples into frames matching the Opus encoder's requirements.
- * 6. **Encoding & Transmission**: Compresses audio using Opus and sends it over a TCP socket.
- *
- * @param[in,out] arg A pointer to an initialized @ref audio_stream_ctx_t structure.
- * * @return Returns NULL upon thread termination.
- * * @note This function handles hardware/network recovery internally using @ref ensure_tx_with_retry.
- * @warning This thread performs significant memory allocation on startup; ensure heap availability.
+ * @brief Hilo principal de procesamiento y transmisión de audio.
+ * @details Implementa el siguiente flujo de trabajo (pipeline):
+ * - **Adquisición**: Extrae muestras IQ de 8 bits desde @ref audio_rb.
+ * - **Filtrado**: Aplica un filtro de paso de banda IIR mediante @ref iq_iir_filter_apply_inplace.
+ * - **Demodulación**: Alterna entre @ref am_radio_local_iq_to_pcm y @ref fm_radio_iq_to_pcm.
+ * - **Resampleo/Enmarcado**: Almacena PCM en un buffer para coincidir con el tamaño de trama de Opus (ej. 20ms).
+ * - **Red**: Transmite vía @ref opus_tx_send_frame con lógica de reconexión automática.
+ * * @param[in,out] arg Puntero a una estructura @ref audio_stream_ctx_t.
+ * @return NULL al finalizar el hilo.
+ * @warning Se bloquea en @ref ensure_tx_with_retry si la red está caída.
  */
 void* audio_thread_fn(void* arg) {
     audio_stream_ctx_t *ctx = (audio_stream_ctx_t*)arg;
@@ -461,13 +490,17 @@ void* audio_thread_fn(void* arg) {
     free(pcm_accum);
     return NULL;
 }
-
 /** @} */
 
-// =========================================================
-// MAIN EXECUTION
-// =========================================================
-
+/**
+ * @brief Punto de entrada de la aplicación y Máquina de Estados del Hardware.
+ * @details Gestiona el ciclo de vida de alto nivel:
+ * 1. Inicializa ZMQ y el hardware HackRF.
+ * 2. **Estado Inactivo (Idle)**: Cierra la radio si no se reciben comandos en 15s para ahorrar energía/calor.
+ * 3. **Estado Activo**: Detecta cambios de configuración, realiza "Sintonización Perezosa" (lazy tuning), 
+ * y gestiona el bucle de procesamiento de PSD a alta velocidad.
+ * 4. **Limpieza**: Asegura el cierre de hilos y liberación del hardware ante SIGINT/SIGTERM.
+ */
 int main() {
     signal(SIGINT, handle_sigint);
     signal(SIGTERM, handle_sigint);
