@@ -1,3 +1,10 @@
+/**
+ * @file rf.c
+ * @brief Main entry point for the Radio module. 
+ * @details It has hackrf HAL libraries, FM and AM demodulation, PSD calculation, and audio streaming.
+ */
+
+/** Enable GNU extensions for specific socket and thread features. */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -48,16 +55,11 @@
  * @{ 
  */
 
-// =========================================================
-// GLOBAL VARIABLES
-// =========================================================
 
-// ========================= IQ Channel Filter (rf_audio.c variables)
+/**Filter in IQ data to demod */
 static int    IQ_FILTER_ENABLE        = 1;
 
-// Recommended two-sided channel BW:
-
-// AM voice-like channel BW ~10kHz (±5kHz)
+/** Order of the IQ IIR filter  to demod AM */
 static float  IQ_FILTER_BW_AM_HZ      = 20000.0f;
 
 // Optional: apply same channel filter to IQ before PSD in FM/AM (default OFF to preserve current PSD behavior)
@@ -88,27 +90,41 @@ volatile bool audio_thread_running = false;
 
 pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// =========================================================
-// UTILITY FUNCTIONS
-// =========================================================
-// =========================================================
-// HELPERS
+/**
+ * @brief Get current system time in milliseconds.
+ * @return 64-bit unsigned integer representing milliseconds since the Epoch.
+ */
 static inline uint64_t now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000ULL + (tv.tv_usec / 1000ULL);
 }
 
+/**
+ * @brief Wrapper for usleep to provide millisecond precision.
+ * @param[in] ms Time to sleep in milliseconds.
+ */
 static inline void msleep_int(int ms) {
     if (ms <= 0) return;
     usleep((useconds_t)ms * 1000);
 }
 
+/**
+ * @brief Signal handler for SIGINT (Ctrl+C).
+ * @details Sets the global @ref keep_running flag to false to initiate a graceful shutdown.
+ * @param[in] sig The signal number (ignored).
+ */
 void handle_sigint(int sig) {
     (void)sig;
     keep_running = false;
 }
-
+/**
+ * @brief Callback function triggered by libhackrf when new samples are available.
+ * @details High-frequency callback. It writes raw IQ data into the primary ring buffer 
+ * and, if enabled, the audio ring buffer.
+ * @param[in] transfer Pointer to the hackrf_transfer structure containing the IQ buffer.
+ * @return Always returns 0 as per HackRF API requirements.
+ */
 int rx_callback(hackrf_transfer* transfer) {
     if (stop_streaming) return 0; 
     if (transfer->valid_length > 0) {
@@ -120,6 +136,13 @@ int rx_callback(hackrf_transfer* transfer) {
     return 0;
 }
 
+/**
+ * @brief Attempts to recover the HackRF device after a connection loss.
+ * @details This function stops existing streams, closes the device, and attempts 
+ * to re-open it up to 3 times with a 1-second delay between attempts.
+ * @return 0 on success, -1 if the device could not be recovered.
+ * @note This is a blocking call.
+ */
 int recover_hackrf(void) {
     printf("\n[RECOVERY] Initiating Hardware Reset sequence...\n");
     if (device != NULL) {
@@ -144,6 +167,17 @@ int recover_hackrf(void) {
     return -1;
 }
 
+/**
+ * @brief Serializes PSD data and RF metadata into JSON and sends it via ZMQ.
+ * @details Uses cJSON to construct a payload containing frequency bounds, mode-specific 
+ * metrics (AM depth or FM excursion), and the raw PSD array.
+ * @param[in] psd_array Array of double-precision power spectral density values.
+ * @param[in] length Size of the psd_array.
+ * @param[in] local_hack Current hardware configuration for frequency calculations.
+ * @param[in] rf_mode Current operating mode (e.g., FM_MODE, AM_MODE, PSD_MODE).
+ * @param[in] am_depth Calculated AM modulation depth.
+ * @param[in] fm_dev Calculated FM frequency deviation.
+ */
 void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, int rf_mode, float am_depth, float fm_dev) {
     if (!zmq_channel || !psd_array || length <= 0) return;
     
@@ -171,6 +205,12 @@ void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, int r
     cJSON_Delete(root);
 }
 
+/**
+ * @brief Processes incoming ZMQ configuration commands.
+ * @details Parses the JSON payload, updates the global configuration structs 
+ * using @ref cfg_mutex for thread safety, and manages the @ref audio_enabled state.
+ * @param[in] payload The raw JSON string received from ZMQ.
+ */
 void on_command_received(const char *payload) {
     DesiredCfg_t temp_desired;
     SDR_cfg_t temp_hack;
@@ -211,6 +251,21 @@ void on_command_received(const char *payload) {
     }
 }
 
+/**
+ * @brief Main audio processing thread.
+ * * @details This thread implements a complete DSP and streaming pipeline:
+ * 1. **Data Acquisition**: Consumes raw 8-bit IQ samples from the @ref audio_rb ring buffer.
+ * 2. **Normalization**: Converts `int8_t` IQ to `double complex` range [-1.0, 1.0].
+ * 3. **IQ Filtering**: Applies a configurable IIR bandpass filter to isolate the target signal.
+ * 4. **Demodulation**: Performs FM or AM demodulation based on the current mode, yielding 16-bit PCM.
+ * 5. **Framing**: Accumulates PCM samples into frames matching the Opus encoder's requirements.
+ * 6. **Encoding & Transmission**: Compresses audio using Opus and sends it over a TCP socket.
+ *
+ * @param[in,out] arg A pointer to an initialized @ref audio_stream_ctx_t structure.
+ * * @return Returns NULL upon thread termination.
+ * * @note This function handles hardware/network recovery internally using @ref ensure_tx_with_retry.
+ * @warning This thread performs significant memory allocation on startup; ensure heap availability.
+ */
 void* audio_thread_fn(void* arg) {
     audio_stream_ctx_t *ctx = (audio_stream_ctx_t*)arg;
     if (!ctx || !ctx->fm_radio || !ctx->am_radio) {
