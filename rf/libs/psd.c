@@ -1,15 +1,13 @@
+/**
+ * @file psd.c
+ * @brief Implementación de algoritmos de estimación espectral y pre-procesamiento IQ.
+ */
 #include "psd.h"
 
-#define PFB_TAPS_PER_CHANNEL 8
-#define KAISER_BETA 8.6   // ~80 dB sidelobes
-
-// =========================================================
-// Static Helper: Robust String Lowercasing
-// =========================================================
-
-// =========================================================
-// IQ & Memory Management
-// =========================================================
+/**
+ * @addtogroup psd_module
+ * @{
+ */
 
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size) {
     if (!buffer || buffer_size == 0) return NULL;
@@ -103,18 +101,42 @@ void free_signal_iq(signal_iq_t* signal) {
     }
 }
 
-// =========================================================
-// Filtering Implementation
-// =========================================================
+/**
+ * @brief Restringe un valor de punto flotante a un rango específico [lo, hi].
+ * @param x Valor de entrada a evaluar.
+ * @param lo Límite inferior permitido.
+ * @param hi Límite superior permitido.
+ * @return El valor x si está dentro del rango, de lo contrario devuelve el límite excedido.
+ */
 static inline double clampd(double x, double lo, double hi) {
     return (x < lo) ? lo : (x > hi) ? hi : x;
 }
 
+/**
+ * @brief Convierte un valor de ganancia/amplitud de decibelios (dB) a escala lineal.
+ * La conversión sigue la fórmula de amplitud:
+ * \f[
+ * A_{lineal} = 10^{\frac{dB}{20}}
+ * \f]
+ * @param db Valor en decibelios.
+ * @return Amplitud en escala lineal.
+ */
 static inline double db_to_lin_amp(double db) {
     return pow(10.0, db / 20.0);
 }
 
-// Raised-cosine 0..1
+/**
+ * @brief Calcula una función de coseno alzado (Raised Cosine) en el intervalo [0, 1].
+ * Esta función genera una transición suave (suavizado) entre 0 y 1, útil para 
+ * funciones de ventana o desvanecimientos (fading).
+ * * La fórmula aplicada es:
+ * \f[
+ * f(t) = 0.5 - 0.5 \cdot \cos(\pi \cdot t)
+ * \f]
+ * donde \f$ t \f$ se restringe internamente al rango \f$ [0, 1] \f$.
+ * * @param t Parámetro de entrada (típicamente tiempo normalizado o fase).
+ * @return Valor suavizado entre 0.0 y 1.0.
+ */
 static inline double raised_cos(double t) {
     t = clampd(t, 0.0, 1.0);
     return 0.5 - 0.5 * cos(M_PI * t);
@@ -157,7 +179,17 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
 }
 
 /**
- * @brief Final conversion of raw Power Spectral Density to dBm.
+ * @brief Conversión de densidad de potencia lineal a dBm.
+ *
+ * Convierte valores de potencia normalizados (W/Hz) a escala logarítmica dBm,
+ * asumiendo una impedancia de carga de 50 Ω:
+ * \f[
+ * P_{dBm} = 10 \log_{10}(P_{W} \cdot 1000)
+ * \f]
+ *
+ * @note Esta conversión asume que la señal IQ está correctamente escalada.
+ * Los valores obtenidos representan potencia relativa al ADC y no potencia
+ * RF absoluta sin una calibración del sistema.
  */
 static void convert_to_dbm_inplace(double* psd, int length) {
     for (int i = 0; i < length; i++) {
@@ -187,6 +219,30 @@ double get_window_enbw_factor(PsdWindowType_t type) {
     }
 }
 
+/**
+ * @brief Genera los coeficientes de la función de ventana seleccionada.
+ * * Las funciones de ventana se utilizan para reducir el "spectral leakage" (filtración espectral) 
+ * al truncar la señal en el tiempo antes de aplicar la FFT. Para todas las fórmulas, 
+ * se define \f$ M = L - 1 \f$, donde \f$ L \f$ es la longitud de la ventana.
+ * * 
+ * * Dependiendo del @p window_type, se aplica una de las siguientes ecuaciones para \f$ 0 \le n \le M \f$:
+ * * - **Rectangular:** No aplica atenuación.
+ * \f[ w[n] = 1 \f]
+ * - **Hann:** Excelente para propósitos generales y buena resolución de frecuencia.
+ * \f[ w[n] = 0.5 \left( 1 - \cos\left( \frac{2\pi n}{M} \right) \right) \f]
+ * - **Hamming:** Optimiza la cancelación del primer lóbulo lateral.
+ * \f[ w[n] = 0.54 - 0.46 \cos\left( \frac{2\pi n}{M} \right) \f]
+ * - **Blackman:** Mayor atenuación de lóbulos laterales a costa de un lóbulo principal más ancho.
+ * \f[ w[n] = 0.42 - 0.5 \cos\left( \frac{2\pi n}{M} \right) + 0.08 \cos\left( \frac{4\pi n}{M} \right) \f]
+ * - **Bartlett (Triangular):**
+ * \f[ w[n] = 1 - \left| \frac{n - M/2}{M/2} \right| \f]
+ * - **Flat Top:** Diseñada para una medición precisa de la amplitud de los picos.
+ * \f[ w[n] = a_0 - a_1 \cos\left(\frac{2\pi n}{M}\right) + a_2 \cos\left(\frac{4\pi n}{M}\right) - a_3 \cos\left(\frac{6\pi n}{M}\right) + a_4 \cos\left(\frac{8\pi n}{M}\right) \f]
+ * Donde: \f$ a_0=1, a_1=1.93, a_2=1.29, a_3=0.388, a_4=0.032 \f$.
+ * * @param window_type   Identificador de la ventana (PsdWindowType_t).
+ * @param window_buffer Búfer donde se almacenarán los @p window_length coeficientes calculados.
+ * @param window_length Número total de puntos de la ventana (típicamente NPERSEG).
+ */
 static void generate_window(PsdWindowType_t window_type, double* window_buffer, int window_length) {
     for (int n = 0; n < window_length; n++) {
         double N_minus_1 = (double)(window_length - 1);
@@ -221,6 +277,21 @@ static void generate_window(PsdWindowType_t window_type, double* window_buffer, 
     }
 }
 
+/**
+ * @brief Realiza un desplazamiento circular para centrar la frecuencia cero (DC).
+ * * Los algoritmos de FFT devuelven los datos en el orden estándar de salida:
+ * [0 a Fs/2] seguido de [-Fs/2 a 0]. Esta función intercambia la primera mitad 
+ * del búfer con la segunda para obtener un eje de frecuencias ordenado de:
+ * \f[ [-F_s/2, \dots, 0, \dots, F_s/2] \f]
+ * * 
+ * * La operación consiste en un swap de bloques:
+ * - El bloque \f$ [0, \frac{n}{2}-1] \f$ se mueve al final.
+ * - El bloque \f$ [\frac{n}{2}, n-1] \f$ se mueve al principio.
+ * * @param data Puntero al arreglo de datos (double) que se desea desplazar.
+ * @param n    Número de elementos en el arreglo (debe coincidir con el tamaño de la FFT).
+ * * @note Utiliza asignación dinámica temporal mediante `malloc` para evitar el 
+ * desbordamiento de pila (stack overflow) en FFTs de gran tamaño, a diferencia de `alloca`.
+ */
 static void fftshift(double* data, int n) {
     int half = n / 2;
     // Use malloc instead of alloca for large FFTs to avoid stack overflow
@@ -327,8 +398,20 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     fftw_free(fft_out);
 }
 
-//Funciones PFB
-
+/**
+ * @brief Función de Bessel de primera especie de orden cero modificada \f$ I_0(x) \f$.
+ * * Esta función calcula una aproximación numérica de la función de Bessel mediante 
+ * su expansión en serie de potencias:
+ * \f[
+ * I_0(x) = \sum_{k=0}^{\infty} \frac{(\frac{1}{4}x^2)^k}{(k!)^2}
+ * \f]
+ * * 
+ * * Se utiliza específicamente para el diseño de la **Ventana de Kaiser**, la cual 
+ * es óptima para maximizar la energía en el lóbulo principal.
+ * * @param x Valor de entrada (argumento de la función).
+ * @return La aproximación de \f$ I_0(x) \f$. La iteración se detiene cuando el 
+ * término incremental es menor a \f$ 10^{-12} \f$ para garantizar precisión de doble flotante.
+ */
 static double bessi0(double x) {
     double sum = 1.0, y = x * x / 4.0;
     double t = y;
@@ -342,6 +425,26 @@ static double bessi0(double x) {
     return sum;
 }
 
+/**
+ * @brief Genera los coeficientes de una ventana Kaiser para el filtro prototipo del PFB.
+ * * Esta función implementa la ventana de Kaiser, la cual es una aproximación a la 
+ * función de onda esferoidal alargada que maximiza la concentración de energía en 
+ * el lóbulo principal. Se utiliza como filtro prototipo en la arquitectura PFB.
+ * * La ventana se define mediante la fórmula:
+ * \f[
+ * w[n] = \frac{I_0 \left( \beta \sqrt{1 - \left( \frac{2n}{L-1} - 1 \right)^2} \right)}{I_0(\beta)}
+ * \f]
+ * donde \f$ L \f$ es la longitud total del filtro y \f$ I_0 \f$ es la función de 
+ * Bessel modificada de primera especie y orden cero.
+ * * 
+ * * **Impacto del parámetro Beta (\f$ \beta \f$):**
+ * - \f$ \beta = 0 \f$: Equivale a una ventana Rectangular.
+ * - \f$ \beta = 5.0 \f$: Similar a una ventana Hamming.
+ * - \f$ \beta = 8.6 \f$: Valor por defecto en este módulo, proporciona ~80 dB de rechazo.
+ * * @param h    Búfer de salida donde se almacenarán los coeficientes (tamaño @p len).
+ * @param len  Longitud total del filtro (calculada como \f$ M \cdot T \f$).
+ * @param beta Parámetro de forma que controla la relación entre el ancho del lóbulo y la atenuación.
+ */
 static void generate_kaiser_proto(double* h, int len, double beta) {
     double denom = bessi0(beta);
     for (int n = 0; n < len; n++) {
@@ -445,3 +548,5 @@ cleanup:
     fftw_free(fft_in);
     fftw_free(fft_out);
 }
+
+/** @} */

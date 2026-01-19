@@ -1,7 +1,17 @@
-//libs/sdr_HAL.c
-#include "sdr_HAL.h"
-#include <stdio.h>
+/**
+ * @file sdr_HAL.c
+ * @brief Implementación de las funciones de control para el hardware SDR.
+ */
 
+#include "sdr_HAL.h"
+
+/**
+ * @brief Calcula y aplica la frecuencia corregida según el error de reloj.
+ * La fórmula utilizada es: $f_{corregida} = f_{objetivo} \times (1 + \frac{PPM}{1,000,000})$
+ * * @param dev Puntero al dispositivo.
+ * @param target_freq Frecuencia deseada en Hz.
+ * @param ppm_error Error de cristal en partes por millón.
+ */
 static void tune_freq_with_ppm(hackrf_device* dev, uint64_t target_freq, int ppm_error) {
     double correction = 1.0 + ((double)ppm_error / 1000000.0);
     uint64_t corrected_freq = (uint64_t)((double)target_freq * correction);

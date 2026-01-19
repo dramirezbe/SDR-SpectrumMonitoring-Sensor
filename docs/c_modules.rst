@@ -17,10 +17,15 @@ sigue el estándar de tramas binarias para optimizar el rendimiento.
 
 Módulo de Radio (RF)
 --------------------
-Gestión del hardware HackRF One con el procesamiento DSP
+Gestión del hardware HackRF One con el procesamiento DSP.
 
 .. doxygengroup:: rf_binary
-   :content-only:
+   :project: spectrum_sensor
+   :members:
+   :protected-members:
+   :private-members:
+   :undoc-members:
+   :inner:
 
 Control de GPIO
 ---------------

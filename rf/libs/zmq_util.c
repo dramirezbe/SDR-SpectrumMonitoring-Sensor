@@ -1,10 +1,17 @@
+/**
+ * @file zmq_util.c
+ * @brief Detalles de implementación para la gestión de sockets ZMQ y sondeo de hilos.
+ */
+
 #define _GNU_SOURCE
 #include "zmq_util.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 
+/**
+ * @brief Ayudante interno para configurar opciones de socket y conectar.
+ * Configura ZMQ_LINGER, intervalos de reconexión y RCVTIMEO para la respuesta del hilo.
+ * @param pair La instancia a configurar.
+ * @return Código de resultado ZMQ (0 éxito, -1 error).
+ */
 static int internal_connect(zpair_t *pair) {
     if (pair->socket) zmq_close(pair->socket);
 
@@ -28,6 +35,12 @@ static int internal_connect(zpair_t *pair) {
     return zmq_connect(pair->socket, pair->addr);
 }
 
+/**
+ * @brief Rutina del hilo de fondo para el sondeo continuo de mensajes.
+ * Ejecuta un bucle while que verifica datos y ejecuta el callback del usuario.
+ * @param arg Puntero a zpair_t convertido a void*.
+ * @return NULL al finalizar el hilo.
+ */
 static void* listener_thread(void *arg) {
     zpair_t *pair = (zpair_t*)arg;
     

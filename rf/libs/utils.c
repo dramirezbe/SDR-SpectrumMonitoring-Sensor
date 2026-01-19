@@ -1,3 +1,8 @@
+/**
+ * @file utils.c
+ * @brief Implementación de funciones de utilidad y manejo de archivos de configuración.
+ */
+
 #include "utils.h"
 
 char *getenv_c(const char *key) {

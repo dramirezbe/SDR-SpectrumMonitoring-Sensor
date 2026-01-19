@@ -4,7 +4,7 @@ OUTPUT_LANGUAGE   = Spanish
 OUTPUT_DIRECTORY  = docs
 
 # --- Input Settings ---
-INPUT             = common/ gps-lte/ rf/
+INPUT             = common/ gps-lte/ rf/ 
 RECURSIVE         = YES
 INPUT_ENCODING    = UTF-8
 # Exclude the output directory to avoid infinite loops/warnings
@@ -19,5 +19,31 @@ XML_PROGRAMLISTING = YES
 # --- Disable Other Formats ---
 GENERATE_HTML     = NO
 GENERATE_LATEX    = NO
-EXTRACT_STATIC = YES
-EXTRACT_ALL    = YES
+EXTRACT_STATIC    = YES
+EXTRACT_ALL       = YES
+
+# Habilitar el uso de MathJax para renderizado web
+USE_MATHJAX            = YES
+
+# Formato de salida (SVG es más nítido que PNG para fórmulas)
+MATHJAX_FORMAT         = HTML-CSS
+
+# Ruta del script de MathJax (usar el CDN por defecto es lo más seguro)
+MATHJAX_RELPATH        = https://cdn.jsdelivr.net/npm/mathjax@2
+
+# Asegura que las fórmulas no se pierdan al generar solo XML
+# y que se extraiga la información de los símbolos matemáticos.
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+
+# Para que Breathe pueda mapear los archivos fuente en el servidor de RTD
+FULL_PATH_NAMES        = YES
+STRIP_FROM_PATH        = $(PWD)
+
+# Permite que la documentación de un grupo se distribuya a sus miembros
+DISTRIBUTE_GROUP_DOC   = YES
+
+# Asegura que los subgrupos se procesen correctamente
+SUBGROUPING            = YES
+
+INTERNAL_DOCS = YES
