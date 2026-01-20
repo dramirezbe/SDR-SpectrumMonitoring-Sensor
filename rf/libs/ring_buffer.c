@@ -4,6 +4,11 @@
  */
 #include "ring_buffer.h"
 
+/**
+ * @addtogroup rb_module
+ * @{
+ */
+
 /* * Nota de implementación:
  * Esta implementación utiliza índices incrementales (head/tail) y aplica 
  * la operación módulo (%) sobre el tamaño del búfer para determinar el 
@@ -107,3 +112,5 @@ size_t rb_available(ring_buffer_t *rb) {
     pthread_mutex_unlock(&rb->lock);
     return val;
 }
+
+/** @} */

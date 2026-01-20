@@ -15,6 +15,12 @@
 #include <string.h>
 #include <stdio.h>
 
+/**
+ * @defgroup rb_module Ring Buffer
+ * @ingroup rf_binary
+ * @brief Implementación de un búfer circular (Ring Buffer) seguro para hilos.
+ */
+
 /** * @brief Macro para obtener el valor mínimo entre dos números.
  * @internal
  */
@@ -76,5 +82,7 @@ size_t rb_available(ring_buffer_t *rb);
  * @param rb Puntero al búfer.
  */
 void rb_reset(ring_buffer_t *rb);
+
+/** @} */
 
 #endif

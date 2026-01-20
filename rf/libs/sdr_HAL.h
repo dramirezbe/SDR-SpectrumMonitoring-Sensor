@@ -14,6 +14,13 @@
 #include <stdbool.h>
 #include <libhackrf/hackrf.h>
 
+/**
+ * @defgroup sdr_module SDR (Hardware Abstraction Layer)
+ * @ingroup rf_binary
+ * @brief Capa de Abstracción de Hardware (HAL) para dispositivos HackRF.
+ */
+
+
 /** * @brief Macro para convertir valores de Megahertz a Hertz.
  * @param x Valor en MHz.
  */
@@ -42,5 +49,7 @@ typedef struct {
  * @param cfg Puntero a la estructura de configuración que se desea aplicar.
  */
 void hackrf_apply_cfg(hackrf_device* dev, SDR_cfg_t *cfg);
+
+/** @} */
 
 #endif

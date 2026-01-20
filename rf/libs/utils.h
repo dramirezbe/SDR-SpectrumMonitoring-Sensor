@@ -13,6 +13,14 @@
 #include <stdbool.h>
 #include <string.h>
 
+
+/**
+ * @defgroup util_module Utils
+ * @ingroup rf_binary
+ * @brief Utilidades varias
+ * @{
+ */
+
 /**
  * @brief Lee el valor de una clave específica desde un archivo .env local.
  * * Busca en el archivo ".env" una línea que comience con la clave y el signo '='.
@@ -23,5 +31,7 @@
  * @retval NULL Si el archivo no existe o la clave no se encuentra.
  */
 char *getenv_c(const char *key);
+
+/** @} */
 
 #endif

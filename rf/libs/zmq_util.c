@@ -7,6 +7,11 @@
 #include "zmq_util.h"
 
 /**
+ * @addtogroup zmq_module
+ * @{
+ */
+
+/**
  * @brief Ayudante interno para configurar opciones de socket y conectar.
  * Configura ZMQ_LINGER, intervalos de reconexión y RCVTIMEO para la respuesta del hilo.
  * @param pair La instancia a configurar.
@@ -84,7 +89,7 @@ void zpair_start(zpair_t *pair) {
 int zpair_send(zpair_t *pair, const char *json_payload) {
     if (!pair || !pair->socket || !json_payload) return -1;
     // We use ZMQ_DONTWAIT to ensure the DSP loop never stalls if the pipe is full
-    printf("[RF]>>>>>zmq\n");
+    printf("[RF]Sending package to zmq\n");
     return zmq_send(pair->socket, json_payload, strlen(json_payload), ZMQ_DONTWAIT);
 }
 
@@ -97,3 +102,5 @@ void zpair_close(zpair_t *pair) {
     free(pair->addr);
     free(pair);
 }
+
+/** @} */

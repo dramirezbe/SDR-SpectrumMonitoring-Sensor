@@ -16,6 +16,13 @@
 #include <string.h>
 #include <unistd.h>
 
+/**
+ * @defgroup zmq_module ZMQ
+ * @ingroup rf_binary
+ * @brief Utilidad de sockets ZeroMQ PAIR multihilo para comunicación de payloads JSON
+ * @{
+ */
+
 /** @brief Tamaño máximo del búfer de mensajes. */
 #define ZBUF_SIZE 65536 
 
@@ -68,5 +75,7 @@ int zpair_send(zpair_t *pair, const char *json_payload);
  * @param pair Puntero a la instancia de zpair_t a destruir.
  */
 void zpair_close(zpair_t *pair);
+
+/** @} */ 
 
 #endif

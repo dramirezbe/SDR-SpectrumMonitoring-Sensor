@@ -5,6 +5,12 @@
 
 #include "utils.h"
 
+/**
+ * @addtogroup util_module
+ * @{
+ */
+
+
 char *getenv_c(const char *key) {
     FILE *file;
     char line[1024];
@@ -47,3 +53,5 @@ char *getenv_c(const char *key) {
     fclose(file);
     return NULL;
 }
+
+/** @} */

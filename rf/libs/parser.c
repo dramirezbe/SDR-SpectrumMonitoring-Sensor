@@ -1,8 +1,18 @@
-// libs/parser.c
+/**
+ * @file parser.c
+ * @brief Implementación de la lógica de parsing y validación de rangos de frecuencia.
+ */
 #include "parser.h"
 
 /**
- * @brief Helper to map normalized strings to Enum
+ * @addtogroup parser_module
+ * @{
+ */
+
+/**
+ * @brief Mapea cadenas de texto normalizadas a valores del enumerado PsdWindowType_t.
+ * @param window_str_lower Cadena de texto en minúsculas.
+ * @return Enumerado correspondiente al tipo de ventana.
  */
 static PsdWindowType_t resolve_window_enum(const char *window_str_lower) {
     if (!window_str_lower) return HAMMING_TYPE;
@@ -31,11 +41,10 @@ char* strdup_lowercase(const char *str) {
     return lower_str;
 }
 
-// =========================================================
-// Configuration & Parsing
-// =========================================================
-
-// Helper to set specific default values as requested
+/**
+ * @brief Establece los valores de fábrica/seguridad antes del análisis del JSON.
+ * @param target Puntero a la estructura DesiredCfg_t.
+ */
 static void set_default_config(DesiredCfg_t *target) {
     if (!target) return;
 
@@ -234,3 +243,5 @@ void print_config_summary_DEPLOY(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *
         printf(" | FILT:OFF\n");
     }
 }
+
+/** @} */

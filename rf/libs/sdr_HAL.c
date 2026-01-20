@@ -6,6 +6,11 @@
 #include "sdr_HAL.h"
 
 /**
+ * @addtogroup sdr_module
+ * @{
+ */
+
+/**
  * @brief Calcula y aplica la frecuencia corregida según el error de reloj.
  * La fórmula utilizada es: $f_{corregida} = f_{objetivo} \times (1 + \frac{PPM}{1,000,000})$
  * * @param dev Puntero al dispositivo.
@@ -32,3 +37,5 @@ void hackrf_apply_cfg(hackrf_device* dev, SDR_cfg_t *cfg) {
     hackrf_set_hw_sync_mode(dev, 0);
     tune_freq_with_ppm(dev, cfg->center_freq, cfg->ppm_error);
 }
+
+/** @} */
