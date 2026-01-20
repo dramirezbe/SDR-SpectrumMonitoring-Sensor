@@ -52,10 +52,15 @@ breathe_projects = {
     "spectrum_sensor": xml_path
 }
 breathe_default_project = "spectrum_sensor"
+breathe_default_domain = 'c'
 breathe_default_members = ('members', 'undoc-members', 'detaileddescription')
 # Añade esta línea para asegurar que no se oculte nada
 breathe_show_define_initializer = True
 breathe_show_enumvalue_initializer = True
+
+# 3. Soporte para tipos complejos de C99 y evitar errores de "Invalid C++ declaration"
+c_id_attributes = ['complex', '_Complex']
+c_extra_keywords = ['complex', '_Complex', 'double complex']
 
 language = 'es'
 

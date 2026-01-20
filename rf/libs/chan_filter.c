@@ -1,11 +1,5 @@
 //libs/chan_filter.c
 #include "chan_filter.h"
-#include <fftw3.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <math.h>
-#include <complex.h>
 
 #ifndef CLAMPD
 #define CLAMPD(x,lo,hi) (((x)<(lo))?(lo):(((x)>(hi))?(hi):(x)))

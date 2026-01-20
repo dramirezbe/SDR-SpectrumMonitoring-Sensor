@@ -1,29 +1,51 @@
+/**
+ * @file opus_tx.c
+ * @brief Implementación interna del transmisor Opus.
+ * * Contiene la lógica de red y el encapsulamiento de datos para la transmisión.
+ */
+
 #include "opus_tx.h"
-#include <opus/opus.h>
 
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+/**
+ * @addtogroup opus_module
+ * @{
+ */
 
+/**
+ * @brief Cabecera de red para tramas Opus.
+ * * Se envía de forma binaria antes de cada payload Opus para permitir
+ * la sincronización y reconstrucción en el receptor.
+ */
 #pragma pack(push, 1)
 typedef struct {
-    uint32_t magic;       // 'OPU0' = 0x4F505530
-    uint32_t seq;
-    uint32_t sample_rate;
-    uint16_t channels;
-    uint16_t payload_len;
+    uint32_t magic;       /**< Identificador único 'OPU0' (0x4F505530). */
+    uint32_t seq;         /**< Número de secuencia incremental para detectar pérdidas. */
+    uint32_t sample_rate; /**< Frecuencia de muestreo de la trama. */
+    uint16_t channels;    /**< Cantidad de canales de audio. */
+    uint16_t payload_len; /**< Tamaño en bytes de los datos codificados que siguen. */
 } OpusFrameHeader;
 #pragma pack(pop)
 
+/**
+ * @brief Contexto interno del transmisor.
+ * * Mantiene el estado de la conexión, el contador de secuencia y el estado del codificador.
+ */
 struct opus_tx {
-    int sock_fd;
-    uint32_t seq;
-    OpusEncoder *enc;
-    opus_tx_cfg_t cfg;
+    int sock_fd;        /**< Descriptor del socket TCP. */
+    uint32_t seq;       /**< Contador para el número de secuencia. */
+    OpusEncoder *enc;   /**< Puntero al estado del codificador Opus. */
+    opus_tx_cfg_t cfg;  /**< Copia local de la configuración. */
 };
 
+/**
+ * @brief Garantiza el envío de un bloque completo de datos a través de TCP.
+ * * Debido a la naturaleza de los sockets de flujo, una llamada a `send` puede no
+ * enviar todos los bytes solicitados. Esta función itera hasta completar el envío.
+ * * @param[in] fd  Descriptor del socket.
+ * @param[in] buf Puntero a los datos a enviar.
+ * @param[in] n   Cantidad de bytes a transmitir.
+ * * @return int 0 en caso de éxito, -1 si la conexión se cierra o falla.
+ */
 static int send_all(int fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t*)buf;
     while (n > 0) {
@@ -35,6 +57,13 @@ static int send_all(int fd, const void *buf, size_t n) {
     return 0;
 }
 
+/**
+ * @brief Crea un socket TCP y se conecta al destino especificado.
+ * * Realiza la resolución de dirección (vía aton/pton) y establece la comunicación.
+ * * @param[in] host Cadena con la dirección IP de destino.
+ * @param[in] port Puerto de destino.
+ * * @return int Descriptor del socket conectado, o -1 en caso de error.
+ */
 static int connect_tcp(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -112,3 +141,5 @@ void opus_tx_destroy(opus_tx_t *tx) {
 int opus_tx_fd(const opus_tx_t *tx) {
     return tx ? tx->sock_fd : -1;
 }
+
+/** @} */

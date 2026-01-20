@@ -1,25 +1,57 @@
-// libs/iq_iir_filter.c
+/**
+ * @file iq_iir_filter.c
+ * @brief Implementación matemática de filtros IIR Butterworth y Biquads.
+ *
+ * Contiene los algoritmos de diseño de filtros Robert Bristow-Johnson (RBJ) 
+ * y la implementación de la Forma Directa II Transpuesta (DF2T).
+ */
 #include "iq_iir_filter.h"
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+/**
+ * @addtogroup iq_iir_filter_module
+ * @{
+ */
 
+/**
+ * @brief Restringe un valor entero dentro de un rango determinado.
+ * @param[in] v  Valor a evaluar.
+ * @param[in] lo Límite inferior.
+ * @param[in] hi Límite superior.
+ * @return int Valor truncado al rango [lo, hi].
+ */
 static int clamp_int(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
 }
 
+/**
+ * @brief Restringe un valor de punto flotante doble dentro de un rango determinado.
+ * @param[in] v  Valor a evaluar.
+ * @param[in] lo Límite inferior.
+ * @param[in] hi Límite superior.
+ * @return double Valor truncado al rango [lo, hi].
+ */
 static double clamp_double(double v, double lo, double hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
 }
 
+/**
+ * @brief Filtro DC Blocker de un solo polo.
+ *
+ * La transferencia en el dominio Z es:
+ * \f[ H(z) = \frac{1 - z^{-1}}{1 - r \cdot z^{-1}} \f]
+ *
+ * Donde \f$ r \f$ suele ser \f$ \approx 0.995 \f$. Esto crea un cero en DC y un polo 
+ * muy cercano que cancela el efecto en el resto de la banda.
+ * @param[in]     x   Muestra de entrada actual.
+ * @param[in,out] x1  Puntero al estado de la muestra de entrada anterior.
+ * @param[in,out] y1  Puntero al estado de la muestra de salida anterior.
+ * @param[in]     r   Factor de radio de polo (determina el ancho de la muesca).
+ * @return float Muestra filtrada.
+ */
 static inline float dc_block_1p(float x, float *x1, float *y1, float r) {
     // y[n] = x[n] - x[n-1] + r*y[n-1]
     float y = x - (*x1) + r * (*y1);
@@ -28,7 +60,19 @@ static inline float dc_block_1p(float x, float *x1, float *y1, float r) {
     return y;
 }
 
-// RBJ lowpass biquad coefficients for given fs, fc, Q
+/**
+ * @brief Diseño de filtros Robert Bristow-Johnson (RBJ).
+ * Convierte los parámetros de frecuencia y Q en coeficientes de transferencia:
+ * \f[ H(z) = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{1 + a_1 z^{-1} + a_2 z^{-2}} \f]
+ * * @param[in]  fs Frecuencia de muestreo.
+ * @param[in]  fc Frecuencia de corte.
+ * @param[in]  Q  Factor de calidad (determina la respuesta en la esquina).
+ * @param[out] b0 Numerador 0.
+ * @param[out] b1 Numerador 1.
+ * @param[out] b2 Numerador 2.
+ * @param[out] a1 Denominador 1 (normalizado).
+ * @param[out] a2 Denominador 2 (normalizado).
+ */
 static void rbj_lowpass(float fs, float fc, float Q,
                         float *b0, float *b1, float *b2,
                         float *a1, float *a2)
@@ -58,8 +102,15 @@ static void rbj_lowpass(float fs, float fc, float Q,
     *a2 = aa2 / aa0;
 }
 
-// Butterworth Qs for even order N:
-// poles: phi_k = (2k+1)π/(2N), Q_k = 1/(2 sin(phi_k)), k=0..N/2-1
+/**
+ * @brief Cálculo de factor de calidad para Butterworth.
+ * * Para un orden \f$ N \f$, los polos se distribuyen uniformemente en el semiplano 
+ * izquierdo del plano S. El valor de \f$ Q \f$ para la sección \f$ k \f$ es:
+ * \f[ Q_k = \frac{1}{-2 \cos(\frac{(2k + N + 1)\pi}{2N})} \f]
+ * @param[in] N Orden total del filtro.
+ * @param[in] k Índice de la sección (0 a N/2 - 1).
+ * @return float Valor de Q correspondiente.
+ */
 static float butterworth_Q(int N, int k) {
     double phi = M_PI * (2.0 * (double)k + 1.0) / (2.0 * (double)N);
     double s   = sin(phi);
@@ -68,6 +119,12 @@ static float butterworth_Q(int N, int k) {
     return (float)Q;
 }
 
+/**
+ * @brief Gestiona la asignación y liberación de memoria para las secciones del filtro.
+ * * @param[in,out] st       Puntero al estado del filtro.
+ * @param[in]     sections Cantidad de secciones biquad a alojar.
+ * @return int 0 en éxito, -1 si falló el sistema de memoria.
+ */
 static int alloc_sections(iq_iir_filter_t *st, int sections) {
     // free old if any
     free(st->b0); free(st->b1); free(st->b2); free(st->a1); free(st->a2);
@@ -170,6 +227,30 @@ void iq_iir_filter_free(iq_iir_filter_t *st) {
     memset(st, 0, sizeof(*st));
 }
 
+/**
+ * @brief Núcleo de la Forma Directa II Transpuesta (DF2T).
+ *
+ * A diferencia de la Forma Directa I, la DF2T minimiza los requerimientos de 
+ * almacenamiento y es numéricamente superior para implementaciones en punto flotante.
+ *
+ * Las ecuaciones de estado que gobiernan cada sección son:
+ * \f[
+ * \begin{aligned}
+ * y[n]   &= b_0 x[n] + z_1[n-1] \\
+ * z_1[n] &= b_1 x[n] - a_1 y[n] + z_2[n-1] \\
+ * z_2[n] &= b_2 x[n] - a_2 y[n]
+ * \end{aligned}
+ * \f]
+ * @param[in]     x  Muestra de entrada.
+ * @param[in]     b0 Coeficiente numerador.
+ * @param[in]     b1 Coeficiente numerador.
+ * @param[in]     b2 Coeficiente numerador.
+ * @param[in]     a1 Coeficiente denominador.
+ * @param[in]     a2 Coeficiente denominador.
+ * @param[in,out] z1 Registro de estado 1.
+ * @param[in,out] z2 Registro de estado 2.
+ * @return float Muestra filtrada resultante.
+ */
 static inline float biquad_df2t(float x, float b0, float b1, float b2, float a1, float a2, float *z1, float *z2) {
     float y = b0 * x + *z1;
     *z1 = b1 * x - a1 * y + *z2;
@@ -201,3 +282,5 @@ void iq_iir_filter_apply_inplace(iq_iir_filter_t *st, signal_iq_t *sig) {
         sig->signal_iq[n] = (double)xi + (double)xq * I;
     }
 }
+
+/** @} */

@@ -1,24 +1,104 @@
+/**
+ * @file fm_radio.c
+ * @brief Implementación del demodulador FM y filtros asociados.
+ */
+
 #include "fm_radio.h"
-#include <math.h>
-#include <string.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+/**
+ * @addtogroup fm_module
+ * @{
+ */
 
-// Forward declarations (avoid implicit declaration / static conflict)
-static void  biquad_lowpass(fm_radio_t *r, float fs, float fc, float Q);
-static inline float biquad_process(fm_radio_t *r, float x);
-static inline float dc_block_process(fm_radio_t *r, float x);
+/**
+ * @brief Diseño de filtro Biquad paso bajo (RBJ).
+ * * Calcula coeficientes para una transferencia:
+ * \f[ H(z) = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{a_0 + a_1 z^{-1} + a_2 z^{-2}} \f]
+ *
+ * @param[out] r  Estado del radio donde se guardarán los coeficientes.
+ * @param[in]  fs Frecuencia de muestreo (Hz).
+ * @param[in]  fc Frecuencia de corte (Hz).
+ * @param[in]  Q  Factor de calidad.
+ */
+static void biquad_lowpass(fm_radio_t *r, float fs, float fc, float Q) {
+    if (fc <= 0.0f) fc = 1.0f;
+    if (fc > 0.49f * fs) fc = 0.49f * fs;
 
-// ======== FM deviation metric helpers ========
-#define DEV_EMA_ALPHA 0.10f  // EMA over decimated updates
+    const float w0 = 2.0f * (float)M_PI * (fc / fs);
+    const float c  = cosf(w0);
+    const float s  = sinf(w0);
+    const float alpha = s / (2.0f * Q);
+
+    float b0 = (1.0f - c) * 0.5f;
+    float b1 = (1.0f - c);
+    float b2 = (1.0f - c) * 0.5f;
+    float a0 = (1.0f + alpha);
+    float a1 = (-2.0f * c);
+    float a2 = (1.0f - alpha);
+
+    // normalize (a0 -> 1)
+    r->b0 = b0 / a0;
+    r->b1 = b1 / a0;
+    r->b2 = b2 / a0;
+    r->a1 = a1 / a0;
+    r->a2 = a2 / a0;
+
+    r->z1 = 0.0f;
+    r->z2 = 0.0f;
+}
+
+/**
+ * @brief Filtro Biquad en Forma Directa II Transpuesta.
+ * * Implementa las ecuaciones de estado:
+ * \f[
+ * \begin{aligned}
+ * y[n] &= b_0 x[n] + z_1[n-1] \\
+ * z_1[n] &= b_1 x[n] - a_1 y[n] + z_2[n-1] \\
+ * z_2[n] &= b_2 x[n] - a_2 y[n]
+ * \end{aligned}
+ * \f]
+ * * @param[in,out] r Estado con coeficientes y registros.
+ * @param[in]     x Muestra de entrada.
+ * @return float    Muestra filtrada.
+ */
+static inline float biquad_process(fm_radio_t *r, float x) {
+    // Direct Form II transposed
+    float y = r->b0 * x + r->z1;
+    r->z1 = r->b1 * x - r->a1 * y + r->z2;
+    r->z2 = r->b2 * x - r->a2 * y;
+    return y;
+}
+
+/**
+ * @brief Bloqueador de componente DC.
+ * * Aplica la ecuación diferencial:
+ * \f[ y[n] = x[n] - x[n-1] + r \cdot y[n-1] \f]
+ * * @param[in,out] r Estado del radio.
+ * @param[in]     x Muestra de audio.
+ * @return float    Audio sin componente DC.
+ */
+static inline float dc_block_process(fm_radio_t *r, float x) {
+    // y[n] = x[n] - x[n-1] + R*y[n-1]
+    float y = x - r->dc_x1 + r->dc_r * r->dc_y1;
+    r->dc_x1 = x;
+    r->dc_y1 = y;
+    return y;
+}
 
 static inline float phase_diff_to_hz_local(float phase_diff_rad, int fs_demod) {
     // fi(t) = (fs / 2pi) * dphi
     return phase_diff_rad * ((float)fs_demod / (2.0f * (float)M_PI));
 }
 
+/**
+ * @brief Actualiza la métrica de desviación de frecuencia.
+ * * La frecuencia instantánea se calcula como:
+ * \f[ f_i = \Delta\phi \cdot \frac{f_{demod}}{2\pi} \f]
+ * * @param[in,out] st             Estado de desviación.
+ * @param[in]     phase_diff_rad Fase instantánea en radianes.
+ * @param[in]     fs_demod       Tasa de muestreo.
+ * @return float                 Desviación suavizada (EMA) en Hz.
+ */
 static inline float update_fm_deviation_ctx(fm_dev_state_t *st,
                                            float phase_diff_rad,
                                            int fs_demod)
@@ -66,49 +146,6 @@ void fm_radio_init(fm_radio_t *radio, double fs, int audio_fs, int deemph_us) {
     // - Voice:  4–6 kHz
     // - WBFM:  12–15 kHz (use 12 kHz as conservative default)
     biquad_lowpass(radio, (float)audio_fs, 12000.0f, 0.707f);
-}
-
-static void biquad_lowpass(fm_radio_t *r, float fs, float fc, float Q) {
-    if (fc <= 0.0f) fc = 1.0f;
-    if (fc > 0.49f * fs) fc = 0.49f * fs;
-
-    const float w0 = 2.0f * (float)M_PI * (fc / fs);
-    const float c  = cosf(w0);
-    const float s  = sinf(w0);
-    const float alpha = s / (2.0f * Q);
-
-    float b0 = (1.0f - c) * 0.5f;
-    float b1 = (1.0f - c);
-    float b2 = (1.0f - c) * 0.5f;
-    float a0 = (1.0f + alpha);
-    float a1 = (-2.0f * c);
-    float a2 = (1.0f - alpha);
-
-    // normalize (a0 -> 1)
-    r->b0 = b0 / a0;
-    r->b1 = b1 / a0;
-    r->b2 = b2 / a0;
-    r->a1 = a1 / a0;
-    r->a2 = a2 / a0;
-
-    r->z1 = 0.0f;
-    r->z2 = 0.0f;
-}
-
-static inline float biquad_process(fm_radio_t *r, float x) {
-    // Direct Form II transposed
-    float y = r->b0 * x + r->z1;
-    r->z1 = r->b1 * x - r->a1 * y + r->z2;
-    r->z2 = r->b2 * x - r->a2 * y;
-    return y;
-}
-
-static inline float dc_block_process(fm_radio_t *r, float x) {
-    // y[n] = x[n] - x[n-1] + R*y[n-1]
-    float y = x - r->dc_x1 + r->dc_r * r->dc_y1;
-    r->dc_x1 = x;
-    r->dc_y1 = y;
-    return y;
 }
 
 int fm_radio_iq_to_pcm(fm_radio_t *radio, signal_iq_t *sig, int16_t *pcm_out,
@@ -163,3 +200,5 @@ int fm_radio_iq_to_pcm(fm_radio_t *radio, signal_iq_t *sig, int16_t *pcm_out,
 
     return out_idx;
 }
+
+/** @} */

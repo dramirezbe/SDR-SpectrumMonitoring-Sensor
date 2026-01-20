@@ -1,25 +1,31 @@
+/**
+ * @file net_audio_retry.c
+ * @brief Implementación de lógica de red robusta y reconexión automática.
+ *
+ * Incluye la configuración avanzada de sockets (timeouts y keep-alive) y la 
+ * orquestación del ciclo de vida del transmisor de audio.
+ */
+
 #include "net_audio_retry.h"
-
-#include <stdio.h>
-#include <string.h>
-#include <errno.h>
-#include <unistd.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <netinet/tcp.h>
-
-// For ctx fields
 #include "audio_stream_ctx.h"
 
+/**
+ * @addtogroup net_audio_retry_module
+ * @{
+ */
+
 #ifndef MSG_NOSIGNAL
+/** @brief Flag para evitar señales SIGPIPE en sistemas que no lo soportan nativamente. */
 #define MSG_NOSIGNAL 0
 #endif
-// =========================================================
-// Reconect auxiliar function (internal)
-// =========================================================
 
+/**
+ * @brief Configura los tiempos de espera (timeouts) para operaciones de envío y recepción.
+ * * @param[in] fd     Descriptor del socket.
+ * @param[in] snd_ms Tiempo de espera para envío en milisegundos.
+ * @param[in] rcv_ms Tiempo de espera para recepción en milisegundos.
+ * @return int 0 en éxito, -1 si falló @c setsockopt.
+ */
 static int set_sock_timeouts(int fd, int snd_ms, int rcv_ms) {
     struct timeval tv;
 
@@ -34,6 +40,14 @@ static int set_sock_timeouts(int fd, int snd_ms, int rcv_ms) {
     return 0;
 }
 
+/**
+ * @brief Habilita y configura el mecanismo de Keep-Alive de TCP.
+ * * Configura el socket para enviar sondas de mantenimiento de conexión, permitiendo
+ * detectar desconexiones "silenciosas" o caídas de red de forma proactiva.
+ * * @param[in] fd Descriptor del socket.
+ * @note Los tiempos están hardcodeados para detectar fallos en aproximadamente 19 segundos 
+ * (10s idle + 3 probes * 3s).
+ */
 static void enable_tcp_keepalive(int fd) {
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
@@ -52,7 +66,7 @@ static void enable_tcp_keepalive(int fd) {
 #endif
 }
 
-int connect_tcp(const char *host, int port) {
+int connect_tcp_net_audio(const char *host, int port) {
     if (!host || port <= 0 || port > 65535) return -1;
 
     char port_str[16];
@@ -86,7 +100,7 @@ int connect_tcp(const char *host, int port) {
     return fd;
 }
 
-int send_all(int fd, const void *buf, size_t len) {
+int send_all_net_audio(int fd, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t*)buf;
     size_t sent = 0;
 
@@ -149,3 +163,5 @@ int ensure_tx_with_retry(audio_stream_ctx_t *ctx, opus_tx_t **ptx, volatile bool
     }
     return -1;
 }
+
+/** @} */
