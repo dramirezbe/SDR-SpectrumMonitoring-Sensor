@@ -59,8 +59,13 @@ breathe_show_define_initializer = True
 breathe_show_enumvalue_initializer = True
 
 # 3. Soporte para tipos complejos de C99 y evitar errores de "Invalid C++ declaration"
-c_id_attributes = ['complex', '_Complex']
+c_id_attributes = ['complex', '_Complex', 'atomic_int', 'atomic_double', '_Atomic']
+cpp_id_attributes = ['_Atomic']
 c_extra_keywords = ['complex', '_Complex', 'double complex']
+
+c_macro_replacement_table = {
+    "_Atomic": "",
+}
 
 language = 'es'
 

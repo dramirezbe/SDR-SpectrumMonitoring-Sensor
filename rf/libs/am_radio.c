@@ -1,22 +1,19 @@
+/**
+ * @file am_radio.c
+ * @brief Implementación de la demodulación AM y filtrado de audio.
+ */
+
 #include "am_radio.h"
-#include <math.h>
-#include <string.h>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+/**
+ * @addtogroup am_module
+ * @{
+ */
 
-// AM audio LPF (conservative voice-style)
-#define AM_AUDIO_LPF_HZ   4000.0f
-#define AM_AUDIO_Q        0.707f
-
-// EMA alpha for depth update (applied once per report window)
-#define DEPTH_EMA_ALPHA   0.20f
-
-static void  biquad_lowpass(am_radio_t *r, float fs, float fc, float Q);
-static inline float biquad_process(am_radio_t *r, float x);
-static inline float dc_block_process(am_radio_t *r, float x);
-
+ /**
+ * @brief Reinicia las métricas de envolvente para un nuevo cálculo de ventana.
+ * @param[in,out] st Puntero al estado de métricas de profundidad AM.
+ */
 static inline void am_depth_reset(am_depth_state_t *st) {
     if (!st) return;
     st->env_min = 1e9f;
@@ -27,8 +24,14 @@ static inline void am_depth_reset(am_depth_state_t *st) {
 }
 
 /**
- * @brief Update AM depth from decimated envelope sample.
- *        m = (max-min)/(max+min), clamped to [0..1] and EMA-filtered per window.
+ * @brief Actualiza la métrica de profundidad AM utilizando la envolvente diezmada.
+ * * La profundidad de modulación \f$ m \f$ se calcula como:
+ * \f[ m = \frac{A_{max} - A_{min}}{A_{max} + A_{min}} \f]
+ * El valor resultante se filtra mediante un promedio móvil exponencial (EMA).
+ *
+ * @param[in,out] st             Estado de métricas de profundidad AM.
+ * @param[in]     env_decimated  Muestra de envolvente después del diezmado.
+ * @return float                 Profundidad de modulación suavizada actual (0.0 a 1.0).
  */
 static inline float update_am_depth_from_env_ctx(am_depth_state_t *st, float env_decimated) {
     if (!st) return 0.0f;
@@ -82,6 +85,15 @@ void am_radio_init(am_radio_t *r, double fs, int audio_fs) {
     biquad_lowpass(r, (float)audio_fs, AM_AUDIO_LPF_HZ, AM_AUDIO_Q);
 }
 
+/**
+ * @brief Calcula los coeficientes de un filtro biquad pasa bajos.
+ * * Utiliza la arquitectura RBJ (Robert Bristow-Johnson) para un filtro Butterworth.
+ *
+ * @param[in,out] r   Puntero al estado del radio donde se guardarán los coeficientes.
+ * @param[in]     fs  Frecuencia de muestreo (Hz).
+ * @param[in]     fc  Frecuencia de corte (Hz).
+ * @param[in]     Q   Factor de calidad.
+ */
 static void biquad_lowpass(am_radio_t *r, float fs, float fc, float Q) {
     if (fc <= 0.0f) fc = 1.0f;
     if (fc > 0.49f * fs) fc = 0.49f * fs;
@@ -108,6 +120,17 @@ static void biquad_lowpass(am_radio_t *r, float fs, float fc, float Q) {
     r->z2 = 0.0f;
 }
 
+/**
+ * @brief Procesa una muestra de audio a través de un filtro biquad.
+ * * Implementa la Forma Directa II Transpuesta:
+ * \f[ y[n] = b_0 x[n] + z_1[n-1] \f]
+ * \f[ z_1[n] = b_1 x[n] - a_1 y[n] + z_2[n-1] \f]
+ * \f[ z_2[n] = b_2 x[n] - a_2 y[n] \f]
+ *
+ * @param[in,out] r Puntero al estado del radio (contiene coeficientes y retardos).
+ * @param[in]     x Muestra de audio de entrada.
+ * @return float    Muestra de audio filtrada.
+ */
 static inline float biquad_process(am_radio_t *r, float x) {
     float y = r->b0 * x + r->z1;
     r->z1 = r->b1 * x - r->a1 * y + r->z2;
@@ -115,6 +138,16 @@ static inline float biquad_process(am_radio_t *r, float x) {
     return y;
 }
 
+/**
+ * @brief Aplica un filtro de bloqueo de componente DC.
+ * * Sigue la ecuación en diferencias:
+ * \f[ y[n] = x[n] - x[n-1] + R \cdot y[n-1] \f]
+ * Donde \f$ R \f$ controla la frecuencia de corte cercana a 0 Hz.
+ *
+ * @param[in,out] r Puntero al estado del radio.
+ * @param[in]     x Entrada de audio con offset DC.
+ * @return float    Salida de audio sin componente DC.
+ */
 static inline float dc_block_process(am_radio_t *r, float x) {
     float y = x - r->dc_x1 + r->dc_r * r->dc_y1;
     r->dc_x1 = x;

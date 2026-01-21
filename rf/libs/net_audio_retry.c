@@ -7,7 +7,6 @@
  */
 
 #include "net_audio_retry.h"
-#include "audio_stream_ctx.h"
 
 /**
  * @addtogroup net_audio_retry_module

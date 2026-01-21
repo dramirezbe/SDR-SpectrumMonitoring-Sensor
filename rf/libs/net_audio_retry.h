@@ -11,6 +11,7 @@
 #define NET_AUDIO_RETRY_H
 
 #include "opus_tx.h"
+#include "audio_stream_ctx.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +22,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -31,8 +34,7 @@
  * @{
  */
 
- // Forward declaration y dependencias
-typedef struct audio_stream_ctx audio_stream_ctx_t;
+//typedef struct audio_stream_ctx audio_stream_ctx_t;
 
 
 /** * @brief Retraso estándar entre intentos de reconexión en milisegundos.

@@ -1,8 +1,5 @@
 #include "audio_stream_ctx.h"
 
-#include <string.h>
-#include <stdlib.h>
-
 
 void audio_stream_ctx_defaults(audio_stream_ctx_t *ctx, fm_radio_t *fm, am_radio_local_t *am) {
     memset(ctx, 0, sizeof(*ctx));
