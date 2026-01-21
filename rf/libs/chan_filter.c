@@ -1,42 +1,61 @@
-//libs/chan_filter.c
+/**
+ * @file chan_filter.c
+ * @brief Implementación del filtrado por dominio de frecuencia.
+ */
 #include "chan_filter.h"
 
+/**
+ * @addtogroup chan_filter_module
+ * @{
+ */
+
 #ifndef CLAMPD
+/** @brief Limita un valor doble entre un rango mínimo y máximo. */
 #define CLAMPD(x,lo,hi) (((x)<(lo))?(lo):(((x)>(hi))?(hi):(x)))
 #endif
 
-static inline double db_to_lin_amp(double db) {
+/**
+ * @brief Convierte decibelios a amplitud lineal.
+ * \f[ A_{lin} = 10^{\frac{dB}{20}} \f]
+ * @param db Decibelios.
+ * @return Amplitud lineal.
+ */
+static inline double db_to_lin_amp_chan_filt(double db) {
     return pow(10.0, db / 20.0);
 }
 
-static inline double raised_cos(double t) {
+/**
+ * @brief Función de Coseno Alzado para transiciones suaves.
+ * \f[ f(t) = 0.5 - 0.5 \cdot \cos(\pi \cdot t) \f]
+ * @param t Parámetro de entrada (típicamente tiempo normalizado o fase).
+ * @return Valor suavizado entre 0.0 y 1.0.
+ */
+static inline double raised_cos_chan_filt(double t) {
     t = CLAMPD(t, 0.0, 1.0);
     return 0.5 - 0.5 * cos(M_PI * t);
 }
 
-// =====================
-// Design Constants
-// =====================
-static const double OOB_REJECT_DB = -15.0; // Stage 2 rejection floor
-static const double TRANS_FRAC    = 0.30;  // 30% of filter bandwidth for transition
-static const double CAP_OOB_DB    = 6.0;   // Stage 1 threshold above median
-static const double MIN_OOB_FRAC  = 0.05;  // Minimum % of bins outside band to trigger Stage 1
+// Constantes de diseño del filtro
+static const double OOB_REJECT_DB = -15.0; /**< Suelo de rechazo fuera de banda (Etapa 2). */
+static const double TRANS_FRAC    = 0.30;  /**< Fracción del ancho de banda usada para la transición. */
+static const double CAP_OOB_DB    = 6.0;   /**< Umbral sobre la mediana para recorte de picos (Etapa 1). */
+static const double MIN_OOB_FRAC  = 0.05;  /**< Porcentaje mínimo de bins OOB para activar Etapa 1. */
 
-// =====================
-// Cache Structure
-// =====================
+/**
+ * @brief Estructura interna para caché de planes FFT y máscara de frecuencia.
+ */
 typedef struct {
-    int N;
-    fftw_complex *in;
-    fftw_complex *out;
-    fftw_plan fwd;
-    fftw_plan inv;
-    double *mask_stage2;
+    int N;                  /**< Tamaño de la FFT actual. */
+    fftw_complex *in;       /**< Buffer de entrada para FFTW. */
+    fftw_complex *out;      /**< Buffer de salida para FFTW. */
+    fftw_plan fwd;          /**< Plan de FFT directa. */
+    fftw_plan inv;          /**< Plan de FFT inversa. */
+    double *mask_stage2;    /**< Valores precalculados de la máscara de magnitud. */
 
-    uint64_t last_fc;
-    double last_fs;
-    int last_start;
-    int last_end;
+    uint64_t last_fc;       /**< Última frecuencia central procesada. */
+    double last_fs;         /**< Última frecuencia de muestreo procesada. */
+    int last_start;         /**< Última frecuencia de inicio. */
+    int last_end;           /**< Última frecuencia de fin. */
 } cache_t;
 
 static cache_t g = {0};
@@ -44,6 +63,9 @@ static const char *g_region = "UNKNOWN";
 
 const char* chan_filter_last_region(void) { return g_region; }
 
+/**
+ * @brief Libera los recursos de la caché global.
+ */
 static void cache_free(void) {
     if (g.fwd) fftw_destroy_plan(g.fwd);
     if (g.inv) fftw_destroy_plan(g.inv);
@@ -55,6 +77,14 @@ static void cache_free(void) {
 
 void chan_filter_free_cache(void) { cache_free(); }
 
+/**
+ * @brief Determina si la caché actual es inválida para los nuevos parámetros.
+ * @param N      Número de muestras actual.
+ * @param cfg    Configuración del filtro.
+ * @param fc     Frecuencia central actual (Hz).
+ * @param fs     Frecuencia de muestreo actual (Hz).
+ * @return int   1 si requiere reconstrucción, 0 si la caché es reutilizable.
+ */
 static int need_rebuild(int N, const filter_t *cfg, uint64_t fc, double fs) {
     if (g.N != N) return 1;
     if (g.last_fc != fc) return 1;
@@ -64,12 +94,24 @@ static int need_rebuild(int N, const filter_t *cfg, uint64_t fc, double fs) {
     return 0;
 }
 
+/**
+ * @brief Función de comparación para qsort.
+ * @param a Puntero al primer elemento.
+ * @param b Puntero al segundo elemento.
+ * @return -1 si a < b, 0 si a == b, 1 si a > b.
+ */
 static int cmp_double(const void *a, const void *b) {
     double x = *(const double*)a;
     double y = *(const double*)b;
     return (x < y) ? -1 : (x > y);
 }
 
+/**
+ * @brief Calcula la mediana de un array de doubles.
+ * @param v Puntero al array.
+ * @param n Tamaño del array.
+ * @return Mediana del array.
+ */
 static double median_of_array(double *v, int n) {
     if (!v || n <= 0) return 0.0;
     qsort(v, (size_t)n, sizeof(double), cmp_double);
@@ -77,6 +119,14 @@ static double median_of_array(double *v, int n) {
     return 0.5 * (v[n/2 - 1] + v[n/2]);
 }
 
+/**
+ * @brief Valida la configuración del filtro contra los límites físicos de Nyquist.
+ * @param cfg Configuración del filtro.
+ * @param fc_hz Frecuencia central.
+ * @param fs_hz Frecuencia de muestreo.
+ * @param err Mensaje de error.
+ * @param err_sz Tamaño del buffer de error.
+ */
 int chan_filter_validate_cfg_abs(
     const filter_t *cfg,
     uint64_t fc_hz,
@@ -109,6 +159,13 @@ int chan_filter_validate_cfg_abs(
     return 0;
 }
 
+/**
+ * @brief Inicializa planes FFTW y calcula la máscara de magnitud de la Etapa 2.
+ * @param N Tamaño de la FFT.
+ * @param cfg Configuración del filtro.
+ * @param fc_hz Frecuencia central.
+ * @param fs_hz Frecuencia de muestreo.
+ */
 static int build_mask_and_plans(int N, const filter_t *cfg, uint64_t fc_hz, double fs_hz) {
     if (N < 2) return -1;
 
@@ -145,7 +202,7 @@ static int build_mask_and_plans(int N, const filter_t *cfg, uint64_t fc_hz, doub
     double hi1 = ff_off;
     double hi0 = CLAMPD(ff_off + tr, nyq_lo, nyq_hi);
 
-    double stop = db_to_lin_amp(OOB_REJECT_DB);
+    double stop = db_to_lin_amp_chan_filt(OOB_REJECT_DB);
     double df = fs_hz / (double)N;
 
     for (int k = 0; k < N; k++) {
@@ -156,11 +213,11 @@ static int build_mask_and_plans(int N, const filter_t *cfg, uint64_t fc_hz, doub
         if (f <= lo0 || f >= hi0) {
             g2 = stop;
         } else if (f < lo1) {
-            g2 = stop + (1.0 - stop) * raised_cos((f - lo0) / (lo1 - lo0));
+            g2 = stop + (1.0 - stop) * raised_cos_chan_filt((f - lo0) / (lo1 - lo0));
         } else if (f <= hi1) {
             g2 = 1.0;
         } else {
-            g2 = 1.0 + (stop - 1.0) * raised_cos((f - hi1) / (hi0 - hi1));
+            g2 = 1.0 + (stop - 1.0) * raised_cos_chan_filt((f - hi1) / (hi0 - hi1));
         }
         g.mask_stage2[k] = g2;
     }
@@ -215,7 +272,7 @@ int chan_filter_apply_inplace_abs(
     if (oob_n > 16 && ((double)oob_n / N) >= MIN_OOB_FRAC) {
         double med = median_of_array(oob_mag, oob_n);
         if (med > 0.0) {
-            double cap = med * db_to_lin_amp(CAP_OOB_DB);
+            double cap = med * db_to_lin_amp_chan_filt(CAP_OOB_DB);
             for (int k = 0; k < N; k++) {
                 int ks = (k <= N/2) ? k : (k - N);
                 double f = (double)ks * df;
@@ -246,3 +303,4 @@ int chan_filter_apply_inplace_abs(
 
     return 0;
 }
+/** @} */

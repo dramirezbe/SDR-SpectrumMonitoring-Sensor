@@ -1,3 +1,5 @@
+#Makefile
+
 all: html
 
 # Modify the html target (or just run it before sphinx)
