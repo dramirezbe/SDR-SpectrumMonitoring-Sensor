@@ -1,24 +1,28 @@
-#include <stdio.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <stdint.h>
-#include <sys/select.h>
-#include <string.h>
-#include <stdlib.h>
-#include <time.h>
+/**
+ * @file bacn_LTE.c
+ * @brief Controlador para la comunicación con módulos LTE vía comandos AT.
+ */
 
 #include "bacn_LTE.h"
+
+/**
+ * @addtogroup bacn_lte_module
+ * @{
+ */
 
 uint32_t TimeOut = 0;
 int8_t Response_Status, CRLF_COUNT = 0, Data_Count;
 volatile uint8_t OBDCount = 0, GPSCount = 0;
 
-char RESPONSE_BUFFER[UART_BUFFER_SIZE];
+// Variables globales para el control de flujo
+char RESPONSE_BUFFER[UART_BUFFER_SIZE]; /**< Buffer global donde el hilo deposita los datos recibidos. */
+bool LTERDY = false;                     /**< Flag que indica que hay nuevos datos listos en el buffer. */
 
 bool LTE_run = false;
-bool LTERDY = false;
+
+/** @cond DOXYGEN_SHOULD_SKIP_THIS */
 extern bool LTE_open;
+/** @endcond */
 
 void Read_Response(void)
 {
@@ -204,3 +208,5 @@ void* LTEIntHandler(void *arg)
     printf("UART close\r\n"); 
     pthread_exit(NULL);       
 }
+
+/** @} */

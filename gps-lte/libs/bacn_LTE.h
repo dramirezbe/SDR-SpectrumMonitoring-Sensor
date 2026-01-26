@@ -11,6 +11,21 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <termios.h>
+#include <stdint.h>
+#include <sys/select.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+
+/**
+ * @defgroup bacn_lte_module LTE Module
+ * @ingroup gps_binary
+ * @brief Controlador para la comunicación con módulos LTE vía comandos AT.
+ */
 
 /** @brief Tamaño del buffer para las respuestas del módulo LTE. */
 #define UART_BUFFER_SIZE    120
@@ -101,5 +116,7 @@ void close_usart(st_uart *s_uart);
  * @param arg Puntero a st_uart pasado como argumento de hilo.
  */
 void* LTEIntHandler(void *arg);
+
+/** @} */
 
 #endif // BACN_LTE_H

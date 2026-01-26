@@ -1,24 +1,27 @@
-#include <stdio.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <stdint.h>
-#include <sys/select.h>
-#include <string.h>
-#include <stdlib.h>
-#include <time.h>
+/**
+ * @file bacn_GPS.c
+ * @brief Implementación del manejador de datos GPS e hilo de recepción.
+ */
 
 #include "bacn_GPS.h"
 
+/**
+ * @addtogroup bacn_gps_module
+ * @{
+ */
+
+/** @brief Buffer global donde el hilo deposita los datos crudos del GPS. */
 char RESPONSE_BUFFER_GPS[UART_BUFFER_SIZE];
+/** @brief Delimitadores estándar para tramas NMEA (Coma y símbolo de inicio). */
+const char NMEA_DELIMITERS[3] = "$,";
 
-const char g[3] = "$,";
-
+/** @cond DOXYGEN_SHOULD_SKIP_THIS */
 extern GPSCommand GPSInfo;
-
-bool GPS_run = false;
 extern bool GPSRDY;
 extern bool GPS_open;
+/** @endcond */
+
+bool GPS_run = false;
 
 int8_t init_usart1(gp_uart *s_uart)
 {    
@@ -65,71 +68,38 @@ void close_usart1(gp_uart *s_uart)
 
 void GPS_Track(char* GPSData)
 {
-    //System_printf(GPSNMEA);
-    //System_flush();
+    // Usamos el nuevo nombre de la variable de delimitación
+    char *token = strtok(GPSData, NMEA_DELIMITERS);
 
-    char *token = strtok(GPSData, g);
-
-    if (token != NULL) {
-        GPSInfo.Header = token;
-    }
-     token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.UTC_Time = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Latitude = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.LatDir = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Longitude = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.LonDir = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Quality = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Satelites = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.HDOP = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Altitude = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Units_al = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Undulation = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Units_un = token;
-    }
-    token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Age = token;
-    }
-     token = strtok(NULL, g);
-    if (token != NULL) {
-        GPSInfo.Cheksum = token;
-    }
-   
+    if (token != NULL) GPSInfo.Header = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.UTC_Time = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Latitude = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.LatDir = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Longitude = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.LonDir = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Quality = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Satelites = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.HDOP = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Altitude = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Units_al = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Undulation = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Units_un = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Age = token;
+    token = strtok(NULL, NMEA_DELIMITERS);
+    if (token != NULL) GPSInfo.Cheksum = token;
 }
 
 void* GPSIntHandler(void *arg)
@@ -176,3 +146,5 @@ void* GPSIntHandler(void *arg)
     printf("UART close\r\n"); 
     pthread_exit(NULL);       
 }
+
+/** @} */

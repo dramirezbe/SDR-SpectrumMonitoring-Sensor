@@ -49,14 +49,16 @@ st_uart LTE;         /**< Estructura de control para la UART vinculada al módem
 gp_uart GPS;         /**< Estructura de control para la UART vinculada al receptor GPS. */
 /** @} */
 
-/** * @name Estado y Datos Globales
+/** @name Estado y Datos Globales
  * @{ 
  */
-GPSCommand GPSInfo;  /**< Estructura que almacena la última trama de datos GPS procesada (Lat, Lon, Alt). */
+/** @cond DOXYGEN_SHOULD_SKIP_THIS */
+GPSCommand GPSInfo;  
+/** @endcond */
 
 bool LTE_open = false; /**< Indica si el puerto serie LTE está abierto. */
 bool GPS_open = false; /**< Indica si el puerto serie GPS está abierto. */
-bool GPSRDY  = false; /**< Bandera de sincronización; se activa cuando hay una nueva trama GPS lista. */
+bool GPSRDY  = false;  /**< Bandera de sincronización para nueva trama GPS. */
 /** @} */
 
 /**
