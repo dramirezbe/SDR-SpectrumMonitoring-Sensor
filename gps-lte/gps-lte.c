@@ -1,68 +1,195 @@
 /**
  * @file gps-lte.c
- * @brief GPS handler. Sends gps from /gps endpoint every 10 cycles. 
- * Handles priority of internet interfaces and monitors connectivity.
+ * @brief Manejador de GPS-LTE. Interfaz de control para el módulo LTE y selección de antenas. 
+ *
+ * @details Este módulo gestiona el ciclo de vida de la conexión celular y la adquisición de coordenadas
+ * geográficas. Se encarga de la inicialización del hardware LTE (vía comandos AT/UART), la 
+ * gestión de la interfaz de red PPP (Point-to-Point Protocol) y el reporte periódico (cada 10s) 
+ * de la telemetría GPS hacia una API REST externa. Además, incluye lógica de redundancia para 
+ * verificar la conectividad mediante ICMP (ping) y reiniciar la interfaz en caso de fallos críticos.
+ *
+ * @author GCPDS
+ * @date 2026
  */
 
+#ifndef _GNU_SOURCE
+/** @brief Habilita extensiones GNU para funciones de cadenas y sistema. */
 #define _GNU_SOURCE 
+#endif
 
-// --- STANDARD HEADERS ---
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
-// Note: pthread.h removed as requested
 
-// --- CUSTOM MODULES & DRIVERS ---
 #include "utils.h"       
 #include "bacn_LTE.h"
 #include "bacn_GPS.h"
 #include "bacn_gpio.h"
 
-// =========================================================
-// DEFINITIONS & MACROS
-// =========================================================
-#define CMD_BUF 256
-#define IP_BUF 64
+/**
+ * @defgroup gps_binary GPS-LTE Binary
+ * @brief Logic and helper functions for the GPS-LTE module.
+ * @{
+ */
 
-// =========================================================
-// GLOBAL VARIABLES
-// =========================================================
-// Hardware Handles
-st_uart LTE;
-gp_uart GPS;
-
-// Data Structures
-GPSCommand GPSInfo; 
-
-// State Flags
-bool LTE_open = false;
-bool GPS_open = false;
-bool GPSRDY = false;
-
-// =========================================================
-// FUNCTION PROTOTYPES
-// =========================================================
-
-/** @defgroup gps_binary GPS-LTE Binary
- * @brief Logic and helper functions for the GPS/LTE module.
- * @{ */
-void connection_LTE(void);
-void run_cmd(const char *cmd);
-int get_wlan_ip(char *ip);
-int get_eth_ip(char *ip);
-int get_ppp_ip(char *ip);
+/** * @name Constantes de Buffer
+ * @{ 
+ */
+#define CMD_BUF 256  /**< Tamaño máximo para comandos de sistema. */
+#define IP_BUF 64    /**< Tamaño del buffer para almacenar direcciones IPv4. */
 /** @} */
 
-// =========================================================
-// MAIN ORCHESTRATION
-// =========================================================
+/** * @name Manejadores de Hardware y UART
+ * @{ 
+ */
+st_uart LTE;         /**< Estructura de control para la UART vinculada al módem LTE. */
+gp_uart GPS;         /**< Estructura de control para la UART vinculada al receptor GPS. */
+/** @} */
 
+/** * @name Estado y Datos Globales
+ * @{ 
+ */
+GPSCommand GPSInfo;  /**< Estructura que almacena la última trama de datos GPS procesada (Lat, Lon, Alt). */
+
+bool LTE_open = false; /**< Indica si el puerto serie LTE está abierto. */
+bool GPS_open = false; /**< Indica si el puerto serie GPS está abierto. */
+bool GPSRDY  = false; /**< Bandera de sincronización; se activa cuando hay una nueva trama GPS lista. */
+/** @} */
+
+/**
+ * @brief Gestiona la conexión a la red de datos mediante el demonio PPP.
+ * @details Ejecuta el script de marcado 'rnet'. Si la asignación de IP falla, intenta 
+ * reiniciar la interfaz una vez tras un tiempo de espera. Utiliza @ref get_ppp_ip para 
+ * validar el éxito de la operación.
+ */
+void connection_LTE(void)
+{
+    char ip[IP_BUF];
+
+    // 2. Network / Internet Setup    
+    run_cmd("sudo pon rnet");
+    sleep(15);
+    
+    if(!get_ppp_ip(ip)) {
+        printf("No IP address assigned! Restarting PPP...\n");
+        run_cmd("sudo poff rnet");
+        sleep(5);
+        run_cmd("sudo pon rnet");
+        sleep(15);
+
+        if(!get_ppp_ip(ip)) {
+            printf("PPP failed again. No IP assigned.\n");
+        }
+    }
+    if(strlen(ip) > 0) {
+        printf("PPP connected. IP = %s\n", ip);
+    }
+}
+
+/**
+ * @brief Ejecuta un comando de sistema e imprime su traza en consola.
+ * @param[in] cmd Cadena de caracteres con el comando a ejecutar.
+ */
+void run_cmd(const char *cmd) {
+    printf("[CMD] %s\n", cmd);
+    system(cmd);
+}
+
+/**
+ * @brief Obtiene la dirección IPv4 de la interfaz wlan0 (WiFi).
+ * @param[out] ip Buffer donde se copiará la dirección IP encontrada.
+ * @return 1 si se obtuvo con éxito, 0 en caso contrario.
+ */
+int get_wlan_ip(char *ip) {
+    FILE *fp;
+    char cmd[] = "ip -o -4 addr show wlan0 | awk '{print $4}' | cut -d/ -f1";
+    char buffer[IP_BUF] = {0};
+
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        buffer[strcspn(buffer, "\n")] = 0;
+        if (strlen(buffer) > 0) {
+            strcpy(ip, buffer);
+            pclose(fp);
+            return 1;
+        }
+    }
+    pclose(fp);
+    return 0;
+}
+
+/**
+ * @brief Obtiene la dirección IPv4 de la interfaz eth0 (Ethernet).
+ * @param[out] ip Buffer donde se copiará la dirección IP encontrada.
+ * @return 1 si se obtuvo con éxito, 0 en caso contrario.
+ */
+int get_eth_ip(char *ip) {
+    FILE *fp;
+    char cmd[] = "ip -o -4 addr show eth0 | awk '{print $4}' | cut -d/ -f1";
+    char buffer[IP_BUF] = {0};
+
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        buffer[strcspn(buffer, "\n")] = 0;
+        if (strlen(buffer) > 0) {
+            strcpy(ip, buffer);
+            pclose(fp);
+            return 1;
+        }
+    }
+    pclose(fp);
+    return 0;
+}
+
+/**
+ * @brief Obtiene la dirección IPv4 de la interfaz ppp0 (Módem LTE).
+ * @param[out] ip Buffer donde se copiará la dirección IP encontrada.
+ * @return 1 si se obtuvo con éxito, 0 en caso contrario.
+ */
+int get_ppp_ip(char *ip) {
+    FILE *fp;
+    char cmd[] = "ip -o -4 addr show ppp0 | awk '{print $4}' | cut -d/ -f1";
+    char buffer[IP_BUF] = {0};
+
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        buffer[strcspn(buffer, "\n")] = 0;
+        if (strlen(buffer) > 0) {
+            strcpy(ip, buffer);
+            pclose(fp);
+            return 1;
+        }
+    }
+    pclose(fp);
+    return 0;
+}
+
+/** @} */
+
+/**
+ * @brief Punto de entrada principal para el servicio de geolocalización.
+ * @details El flujo de ejecución es el siguiente:
+ * 1. **Inicialización**: Verifica el estado del módulo LTE, activa la alimentación si es necesario e inicializa las UARTs.
+ * 2. **Conexión**: Levanta la interfaz PPP mediante @ref connection_LTE.
+ * 3. **Bucle de Telemetría**:
+ * - Espera a que la bandera @ref GPSRDY sea verdadera.
+ * - Cada 10 actualizaciones de GPS, envía Latitud, Longitud y Altitud a la API mediante un HTTP POST.
+ * - Realiza una prueba de conectividad (ping) a una IP de referencia.
+ * - Si el ping falla repetidamente (6 intentos), reinicia la conexión PPP para intentar recuperar el servicio.
+ * * @return 0 en terminación normal, -1 en caso de error de apertura de hardware.
+ */
 int main(void)
 {
-    char *api_url = getenv_c("API_URL"); 
+    char *api_url = getenv_c_gps("API_URL"); 
     const char *ip_address = "10.10.1.254";
     char ping_cmd[100];
     int count = 0;
@@ -162,98 +289,5 @@ int main(void)
         sleep(1); 
     }    
 
-    return 0;
-}
-
-// =========================================================
-// HELPER IMPLEMENTATIONS
-// =========================================================
-
-void connection_LTE(void)
-{
-    char ip[IP_BUF];
-
-    // 2. Network / Internet Setup    
-    run_cmd("sudo pon rnet");
-    sleep(15);
-    
-    if(!get_ppp_ip(ip)) {
-        printf("No IP address assigned! Restarting PPP...\n");
-        run_cmd("sudo poff rnet");
-        sleep(5);
-        run_cmd("sudo pon rnet");
-        sleep(15);
-
-        if(!get_ppp_ip(ip)) {
-            printf("PPP failed again. No IP assigned.\n");
-        }
-    }
-    if(strlen(ip) > 0) {
-        printf("PPP connected. IP = %s\n", ip);
-    }
-}
-
-void run_cmd(const char *cmd) {
-    printf("[CMD] %s\n", cmd);
-    system(cmd);
-}
-
-int get_wlan_ip(char *ip) {
-    FILE *fp;
-    char cmd[] = "ip -o -4 addr show wlan0 | awk '{print $4}' | cut -d/ -f1";
-    char buffer[IP_BUF] = {0};
-
-    fp = popen(cmd, "r");
-    if (!fp) return 0;
-
-    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        buffer[strcspn(buffer, "\n")] = 0;
-        if (strlen(buffer) > 0) {
-            strcpy(ip, buffer);
-            pclose(fp);
-            return 1;
-        }
-    }
-    pclose(fp);
-    return 0;
-}
-
-int get_eth_ip(char *ip) {
-    FILE *fp;
-    char cmd[] = "ip -o -4 addr show eth0 | awk '{print $4}' | cut -d/ -f1";
-    char buffer[IP_BUF] = {0};
-
-    fp = popen(cmd, "r");
-    if (!fp) return 0;
-
-    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        buffer[strcspn(buffer, "\n")] = 0;
-        if (strlen(buffer) > 0) {
-            strcpy(ip, buffer);
-            pclose(fp);
-            return 1;
-        }
-    }
-    pclose(fp);
-    return 0;
-}
-
-int get_ppp_ip(char *ip) {
-    FILE *fp;
-    char cmd[] = "ip -o -4 addr show ppp0 | awk '{print $4}' | cut -d/ -f1";
-    char buffer[IP_BUF] = {0};
-
-    fp = popen(cmd, "r");
-    if (!fp) return 0;
-
-    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        buffer[strcspn(buffer, "\n")] = 0;
-        if (strlen(buffer) > 0) {
-            strcpy(ip, buffer);
-            pclose(fp);
-            return 1;
-        }
-    }
-    pclose(fp);
     return 0;
 }

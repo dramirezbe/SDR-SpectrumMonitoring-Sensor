@@ -1,22 +1,18 @@
 #include "am_radio_local.h"
 
-#include <string.h>
-#include <math.h>
-#include <complex.h>
-#include <float.h>
+/**
+ * @addtogroup am_radio_local_module
+ * @{
+ */
 
-// =========================================================
-// AM audio demod (robust)
-//
-// - Envelope
-// - CIC decimator (order 2) to 48k
-// - Envelope mean normalization: (env - mean)/mean
-// - Optional DC blocker
-// - Audio LPF (biquad)
-// - Simple RMS AGC (attack/release)
-// - Gain/clip
-// =========================================================
 
+/**
+ * @brief Calcula coeficientes Biquad para el filtro de audio.
+ * @param r Puntero al estado.
+ * @param fs Frecuencia de muestreo.
+ * @param fc Frecuencia de corte.
+ * @param Q Factor de calidad.
+ */
 static void am_biquad_lowpass(am_radio_local_t *r, float fs, float fc, float Q) {
     if (fc <= 0.0f) fc = 1.0f;
     if (fc > 0.49f * fs) fc = 0.49f * fs;
@@ -43,6 +39,9 @@ static void am_biquad_lowpass(am_radio_local_t *r, float fs, float fc, float Q) 
     r->z2 = 0.0f;
 }
 
+/**
+ * @brief Procesa una muestra mediante el filtro Biquad (DFII-T).
+ */
 static inline float am_biquad_process(am_radio_local_t *r, float x) {
     float y = r->b0 * x + r->z1;
     r->z1 = r->b1 * x - r->a1 * y + r->z2;
@@ -50,6 +49,9 @@ static inline float am_biquad_process(am_radio_local_t *r, float x) {
     return y;
 }
 
+/**
+ * @brief Aplica un filtro de primer orden para remover offset DC.
+ */
 static inline float am_dc_block_process(am_radio_local_t *r, float x) {
     float y = x - r->dc_x1 + r->dc_r * r->dc_y1;
     r->dc_x1 = x;
@@ -57,10 +59,20 @@ static inline float am_dc_block_process(am_radio_local_t *r, float x) {
     return y;
 }
 
-// ====== AM DEPTH METRIC (kept) ======
-#define DEPTH_EMA_ALPHA 0.15f
-
-static inline float update_am_depth_from_env_ctx(am_depth_state_t *st, float env_decimated)
+/**
+ * @brief Actualiza la métrica de profundidad de modulación AM (Índice de modulación).
+ * * La profundidad de modulación \f$ m \f$ se calcula utilizando los valores pico de la 
+ * envolvente en una ventana de tiempo (definida por report_samples):
+ * \f[ m = \frac{A_{max} - A_{min}}{A_{max} + A_{min}} \f]
+ * El resultado se suaviza mediante un filtro de promedio móvil exponencial (EMA) 
+ * para evitar fluctuaciones por ruido.
+ * * 
+ *
+ * @param[in,out] st             Puntero al estado de métricas de profundidad.
+ * @param[in]     env_decimated  Muestra de la envolvente después del diezmado (antes de normalizar).
+ * @return float                 Profundidad de modulación actual suavizada [0.0 a 1.0].
+ */
+static inline float update_am_local_depth_from_env_ctx(am_depth_state_t *st, float env_decimated)
 {
     if (!st) return 0.0f;
     if (!isfinite(env_decimated)) return st->depth_ema;
@@ -90,9 +102,12 @@ static inline float update_am_depth_from_env_ctx(am_depth_state_t *st, float env
     return st->depth_ema;
 }
 
-// ---- Robust helpers ----
-
-// Fast-ish magnitude (still sqrt). You may replace with hypot() if desired.
+/**
+ * @brief Calcula la magnitud de la muestra IQ.
+ * @param re Parte real.
+ * @param im Parte imaginaria.
+ * @return Magnitud (envolvente).
+ */
 static inline double am_env_mag(double re, double im) {
     // sqrt(re^2+im^2) but with some numerical safety
     double a = re*re + im*im;
@@ -100,8 +115,16 @@ static inline double am_env_mag(double re, double im) {
     return sqrt(a);
 }
 
-// CIC order-2 decimator at integer factor R.
-// Gain = R^2, so we divide by (R*R) for roughly unity gain.
+/**
+ * @brief Filtro CIC de orden 2 para diezmado eficiente.
+ * * Implementa la estructura Integrador-Integrador -> Diezmado -> Peine-Peine.
+ * La ganancia del filtro es \f$ R^2 \f$, la cual se normaliza internamente.
+ * * @param[in,out] r      Estado del radio.
+ * @param[in]     x      Muestra de entrada a alta tasa.
+ * @param[in]     R      Factor de diezmado.
+ * @param[out]    ready  Se pone a 1 cuando una nueva muestra diezmada está disponible.
+ * @return float         Muestra diezmada (si ready=1).
+ */
 static inline float am_cic2_decim_push(am_radio_local_t *r, double x, int R, int *ready)
 {
     // 2 integrators
@@ -130,8 +153,13 @@ static inline float am_cic2_decim_push(am_radio_local_t *r, double x, int R, int
     return (float)y;
 }
 
-// Envelope mean tracker: slow EMA to estimate carrier level.
-// alpha ~ 1/(tau*fs_audio). For tau ~ 0.5..2 s, alpha small.
+/**
+ * @brief Actualiza el estimador del nivel de portadora (media lenta).
+ * * Utiliza un EMA de tiempo largo para identificar el nivel DC de la envolvente.
+ * @param r Estado del radio.
+ * @param env_dec Muestra actual de la envolvente.
+ * @return Media actualizada.
+ */
 static inline float am_update_env_mean(am_radio_local_t *r, float env_dec)
 {
     float m = r->env_mean;
@@ -143,9 +171,14 @@ static inline float am_update_env_mean(am_radio_local_t *r, float env_dec)
     return m;
 }
 
-// Simple RMS AGC with attack/release on gain.
-// - attack: fast when we need to REDUCE gain (signal got larger)
-// - release: slow when we need to INCREASE gain (signal got smaller)
+/**
+ * @brief Control Automático de Ganancia (AGC) basado en RMS.
+ * * Ajusta la ganancia de forma asimétrica (ataque rápido, liberación lenta) 
+ * para mantener la señal en un nivel de volumen constante.
+ * * @param r Estado del radio.
+ * @param x Muestra de audio de entrada.
+ * @return Muestra de audio con ganancia aplicada.
+ */
 static inline float am_agc_process(am_radio_local_t *r, float x)
 {
     // Update RMS^2 EMA
@@ -245,7 +278,7 @@ int am_radio_local_iq_to_pcm(am_radio_local_t *r, signal_iq_t *sig, int16_t *pcm
 
         // AM depth metric uses RAW decimated envelope (unchanged behavior)
         if (depth_st) {
-            update_am_depth_from_env_ctx(depth_st, env_dec);
+            update_am_local_depth_from_env_ctx(depth_st, env_dec);
         }
 
         // ---- Key improvement: normalize envelope by its slow mean ----
@@ -281,3 +314,5 @@ int am_radio_local_iq_to_pcm(am_radio_local_t *r, signal_iq_t *sig, int16_t *pcm
 
     return out_idx;
 }
+
+/** @} */

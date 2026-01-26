@@ -4,19 +4,13 @@
  */
 
 #include "utils.h"
-#include <string.h>
-#include <curl/curl.h>
 
-// System Headers for MAC Address and Sockets
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <net/if.h>
-#include <unistd.h>
-#include <netinet/in.h> // Required for IPPROTO_IP definition
+/**
+ * @addtogroup utils_gpslte
+ * @{
+ */
 
-// --- Environment Variable Helper ---
-
-char *getenv_c(const char *key) {
+char *getenv_c_gps(const char *key) {
     FILE *file;
     char line[1024];
     size_t key_len = strlen(key);
@@ -59,8 +53,6 @@ char *getenv_c(const char *key) {
     return NULL;
 }
 
-// --- Network / MAC Helper ---
-
 int get_wlan0_mac(char *mac_out) {
     struct ifreq s;
     // Uses IPPROTO_IP (requires netinet/in.h)
@@ -85,8 +77,7 @@ int get_wlan0_mac(char *mac_out) {
     return -1;
 }
 
-// --- 1. Nueva función auxiliar para convertir DDM a DD ---
-// Convierte 501.7238 -> 5.02873
+
 double nmea_to_decimal(double raw_coord) {
     double degrees = floor(raw_coord / 100.0);
     double minutes = raw_coord - (degrees * 100.0);
@@ -182,3 +173,5 @@ int post_gps_data(
 
     return 0; // Éxito
 }
+
+/** @} */

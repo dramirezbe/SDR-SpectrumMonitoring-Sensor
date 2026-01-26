@@ -1,16 +1,23 @@
-
-#include <errno.h>
-#include <gpiod.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <time.h>
-
+/**
+ * @file bacn_gpio.c
+ * @brief Interfaz de control GPIO para el módulo LTE y selección de antenas.
+ */
 
 #include "bacn_gpio.h"
 
-/* Request to change output pin selected*/
+/**
+ * @addtogroup gpio_module
+ * @{
+ */
+
+/**
+ * @brief Solicita y configura una línea de GPIO como salida.
+ * * @param chip_path Ruta del dispositivo de chip GPIO (ej. "/dev/gpiochip0").
+ * @param offset Número del pin dentro del chip.
+ * @param value Valor inicial de la salida (activo/inactivo).
+ * @param consumer Etiqueta para identificar quién usa la línea en el sistema.
+ * @return struct gpiod_line_request* Puntero al objeto de solicitud, NULL si falla.
+ */
 static struct gpiod_line_request *
 request_output_line(const char *chip_path, unsigned int offset,
 		    enum gpiod_line_value value, const char *consumer)
@@ -67,6 +74,13 @@ close_chip:
 	return request;
 }
 
+/**
+ * @brief Solicita y configura una línea de GPIO como entrada.
+ * * @param chip_path Ruta del dispositivo de chip GPIO.
+ * @param offset Número del pin dentro del chip.
+ * @param consumer Etiqueta para identificar el consumidor.
+ * @return struct gpiod_line_request* Puntero al objeto de solicitud, NULL si falla.
+ */
 static struct gpiod_line_request *request_input_line(const char *chip_path,
 						     unsigned int offset,
 						     const char *consumer)
@@ -399,3 +413,5 @@ uint8_t real_time(void)
 
 	return EXIT_SUCCESS;
 }
+
+/** @} */

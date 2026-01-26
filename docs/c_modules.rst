@@ -18,7 +18,12 @@ Controlador de GPS (Binario)
 Gestión del módulo GPS para la obtención de coordenadas geográficas y, fundamentalmente, la señal de tiempo de precisión para la sincronización de capturas.
 
 .. doxygengroup:: gps_binary
-   :content-only:
+   :project: spectrum_sensor
+   :members:
+   :protected-members:
+   :private-members:
+   :undoc-members:
+   :inner:
 
 .. important::
    El módulo GPS requiere una antena externa con vista clara al cielo. La precisión de la marca de tiempo PPS es crítica para la integridad de los datos espectrales.
@@ -40,10 +45,14 @@ Controlador principal para el hardware **HackRF One** y la lógica de procesamie
 
 Control de GPIO (BACN)
 ----------------------
-Definiciones de mapeo de pines y funciones de control lógico para el hardware específico de la plataforma BACN.
 
-.. doxygenfile:: bacn_gpio.h
+.. doxygengroup:: gpio_module
    :project: spectrum_sensor
+   :members:
+   :protected-members:
+   :private-members:
+   :undoc-members:
+   :inner:
 
 .. tip::
    Consulte este módulo si necesita modificar la asignación de pines para una nueva revisión de la PCB o realizar depuración de señales lógicas.

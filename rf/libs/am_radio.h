@@ -26,11 +26,13 @@
  * @{
  */
 
- // AM audio LPF (conservative voice-style)
+/** @brief Frecuencia de corte del filtro pasa bajos de audio (estilo voz conservador). */
 #define AM_AUDIO_LPF_HZ   4000.0f
+
+/** @brief Factor de calidad Q para el filtro Biquad (0.707 = Butterworth). */
 #define AM_AUDIO_Q        0.707f
 
-// EMA alpha for depth update (applied once per report window)
+/** @brief Factor alfa para el promedio móvil exponencial (EMA) de la profundidad de modulación. */
 #define DEPTH_EMA_ALPHA   0.20f
 
 /**

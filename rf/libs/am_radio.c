@@ -203,3 +203,5 @@ int am_radio_iq_to_pcm(am_radio_t *r, signal_iq_t *sig, int16_t *pcm_out, am_dep
 
     return out_idx;
 }
+
+/** @} */

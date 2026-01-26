@@ -11,8 +11,21 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <math.h>
+#include <string.h>
+#include <curl/curl.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <unistd.h>
+#include <netinet/in.h>
 
-// Macros
+/**
+ * @defgroup utils_gpslte Utilities GPS-LTE
+ * @ingroup gps_binary
+ * @brief Utility functions for Environment, Network, and GPS HTTP POSTs.
+ * @{
+ */
+
 #define MAX_URL_LENGTH 1024
 #define MAX_JSON_LENGTH 256
 #define MAC_ADDR_LENGTH 18
@@ -23,7 +36,7 @@
  * @return char* Dynamically allocated string containing the value. 
  * Caller must free() the result. Returns NULL if not found.
  */
-char *getenv_c(const char *key);
+char *getenv_c_gps(const char *key);
 
 /**
  * @brief Retrieves the MAC address of the wlan0 interface.
@@ -47,5 +60,7 @@ int post_gps_data(
     const char *latitude_str,
     const char *longitude_str
 );
+
+/** @}  */
 
 #endif // UTILS_H
