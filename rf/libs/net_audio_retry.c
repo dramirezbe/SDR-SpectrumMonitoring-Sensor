@@ -155,7 +155,7 @@ int ensure_tx_with_retry(audio_stream_ctx_t *ctx, opus_tx_t **ptx, volatile bool
         }
 
         fprintf(stderr,
-                "[AUDIO] WARN: TCP/Opus connect failed (%s:%d). Retrying in 3s...\n",
+                "[AUDIO] Waiting for TCP/Opus in (%s:%d)\n",
                 ctx->tcp_host, ctx->tcp_port);
 
         sleep_cancelable_ms(RECONNECT_DELAY_MS, running_flag);
