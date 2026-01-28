@@ -5,6 +5,11 @@
 
 #include "am_radio.h"
 
+// --- Forward Declarations ---
+static void biquad_lowpass(am_radio_t *r, float fs, float fc, float Q);
+static inline float biquad_process(am_radio_t *r, float x);
+static inline float dc_block_process(am_radio_t *r, float x);
+
 /**
  * @addtogroup am_module
  * @{
