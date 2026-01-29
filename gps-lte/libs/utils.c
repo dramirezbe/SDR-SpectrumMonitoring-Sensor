@@ -171,6 +171,8 @@ int post_gps_data(
         return 4;
     }
 
+    printf("[UTILS] Datos GPS (%.6f, %.6f, %.1f)enviados con exito.\n", final_lat, final_lng, alt);
+
     return 0; // Éxito
 }
 
