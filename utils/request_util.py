@@ -156,7 +156,6 @@ class RequestClient:
         data: Optional[bytes] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Optional[requests.Response]]:
-        """Manejador interno unificado para todas las llamadas HTTP."""
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         
         try:
@@ -171,14 +170,26 @@ class RequestClient:
             if 200 <= resp.status_code < 300:
                 return 0, resp
 
-            # Mapeo de errores HTTP
             if self._log:
                 self._log.error(f"[HTTP] Error rc={resp.status_code} en {url}")
             return 1, resp
 
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-            if self._log: self._log.error(f"[HTTP] Error de conectividad: {e}")
+        except requests.exceptions.ConnectionError as e:
+            # Manejo simplificado de DNS / Name Resolution
+            msg = str(e)
+            if "NameResolutionError" in msg or "Temporary failure in name resolution" in msg:
+                error_type = "Error de DNS (Host no encontrado)"
+            else:
+                error_type = "Error de conexión"
+            
+            if self._log:
+                self._log.warning(f"[HTTP] {error_type} en {url}")
             return 1, None
+
+        except requests.exceptions.Timeout:
+            if self._log: self._log.warning(f"[HTTP] Timeout en {url}")
+            return 1, None
+
         except Exception as e:
             if self._log: self._log.error(f"[HTTP] Error inesperado: {e}")
             return 2, None
