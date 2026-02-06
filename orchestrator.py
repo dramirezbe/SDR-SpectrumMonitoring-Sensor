@@ -29,7 +29,7 @@ import subprocess
 
 WEBRTC_CMD = [cfg.PYTHON_ENV_STR, "server_webrtc.py"]
 KAL_SYNC_CMD = [cfg.PYTHON_ENV_STR, "kal_sync.py"]
-log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
+#log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
 
 # --- CONFIG FETCHING ---
 def fetch_realtime_config(client):
@@ -290,7 +290,8 @@ async def run_campaigns_logic(client: RequestClient, store: ShmStore, scheduler:
         is_active = scheduler.sync_jobs(camps_arr, cfg.get_time_ms(), store)
         
         if is_active:
-            await _perform_calibration_sequence()
+            # DISABLED!!!!!! WARNNING!!!! DISABLED!!!! (FOR DEBUGGING)
+            #await _perform_calibration_sequence()
             GlobalSys.set(SysState.CAMPAIGN)
             
             while True:
