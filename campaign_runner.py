@@ -40,6 +40,25 @@ class CampaignRunner:
         self.cli = RequestClient(cfg.API_URL, mac_wifi=cfg.get_mac(), timeout=(5, 15), verbose=cfg.VERBOSE, logger=log)
         self.store = ShmStore()
         self.campaign_id = self.store.consult_persistent("campaign_id")
+        self.expires_at_ms = self.store.consult_persistent("expires_at_ms")
+
+    def _check_expiration(self) -> bool:
+        """
+        Verifica si la campaña actual ha expirado.
+        
+        Returns:
+            bool: True si la campaña es válida, False si expiró o no existe.
+        """
+        if not self.campaign_id or self.expires_at_ms is None:
+            log.error("❌ No campaign data found in Shared Memory.")
+            return False
+            
+        now = cfg.get_time_ms()
+        if now > self.expires_at_ms:
+            log.warning(f"Campaign {self.campaign_id} EXPIRED. (Now: {now} > Exp: {self.expires_at_ms})")
+            return False
+            
+        return True
 
     def _get_rf_params(self) -> dict:
         """
@@ -49,8 +68,8 @@ class CampaignRunner:
             dict: Diccionario con parámetros como frecuencia central, span, ganancias, etc.
                   Retorna un diccionario vacío si ocurre un error de lectura.
         """
-        keys = ["center_freq_hz", "span", "sample_rate_hz", "rbw_hz", "overlap", 
-                "window", "scale", "lna_gain", "vga_gain", "antenna_amp", 
+        keys = ["center_freq_hz", "sample_rate_hz", "rbw_hz", "overlap", 
+                "window", "lna_gain", "vga_gain", "antenna_amp", 
                 "antenna_port", "ppm_error", "filter"]
         try:
             return {k: self.store.consult_persistent(k) for k in keys}
@@ -148,6 +167,10 @@ class CampaignRunner:
         Returns:
             int: Código de salida (0 éxito, 1 fallo).
         """
+        if not self._check_expiration():
+            # Salimos inmediatamente sin tocar el hardware ni la red
+            return 0 #Sin error
+
         # 1. Preparación de parámetros
         rf_cfg = self._get_rf_params()
         if not rf_cfg:

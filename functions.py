@@ -16,6 +16,7 @@ from enum import Enum, auto
 from crontab import CronTab
 import logging
 import numpy as np
+import re
 import asyncio
 from copy import deepcopy
 
@@ -101,63 +102,50 @@ def format_data_for_upload(payload):
 class CronSchedulerCampaign:
     """
     Gestor de Sincronización entre API y Crontab.
-    
-    Analiza la lista de campañas del servidor y decide cuáles deben ser 
-    agendadas, actualizadas o eliminadas del sistema operativo basado en la 
-    ventana de tiempo de activación.
+    Garantiza exclusividad (solo 1 job) y prioridad por ID más alto.
     """
     def __init__(self, poll_interval_s, python_env=None, cmd=None, logger=None):
-        """
-        Inicializa el programador.
-
-        Args:
-            poll_interval_s (int): Intervalo de consulta de la API en segundos.
-            python_env (str, optional): Ruta al ejecutable de Python.
-            cmd (str, optional): Ruta al script de ejecución de campañas.
-            logger (logging.Logger, optional): Instancia de logger personalizada.
-        """
         self.poll_interval_ms = poll_interval_s * 1000
         self.python_env = python_env if python_env else "/usr/bin/python3"
         self.cmd = f"{self.python_env} {cmd}"
-        self.debug_file = (cfg.PROJECT_ROOT / "mock_crontab.txt").absolute()
         self._log = logger if logger else logging.getLogger(__name__)
 
+        # Configuración según entorno
         if cfg.DEVELOPMENT:
+            self.debug_file = (cfg.PROJECT_ROOT / "mock_crontab.txt").absolute()
             self.debug_file.parent.mkdir(parents=True, exist_ok=True)
             if not self.debug_file.exists():
                 self.debug_file.write_text("", encoding="utf-8")
+            # En modo dev, podrías pasar tabfile=str(self.debug_file) a CronTab
             self.cron = CronTab(user=True)
         else:
             self.cron = CronTab(user=True)
 
     def _ts_to_human(self, ts_ms):
-        """Convierte un timestamp en ms a formato legible (UTC)."""
         if ts_ms is None: return "None"
         return cfg.human_readable(ts_ms, target_tz="UTC")
 
     def _seconds_to_cron_interval(self, seconds):
-        """Convierte segundos en una expresión de intervalo para Cron."""
-        minutes = int(seconds / 60)
-        if minutes < 1: minutes = 1 
+        minutes = max(int(seconds / 60), 1)
         return f"*/{minutes} * * * *"
 
-    def _job_exists(self, campaign_id):
-        """Verifica si ya existe una tarea cron para el ID de campaña."""
-        return any(self.cron.find_comment(f"CAMPAIGN_{campaign_id}"))
-
-    def _remove_job(self, campaign_id):
-        """Elimina la tarea cron asociada a una campaña específica."""
-        if self._job_exists(campaign_id):
-            self.cron.remove_all(comment=f"CAMPAIGN_{campaign_id}")
-            self._log.info(f"🗑️ REMOVED Job ID {campaign_id}")
+    def _clear_all_campaign_jobs(self):
+        """Limpia todos los jobs con el prefijo CAMPAIGN_."""
+        jobs = list(self.cron.find_comment(re.compile(r'^CAMPAIGN_.*')))
+        for job in jobs:
+            self.cron.remove(job)
+        if jobs:
+            self._log.debug(f"🧹 Crontab cleared ({len(jobs)} jobs removed)")
 
     def _upsert_job(self, camp, store: ShmStore):
-        """Inserta o actualiza una tarea en el cron y actualiza la memoria compartida."""
+        """Actualiza RAM y agenda el job en el sistema operativo."""
         c_id = camp['campaign_id']
+        end_ms = camp['timeframe']['end']
         
-        # Actualización de Memoria Compartida
+        # 1. RAM (ShmStore)
         dict_persist_params = {
             "campaign_id": c_id,
+            "expires_at_ms": end_ms, # El script de RF lo usará para validarse
             "center_freq_hz": camp.get('center_freq_hz'),
             "sample_rate_hz": camp.get('sample_rate_hz'),
             "rbw_hz": camp.get('rbw_hz'),
@@ -170,83 +158,57 @@ class CronSchedulerCampaign:
             "filter": camp.get('filter'),
             "method_psd": "pfb"
         }
-        try:
-            store.update_from_dict(dict_persist_params)
-            self._log.info(f"💾 SharedMemory UPDATED for Campaign {c_id} ({camp.get('center_freq_hz')} Hz)")
-        except Exception:
-            self._log.error("Failed to update store.")
+        store.update_from_dict(dict_persist_params)
 
-        if self._job_exists(c_id): 
-            return 
-
+        # 2. Cron
         period_s = camp['acquisition_period_s']
         schedule = self._seconds_to_cron_interval(period_s)
         job = self.cron.new(command=self.cmd, comment=f"CAMPAIGN_{c_id}")
         job.setall(schedule)
-        self._log.info(f"🆕 ADDED Job ID {c_id} | Schedule: {schedule}")
 
     def sync_jobs(self, campaigns: list, current_time_ms: int, store: ShmStore) -> bool:
         """
-        Sincroniza el estado local del cron con la base de datos central.
-        
-        Calcula una 'ventana de activación' restando el intervalo de consulta 
-        al tiempo de inicio, permitiendo que el sensor esté listo justo a tiempo.
+        Sincroniza y retorna True si hay una campaña activa agendada.
         """
-        any_active = False
-        now_human = cfg.human_readable(current_time_ms)
+        self._log.info("="*60)
+        self._log.info(f"🔍 SYNC START | Time: {self._ts_to_human(current_time_ms)}")
         
-        self._log.info("="*60)
-        self._log.info(f"🔍 SYNC START | System Time: {now_human} ({int(current_time_ms)} ms)")
-        self._log.info("="*60)
-
+        candidates = []
         for camp in campaigns:
             c_id = camp['campaign_id']
             status = camp['status']
-            
-            # Tiempos de la campaña
             start_ms = camp['timeframe']['start']
             end_ms = camp['timeframe']['end']
             
-            # Ventana de activación (con margen de poll_interval)
+            # Ventana con margen poll_interval_ms en ambos extremos
             window_open = start_ms - self.poll_interval_ms
             window_close = end_ms - self.poll_interval_ms
             
+            is_valid = status not in ['canceled', 'error', 'finished']
             is_in_window = window_open <= current_time_ms <= window_close
 
-            # Formateo para logs
-            start_h  = cfg.human_readable(start_ms)
-            end_h    = cfg.human_readable(end_ms)
-            w_open_h = cfg.human_readable(window_open)
-            w_close_h= cfg.human_readable(window_close)
-
-            self._log.info(f"📋 Campaign ID: {c_id} | Status: {status.upper()}")
-            self._log.info(f"   ﹂ Timeframe: [{start_h}] TO [{end_h}]")
-            self._log.info(f"   ﹂ Activation Window: {w_open_h} < [NOW] < {w_close_h}")
-
-            # Lógica de descarte por status
-            if status in ['canceled', 'error', 'finished']:
-                self._log.warning(f"   ﹂ ❌ Skipping: Inactive status '{status}'")
-                self._remove_job(c_id)
-                continue
-
-            # Lógica de ventana de tiempo
-            if is_in_window:
-                self._log.info(f"   ﹂ ✅ WITHIN WINDOW: Proceeding to upsert job.")
-                self._upsert_job(camp, store)
-                any_active = True
-                # Break si solo se permite una campaña activa a la vez
-                # break 
+            if is_valid and is_in_window:
+                candidates.append(camp)
             else:
-                reason = "Not started yet" if current_time_ms < window_open else "Already expired"
-                self._log.info(f"   ﹂ ⏳ OUTSIDE WINDOW: {reason}")
-                self._remove_job(c_id)
+                self._log.debug(f"📋 Skip ID {c_id}: {status} / Outside Window")
 
+        # LIMPIEZA ATÓMICA: Siempre borramos antes de decidir
+        self._clear_all_campaign_jobs()
+
+        winner = None
+        if candidates:
+            # Seleccionamos la de ID más alto
+            winner = max(candidates, key=lambda x: x['campaign_id'])
+            self._log.info(f"🏆 Winner: ID {winner['campaign_id']} (Ends: {self._ts_to_human(winner['timeframe']['end'])})")
+            self._upsert_job(winner, store)
+        else:
+            self._log.info("ℹ️ No active candidates found.")
+
+        # Escribir cambios al sistema
         self.cron.write()
         self._log.info("="*60)
-        self._log.info(f"SYNC FINISHED | Active campaigns found: {any_active}")
-        self._log.info("="*60)
         
-        return any_active
+        return winner is not None
 
 class AcquireDual:
     """
