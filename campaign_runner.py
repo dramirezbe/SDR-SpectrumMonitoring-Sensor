@@ -167,6 +167,10 @@ class CampaignRunner:
         Returns:
             int: Código de salida (0 éxito, 1 fallo).
         """
+        if self.store.consult_persistent("campaign_runner_running"):
+            log.warning("Another runner is already active. Aborting to avoid collision.")
+            return 0
+    
         if not self._check_expiration():
             # Salimos inmediatamente sin tocar el hardware ni la red
             return 0 #Sin error
