@@ -39,7 +39,7 @@
 
 /** * @brief Retraso estándar entre intentos de reconexión en milisegundos.
  */
-#define RECONNECT_DELAY_MS 1000
+#define RECONNECT_DELAY_MS 2000
 
 #ifdef __cplusplus
 extern "C" {
