@@ -502,6 +502,10 @@ void* audio_thread_fn(void* arg) {
  * 4. **Limpieza**: Asegura el cierre de hilos y liberación del hardware ante SIGINT/SIGTERM.
  */
 int main() {
+    // Desactiva el buffering de stdout completamente
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    
     signal(SIGINT, handle_sigint);
     signal(SIGTERM, handle_sigint);
     signal(SIGPIPE, SIG_IGN); // Added to prevent crash on broken TCP audio pipes
