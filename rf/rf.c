@@ -360,7 +360,7 @@ void* audio_thread_fn(void* arg) {
 
         // Wait for enough IQ bytes
         if (rb_available(&audio_rb) < (size_t)(AUDIO_CHUNK_SAMPLES * 2)) {
-            usleep(1000);
+            msleep_int(10);
             continue;
         }
 
@@ -663,6 +663,7 @@ int main() {
         if (safety_timeout <= 0 && keep_running) {
             fprintf(stderr, "[RF] Error: Acquisition Timeout.\n");
             recover_hackrf();
+            clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
             continue;
         }
 
