@@ -50,7 +50,7 @@ class CampaignRunner:
             bool: True si la campaña es válida, False si expiró o no existe.
         """
         if not self.campaign_id or self.expires_at_ms is None:
-            log.error("❌ No campaign data found in Shared Memory.")
+            log.info("No campaign data found in Shared Memory. Skipping.")
             return False
             
         now = cfg.get_time_ms()
@@ -148,7 +148,7 @@ class CampaignRunner:
                 return await acquirer.get_corrected_data(rf_cfg)
         except OSError as e:
             if "Address already in use" in str(e):
-                log.warning("⚠️ ZMQ Socket busy. Skipping.")
+                log.warning("ZMQ Socket busy. Skipping.")
             return None
         finally:
             self.store.add_to_persistent("campaign_runner_running", False)
