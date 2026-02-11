@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# power_tune_rpi5.sh
-# Desactiva: Bluetooth, force_turbo, camera stack, y servicios de sensor (avahi/triggerhappy/cups)
-# NO toca Wi-Fi ni HDMI ni nada más.
+# deactivate_service.sh
+# Script para desactivar servicios y configuraciones específicas del proyecto ANE2.
 
 set -euo pipefail
 
@@ -24,8 +23,6 @@ cp -a "${BOOT_CFG}" "${backup}"
 ensure_kv() {
   local key="$1"
   local value="$2"
-
-  # Si existe una línea activa con key=, reemplaza
   if grep -Eq "^[[:space:]]*${key}=" "${BOOT_CFG}"; then
     sed -i -E "s|^[[:space:]]*${key}=.*|${key}=${value}|" "${BOOT_CFG}"
   else
@@ -33,7 +30,7 @@ ensure_kv() {
   fi
 }
 
-# Función: asegura que exista una línea exacta (por ejemplo dtoverlay=disable-bt)
+# Función: asegura que exista una línea exacta
 ensure_line() {
   local line="$1"
   if ! grep -Fxq "${line}" "${BOOT_CFG}"; then
@@ -50,7 +47,6 @@ ensure_kv "start_x" "0"
 echo "[STEP] (3) Disable Bluetooth (dtoverlay + apagar servicios)"
 ensure_line "dtoverlay=disable-bt"
 
-# Servicios Bluetooth (pueden o no existir según imagen)
 for svc in bluetooth.service hciuart.service; do
   if systemctl list-unit-files | grep -q "^${svc}"; then
     systemctl disable --now "${svc}" || true
@@ -71,9 +67,28 @@ for svc in "${SENSOR_SERVICES[@]}"; do
   fi
 done
 
+echo "[STEP] (5) Disable IPv6 (Fix 'No route' errors)"
+SYSCTL_CONF="/etc/sysctl.conf"
+IPV6_PARAMS=(
+  "net.ipv6.conf.all.disable_ipv6=1"
+  "net.ipv6.conf.default.disable_ipv6=1"
+  "net.ipv6.conf.lo.disable_ipv6=1"
+)
+
+for param in "${IPV6_PARAMS[@]}"; do
+  if ! grep -Fq "$param" "$SYSCTL_CONF"; then
+    echo "$param" >> "$SYSCTL_CONF"
+  fi
+done
+
+# Aplicar cambios de red inmediatamente sin reiniciar
+sysctl -p > /dev/null
+echo "  [OK] IPv6 disabled and sysctl applied"
+
 echo
 echo "[DONE] Cambios aplicados."
 echo "       - Se creó backup: ${backup}"
+echo "       - IPv6 ya está desactivado (no requiere reinicio para esto)."
 echo "       - Para que dtoverlay/start_x/force_turbo tomen efecto: REINICIA."
 echo
 echo "Reiniciar ahora: sudo reboot"

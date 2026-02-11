@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# install.sh
+# Script de instalación para el proyecto ANE2 en Raspberry Pi 5.
 set -e
 
 # Colores y Configuración
@@ -80,9 +83,10 @@ source venv/bin/activate
 pip install --upgrade pip certifi --quiet
 [ -f "requirements.txt" ] && pip install -r requirements.txt --quiet
 [ -f "build.sh" ] && { chmod +x build.sh; ./build.sh; }
+deactivate
+
 log "deactivate services"
 [ -f "deactivate_service.sh" ] && { chmod +x deactivate_service.sh; ./deactivate_service.sh; }
-deactivate
 
 # Asegurar ejecución de binarios C
 [ -f "rf_app" ] && chmod +x "rf_app"
