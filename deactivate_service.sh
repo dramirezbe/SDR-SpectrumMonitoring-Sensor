@@ -67,28 +67,26 @@ for svc in "${SENSOR_SERVICES[@]}"; do
   fi
 done
 
-echo "[STEP] (5) Disable IPv6 (Fix 'No route' errors)"
-SYSCTL_CONF="/etc/sysctl.conf"
-IPV6_PARAMS=(
-  "net.ipv6.conf.all.disable_ipv6=1"
-  "net.ipv6.conf.default.disable_ipv6=1"
-  "net.ipv6.conf.lo.disable_ipv6=1"
-)
+echo "[STEP] (5) Prioritize IPv4 (gai.conf modification)"
+GAI_CONF="/etc/gai.conf"
+TARGET="#precedence ::ffff:0:0/96  100"
+REPLACEMENT="precedence ::ffff:0:0/96  100"
 
-for param in "${IPV6_PARAMS[@]}"; do
-  if ! grep -Fq "$param" "$SYSCTL_CONF"; then
-    echo "$param" >> "$SYSCTL_CONF"
+if [[ -f "$GAI_CONF" ]]; then
+  if grep -qF "$TARGET" "$GAI_CONF"; then
+    sed -i "s|$TARGET|$REPLACEMENT|" "$GAI_CONF"
+    echo "  [OK] IPv4 now takes precedence in $GAI_CONF"
+  else
+    echo "  [WARN] Target line not found or already uncommented in $GAI_CONF"
   fi
-done
-
-# Aplicar cambios de red inmediatamente sin reiniciar
-sysctl -p > /dev/null
-echo "  [OK] IPv6 disabled and sysctl applied"
+else
+  echo "  [SKIP] $GAI_CONF does not exist"
+fi
 
 echo
 echo "[DONE] Cambios aplicados."
 echo "       - Se creó backup: ${backup}"
-echo "       - IPv6 ya está desactivado (no requiere reinicio para esto)."
+echo "       - Prioridad IPv4 configurada (efectivo en nuevas conexiones)."
 echo "       - Para que dtoverlay/start_x/force_turbo tomen efecto: REINICIA."
 echo
 echo "Reiniciar ahora: sudo reboot"
