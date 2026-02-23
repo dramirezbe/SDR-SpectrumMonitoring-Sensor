@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <complex.h>
+#include <omp.h>
 
 /**
  * @defgroup chan_filter_module Channel Filter

@@ -48,6 +48,7 @@ void iq_compensation(signal_iq_t* signal_data) {
     // -------------------------------------------------
     // 1) DC offset removal
     // -------------------------------------------------
+    #pragma omp parallel for reduction(+:meanI, meanQ)
     for (size_t n = 0; n < N; n++) {
         meanI += creal(x[n]);
         meanQ += cimag(x[n]);
@@ -55,6 +56,7 @@ void iq_compensation(signal_iq_t* signal_data) {
     meanI /= N;
     meanQ /= N;
 
+    #pragma omp parallel for
     for (size_t n = 0; n < N; n++) {
         x[n] = (creal(x[n]) - meanI) + (cimag(x[n]) - meanQ) * I;
     }
@@ -62,6 +64,7 @@ void iq_compensation(signal_iq_t* signal_data) {
     // -------------------------------------------------
     // 2) Gain imbalance
     // -------------------------------------------------
+    #pragma omp parallel for reduction(+:pI, pQ, crossIQ)
     for (size_t n = 0; n < N; n++) {
         double I_n = creal(x[n]);
         double Q_n = cimag(x[n]);
@@ -75,6 +78,7 @@ void iq_compensation(signal_iq_t* signal_data) {
 
     double gain = sqrt(pI / pQ);
 
+    #pragma omp parallel for
     for (size_t n = 0; n < N; n++) {
         x[n] = creal(x[n]) + (cimag(x[n]) * gain) * I;
     }
@@ -192,6 +196,7 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
  * RF absoluta sin una calibración del sistema.
  */
 static void convert_to_dbm_inplace(double* psd, int length) {
+    #pragma omp parallel for
     for (int i = 0; i < length; i++) {
         // Convert normalized power to Watts (assuming 50 Ohm)
         double p_watts = psd[i] / IMPEDANCE_50_OHM;
@@ -329,73 +334,88 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     
     generate_window(config->window_type, window, nperseg);
 
-    // Calculate window power (S2)
+    // Calculate window power (S2) safely
     double u_norm = 0.0;
-    for (int i = 0; i < nperseg; i++) u_norm += window[i] * window[i];
-    u_norm /= nperseg;
-
-    // Allocate FFTW arrays
-    double complex* fft_in = fftw_alloc_complex(nfft);
-    double complex* fft_out = fftw_alloc_complex(nfft);
-    if (!fft_in || !fft_out) {
-        free(window);
-        if(fft_in) fftw_free(fft_in);
-        if(fft_out) fftw_free(fft_out);
-        return;
+    #pragma omp parallel for reduction(+:u_norm)
+    for (int i = 0; i < nperseg; i++) {
+        u_norm += window[i] * window[i];
     }
-
-    fftw_plan plan = fftw_plan_dft_1d(nfft, fft_in, fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
+    u_norm /= nperseg;
 
     // Reset Output
     memset(p_out, 0, nfft * sizeof(double));
 
-    // Welch Averaging Loop
-    for (int k = 0; k < k_segments; k++) {
-        size_t start = k * step;
-        
-        for (int i = 0; i < nperseg; i++) {
-            if ((start + i) < n_signal) {
-                fft_in[i] = signal[start + i] * window[i];
-            } else {
-                fft_in[i] = 0;
+    // Welch Averaging Loop - Parallelized
+    #pragma omp parallel
+    {
+        // Thread-local FFT arrays
+        double complex* local_fft_in = fftw_alloc_complex(nfft);
+        double complex* local_fft_out = fftw_alloc_complex(nfft);
+        fftw_plan local_plan;
+
+        // FFTW planning must be isolated
+        #pragma omp critical
+        {
+            local_plan = fftw_plan_dft_1d(nfft, local_fft_in, local_fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
+        }
+
+        #pragma omp for
+        for (int k = 0; k < k_segments; k++) {
+            size_t start = k * step;
+            
+            for (int i = 0; i < nperseg; i++) {
+                if ((start + i) < n_signal) {
+                    local_fft_in[i] = signal[start + i] * window[i];
+                } else {
+                    local_fft_in[i] = 0;
+                }
+            }
+
+            fftw_execute(local_plan);
+
+            // Accumulate Magnitude Squared safely
+            for (int i = 0; i < nfft; i++) {
+                double mag = cabs(local_fft_out[i]);
+                double mag2 = mag * mag;
+                
+                #pragma omp atomic
+                p_out[i] += mag2;
             }
         }
 
-        fftw_execute(plan);
-
-        // Accumulate Magnitude Squared
-        for (int i = 0; i < nfft; i++) {
-            double mag = cabs(fft_out[i]);
-            p_out[i] += (mag * mag);
+        #pragma omp critical
+        {
+            fftw_destroy_plan(local_plan);
         }
+        fftw_free(local_fft_in);
+        fftw_free(local_fft_out);
     }
 
     // Normalization
     if (k_segments > 0 && u_norm > 0) {
-        // Average the periodograms
-        // Scale by Fs * Sum(w^2)
-        // Note: The logic here assumes NPERSEG scaling for ENBW
         double scale = 1.0 / (fs * u_norm * k_segments * nperseg);
-        for (int i = 0; i < nfft; i++) p_out[i] *= scale;
+        
+        #pragma omp parallel for
+        for (int i = 0; i < nfft; i++) {
+            p_out[i] *= scale;
+        }
     }
 
     // Shift zero frequency to center
     fftshift(p_out, nfft);
 
-   
     convert_to_dbm_inplace(p_out, nfft);
 
     // Generate Frequency Axis
     double df = fs / nfft;
+    
+    #pragma omp parallel for
     for (int i = 0; i < nfft; i++) {
         f_out[i] = -fs / 2.0 + i * df;
     }
 
     // Cleanup
     free(window);
-    fftw_destroy_plan(plan);
-    fftw_free(fft_in);
-    fftw_free(fft_out);
 }
 
 /**
@@ -476,7 +496,7 @@ void execute_pfb_psd(
     // Prototype filter
     // -------------------------------------------------
     double* h = (double*)malloc(L * sizeof(double));
-    if (!h) return; // Added null check
+    if (!h) return; 
     generate_kaiser_proto(h, L, KAISER_BETA);
 
     // Polyphase components
@@ -488,42 +508,62 @@ void execute_pfb_psd(
         }
     }
 
-    // FFT buffers
-    double complex* fft_in  = fftw_alloc_complex(M);
-    double complex* fft_out = fftw_alloc_complex(M);
-    fftw_plan plan = fftw_plan_dft_1d(
-        M, fft_in, fft_out, FFTW_FORWARD, FFTW_ESTIMATE
-    );
-
     // -------------------------------------------------
     // PFB Processing
     // -------------------------------------------------
     int blocks = (N - L) / M;
     if (blocks <= 0) goto cleanup;
 
-    for (int b = 0; b < blocks; b++) {
-        memset(fft_in, 0, M * sizeof(double complex));
+    #pragma omp parallel
+    {
+        // Thread-local FFT buffers to prevent data corruption
+        double complex* local_fft_in  = fftw_alloc_complex(M);
+        double complex* local_fft_out = fftw_alloc_complex(M);
+        fftw_plan local_plan;
 
-        for (int t = 0; t < T; t++) {
-            size_t offset = b * M + t * M;
-            for (int m = 0; m < M; m++) {
-                fft_in[m] += x[offset + m] * poly[t][m];
+        // FFTW planning is not thread-safe by default, must be isolated
+        #pragma omp critical
+        {
+            local_plan = fftw_plan_dft_1d(M, local_fft_in, local_fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
+        }
+
+        #pragma omp for
+        for (int b = 0; b < blocks; b++) {
+            memset(local_fft_in, 0, M * sizeof(double complex));
+
+            for (int t = 0; t < T; t++) {
+                size_t offset = b * M + t * M;
+                for (int m = 0; m < M; m++) {
+                    local_fft_in[m] += x[offset + m] * poly[t][m];
+                }
+            }
+
+            fftw_execute(local_plan);
+
+            for (int k = 0; k < M; k++) {
+                double mag2 = creal(local_fft_out[k]) * creal(local_fft_out[k]) +
+                              cimag(local_fft_out[k]) * cimag(local_fft_out[k]);
+                
+                // Safely accumulate the power bins across threads
+                #pragma omp atomic
+                p_out[k] += mag2;
             }
         }
 
-        fftw_execute(plan);
-
-        for (int k = 0; k < M; k++) {
-            double mag2 = creal(fft_out[k]) * creal(fft_out[k]) +
-                          cimag(fft_out[k]) * cimag(fft_out[k]);
-            p_out[k] += mag2;
+        #pragma omp critical
+        {
+            fftw_destroy_plan(local_plan);
         }
+        fftw_free(local_fft_in);
+        fftw_free(local_fft_out);
     }
 
     // -------------------------------------------------
     // Normalization
     // -------------------------------------------------
     double scale = 1.0 / (blocks * fs * M);
+    
+    #pragma omp parallel for
     for (int i = 0; i < M; i++) {
         p_out[i] *= scale;
     }
@@ -537,6 +577,8 @@ void execute_pfb_psd(
     // Frequency axis
     // -------------------------------------------------
     double df = fs / M;
+    
+    #pragma omp parallel for
     for (int i = 0; i < M; i++) {
         f_out[i] = -fs / 2.0 + i * df;
     }
@@ -544,9 +586,6 @@ void execute_pfb_psd(
 cleanup:
     for (int t = 0; t < T; t++) free(poly[t]);
     free(h);
-    fftw_destroy_plan(plan);
-    fftw_free(fft_in);
-    fftw_free(fft_out);
 }
 
 /** @} */

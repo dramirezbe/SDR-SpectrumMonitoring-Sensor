@@ -18,6 +18,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <limits.h>
+#include <omp.h>
 
 /**
  * @defgroup psd_module PSD (Densidad Espectral de Potencia)

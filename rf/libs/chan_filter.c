@@ -247,6 +247,7 @@ int chan_filter_apply_inplace_abs(
     }
 
     // Load data into FFTW input
+    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         g.in[i] = sig->signal_iq[i];
     }
@@ -261,6 +262,8 @@ int chan_filter_apply_inplace_abs(
     double *oob_mag = (double*)malloc(sizeof(double) * N);
     int oob_n = 0;
 
+    // Kept sequential: dynamically packing an array in parallel requires 
+    // complex thread-local buffers or prefix sums. This is fast enough serially.
     for (int k = 0; k < N; k++) {
         int ks = (k <= N/2) ? k : (k - N);
         double f = (double)ks * df;
@@ -273,6 +276,8 @@ int chan_filter_apply_inplace_abs(
         double med = median_of_array(oob_mag, oob_n);
         if (med > 0.0) {
             double cap = med * db_to_lin_amp_chan_filt(CAP_OOB_DB);
+            
+            #pragma omp parallel for
             for (int k = 0; k < N; k++) {
                 int ks = (k <= N/2) ? k : (k - N);
                 double f = (double)ks * df;
@@ -289,6 +294,7 @@ int chan_filter_apply_inplace_abs(
     free(oob_mag);
 
     // Stage 2: Apply frequency mask
+    #pragma omp parallel for
     for (int k = 0; k < N; k++) {
         g.out[k] *= g.mask_stage2[k];
     }
@@ -297,6 +303,8 @@ int chan_filter_apply_inplace_abs(
 
     // Normalize and write back to signal_iq_t
     double invN = 1.0 / (double)N;
+    
+    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         sig->signal_iq[i] = g.in[i] * invN;
     }

@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(RadioProject C)
 
+# Find OpenMP
+find_package(OpenMP REQUIRED)
+
 # ==========================================
 # Compiler & Settings
 # ==========================================
@@ -10,7 +13,7 @@ include_directories(common)
 # ==========================================
 # Libraries
 # ==========================================
-set(LIBS_CORE zmq hackrf fftw3 m cjson curl opus)
+set(LIBS_CORE zmq hackrf fftw3 m cjson curl opus OpenMP::OpenMP_C)
 set(LIBS_FULL ${LIBS_CORE} gpiod)
 
 # ==========================================
