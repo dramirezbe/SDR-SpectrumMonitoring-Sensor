@@ -89,7 +89,7 @@ void zpair_start(zpair_t *pair) {
 int zpair_send(zpair_t *pair, const char *json_payload) {
     if (!pair || !pair->socket || !json_payload) return -1;
     // We use ZMQ_DONTWAIT to ensure the DSP loop never stalls if the pipe is full
-    printf("[RF]Sending package to zmq\n");
+    printf("[RF]>>>>>zmq\n");
     return zmq_send(pair->socket, json_payload, strlen(json_payload), ZMQ_DONTWAIT);
 }
 

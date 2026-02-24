@@ -104,6 +104,10 @@ volatile bool keep_running = true;    /**< Bandera maestra de salida para el buc
 pthread_t       audio_thread;         /**< Identificador del hilo para la tarea de red/audio Opus. */
 volatile bool   audio_thread_running = false; /**< Bandera de estado para el ciclo de vida del hilo de audio. */
 pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER; /**< Protege el acceso a @ref desired_config. */
+
+pthread_cond_t  rb_cond  = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t rb_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /** @} */
 
 /**
@@ -164,6 +168,10 @@ int rx_callback(hackrf_transfer* transfer) {
         if (atomic_load(&audio_enabled)) {
             rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
         }
+        // Signal the main thread that data is available
+        pthread_mutex_lock(&rb_mutex);
+        pthread_cond_signal(&rb_cond);
+        pthread_mutex_unlock(&rb_mutex);
     }
     return 0;
 }
@@ -502,6 +510,17 @@ void* audio_thread_fn(void* arg) {
  * 4. **Limpieza**: Asegura el cierre de hilos y liberación del hardware ante SIGINT/SIGTERM.
  */
 int main() {
+
+    // 1. Force OpenMP to yield CPU instead of spinning
+    // must be set before OpenMP runtime initializes
+    setenv("OMP_WAIT_POLICY", "PASSIVE", 1); 
+    
+    // 2. Prevent OpenMP from binding threads to specific cores (let OS scheduler decide)
+    setenv("OMP_PROC_BIND", "FALSE", 1); 
+
+    // 3. Limit threads to Cores - 1 (Assuming Pi has 4 cores, use 3)
+    omp_set_num_threads(3);
+
     // Desactiva el buffering de stdout completamente
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -657,15 +676,24 @@ int main() {
         }
 
         // --- 4. DATA ACQUISITION ---
-        int safety_timeout = 500; 
-        while (safety_timeout > 0 && keep_running) {
-            if (rb_available(&rb) >= local_rb.total_bytes) break; 
-            usleep(10000); 
-            safety_timeout--;
-        }
+        // Calculate a 5-second safety timeout relative to now
+        struct timespec ts_timeout;
+        clock_gettime(CLOCK_REALTIME, &ts_timeout);
+        ts_timeout.tv_sec += 5;
 
-        if (safety_timeout <= 0 && keep_running) {
-            fprintf(stderr, "[RF] Error: Acquisition Timeout.\n");
+        pthread_mutex_lock(&rb_mutex);
+        while (keep_running && rb_available(&rb) < local_rb.total_bytes) {
+            // Wait until signaled OR timeout (5s)
+            int rc = pthread_cond_timedwait(&rb_cond, &rb_mutex, &ts_timeout);
+            if (rc == ETIMEDOUT) {
+                break; // Break loop to trigger recovery logic below
+            }
+        }
+        pthread_mutex_unlock(&rb_mutex);
+
+        // Check if we actually got data or if we timed out
+        if (rb_available(&rb) < local_rb.total_bytes && keep_running) {
+            fprintf(stderr, "[RF] Error: Acquisition Timeout (buffer empty).\n");
             recover_hackrf();
             clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
             continue;
@@ -688,17 +716,33 @@ int main() {
                                                       local_hack.center_freq, local_hack.sample_rate);
                     }
 
-                    if (local_desired.method_psd == PFB) execute_pfb_psd(sig, &local_psd, freq, psd);
-                    else execute_welch_psd(sig, &local_psd, freq, psd);
+                    // [PATCH D START: Rate Limit PSD to ~20Hz]
+                    static struct timespec last_psd_run = {0};
+                    struct timespec now_psd;
+                    clock_gettime(CLOCK_MONOTONIC, &now_psd);
                     
-                    publish_results(
-                        psd, 
-                        local_psd.nperseg, 
-                        &local_hack, 
-                        (int)local_desired.rf_mode, 
-                        audio_ctx.am_depth.depth_ema, 
-                        audio_ctx.fm_dev.dev_ema_hz
-                    );
+                    double time_diff = (now_psd.tv_sec - last_psd_run.tv_sec) + 
+                                       (now_psd.tv_nsec - last_psd_run.tv_nsec) / 1e9;
+
+                    // Only calculate and publish if > 50ms has passed
+                    if (time_diff > 0.05) { 
+                        if (local_desired.method_psd == PFB) {
+                            execute_pfb_psd(sig, &local_psd, freq, psd);
+                        } else {
+                            execute_welch_psd(sig, &local_psd, freq, psd);
+                        }
+                        
+                        publish_results(
+                            psd, 
+                            local_psd.nperseg, 
+                            &local_hack, 
+                            (int)local_desired.rf_mode, 
+                            audio_ctx.am_depth.depth_ema, 
+                            audio_ctx.fm_dev.dev_ema_hz
+                        );
+                        
+                        clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
+                    }
                 } else {
                     fprintf(stderr, "[RF] Error: PSD buffer allocation failed.\n");
                 }

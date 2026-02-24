@@ -359,7 +359,8 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
             local_plan = fftw_plan_dft_1d(nfft, local_fft_in, local_fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
         }
 
-        #pragma omp for
+        // [PATCH C] Use dynamic scheduling to handle load imbalance
+        #pragma omp for schedule(dynamic, 1)
         for (int k = 0; k < k_segments; k++) {
             size_t start = k * step;
             
@@ -527,7 +528,8 @@ void execute_pfb_psd(
             local_plan = fftw_plan_dft_1d(M, local_fft_in, local_fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
         }
 
-        #pragma omp for
+        // [PATCH C] Use dynamic scheduling to handle load imbalance
+        #pragma omp for schedule(dynamic, 1)
         for (int b = 0; b < blocks; b++) {
             memset(local_fft_in, 0, M * sizeof(double complex));
 
