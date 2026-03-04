@@ -70,7 +70,7 @@ class GlobalSys:
         return cls.current == SysState.IDLE
 
 # --- HELPER FUNCTIONS ---
-def format_data_for_upload(payload):
+def format_data_for_upload(payload, log: logging.Logger) -> dict:
     """
     Estructura los datos procesados para su envío a la API.
 
@@ -96,6 +96,20 @@ def format_data_for_upload(payload):
 
     if payload.get("depth", 0) != 0:
         post_dict.update({"depth": int(payload.get("depth"))})
+
+    # --- Impresión formateada del payload ---
+    log.debug("\n--- Payload ready to post ---")
+    for key, value in post_dict.items():
+        if key == "Pxx":
+            pxx_list = list(value)
+            # Trunca a 5 elementos para la consola
+            pxx_preview = pxx_list[:5] + ["..."] if len(pxx_list) > 5 else pxx_list
+            log.debug(f"{key}: {pxx_preview}")
+        else:
+            # Imprime el resto de las claves normalmente (mac, frecuencias, etc.)
+            log.debug(f"{key}: {value}")
+    print("---------------------------------\n")
+    # ----------------------------------------
 
     return post_dict
 

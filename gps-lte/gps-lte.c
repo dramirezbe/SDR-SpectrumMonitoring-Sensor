@@ -29,6 +29,10 @@
 #include "bacn_GPS.h"
 #include "bacn_gpio.h"
 
+void run_cmd(const char *cmd);
+int get_ppp_ip(char *ip);
+
+
 /**
  * @defgroup gps_binary GPS-LTE Binary
  * @brief Logic and helper functions for the GPS-LTE module.

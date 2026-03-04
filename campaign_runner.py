@@ -185,7 +185,7 @@ class CampaignRunner:
         if not raw_payload:
             return 1
 
-        data_dict = format_data_for_upload(raw_payload)
+        data_dict = format_data_for_upload(raw_payload, log)
         data_dict["campaign_id"] = self.campaign_id or 0
 
         # 3. Intento de carga a la nube

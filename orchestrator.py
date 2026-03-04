@@ -210,7 +210,7 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 
                 
                 if dsp_payload:
-                    final_payload = format_data_for_upload(dsp_payload)
+                    final_payload = format_data_for_upload(dsp_payload, log)
 
                     #debug
                     if final_payload.get("excursion_hz", False):
