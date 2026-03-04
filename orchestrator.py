@@ -27,8 +27,8 @@ from dataclasses import asdict
 import time
 import subprocess
 
-WEBRTC_CMD = [cfg.PYTHON_ENV_STR, "server_webrtc.py"]
-KAL_SYNC_CMD = [cfg.PYTHON_ENV_STR, "kal_sync.py"]
+WEBRTC_CMD = f"{cfg.PYTHON_ENV_STR} -u server_webrtc.py 2>&1 | systemd-cat -t WEBRTC_SERVER"
+KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync.py 2>&1 | systemd-cat -t KAL_SYNC"
 #log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
 
 # --- CONFIG FETCHING ---
@@ -121,10 +121,7 @@ async def _perform_calibration_sequence():
     
     try:
         # Uso de asyncio para no bloquear el loop
-        process = await asyncio.create_subprocess_exec(
-            *KAL_SYNC_CMD,
-            stdout=None, stderr=None
-        )
+        process = await asyncio.create_subprocess_shell(KAL_SYNC_CMD)
         return_code = await process.wait()
 
         if return_code == 0:
@@ -189,7 +186,7 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 if is_demod:
                     if webrtc_proc is None or webrtc_proc.poll() is not None:
                         log.info("[REALTIME] Starting WebRTC Server...")
-                        webrtc_proc = subprocess.Popen(WEBRTC_CMD)
+                        webrtc_proc = subprocess.Popen(WEBRTC_CMD, shell=True)
                     DEMOD_CFG_SENT = True
                     dsp_payload = await acquirer.raw_acquire(next_config)
                 else:
