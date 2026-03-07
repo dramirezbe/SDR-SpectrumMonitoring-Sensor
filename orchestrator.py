@@ -188,14 +188,14 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                         log.info("[REALTIME] Starting WebRTC Server...")
                         webrtc_proc = subprocess.Popen(WEBRTC_CMD, shell=True)
                     DEMOD_CFG_SENT = True
-                    dsp_payload = await acquirer.raw_acquire(next_config)
+                    dsp_payload = await acquirer.just_acquire(next_config)     # WARNING WARNING (change raw_acquire to just_acquire to avoid DC correction to test)
                 else:
                     if webrtc_proc is not None:
                         log.info("[REALTIME] Stopping WebRTC Server...")
                         webrtc_proc.terminate()
                         webrtc_proc.wait() # Ensure it's fully closed
                         webrtc_proc = None # Reset the handle
-                    dsp_payload = await acquirer.get_corrected_data(next_config)
+                    dsp_payload = await acquirer.just_acquire(next_config) # WARNING WARNING (change raw_acquire to just_acquire to avoid DC correction to test)
                     if DEMOD_CFG_SENT:
                         RESET_DEMOD_CFG = True
                         DEMOD_CFG_SENT = False

@@ -262,6 +262,12 @@ class AcquireDual:
         # PLL/Hardware settle time
         await asyncio.sleep(0.05) 
         return data
+
+    async def just_acquire(self, rf_params):
+        """
+        Adquisición en bruto sin eliminación de artefacto DC.
+        """
+        return await self._single_acquire(rf_params)
     
     async def raw_acquire(self, rf_params):
         """
