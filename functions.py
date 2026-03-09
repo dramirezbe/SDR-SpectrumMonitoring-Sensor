@@ -264,6 +264,88 @@ class AcquireDual:
             self.PATCH_BW_HZ = 200_000 
             self._log.info(f"Stitching: Narrow-Band Logic (Offset 0.5MHz, Patch 0.2MHz)")
 
+
+
+    def _classify_spectral_occupancy(
+        self,
+        power_dbm: np.ndarray,
+        contrast_threshold_db: float = 6.0,
+        occupancy_fraction_threshold: float = 0.08,
+        peak_margin_db: float = 8.0
+    ):
+        """
+        Clasifica la PSD en dos regímenes:
+        - 'occupied': hay emisiones visibles / estructura espectral
+        - 'low_occupancy': espectro casi vacío o dominado por ruido
+    
+        La decisión se toma con métricas robustas basadas en percentiles.
+    
+        Parámetros
+        ----------
+        power_dbm : np.ndarray
+            PSD en dBm.
+        contrast_threshold_db : float
+            Umbral mínimo de contraste robusto para considerar que hay ocupación.
+        occupancy_fraction_threshold : float
+            Fracción mínima de bins significativamente por encima del piso de ruido.
+        peak_margin_db : float
+            Margen sobre la mediana para contar bins "ocupados".
+    
+        Retorna
+        -------
+        mode : str
+            'occupied' o 'low_occupancy'
+        metrics : dict
+            Métricas diagnósticas calculadas.
+        """
+        x = np.asarray(power_dbm, dtype=float)
+        N = len(x)
+    
+        if N < 16:
+            return "low_occupancy", {
+                "p10_dbm": float(np.median(x)) if N > 0 else 0.0,
+                "p50_dbm": float(np.median(x)) if N > 0 else 0.0,
+                "p90_dbm": float(np.median(x)) if N > 0 else 0.0,
+                "contrast_db": 0.0,
+                "occupancy_fraction": 0.0,
+                "decision": "low_occupancy_small_array"
+            }
+    
+        # Percentiles robustos
+        p10 = np.percentile(x, 10)
+        p50 = np.percentile(x, 50)
+        p90 = np.percentile(x, 90)
+        p95 = np.percentile(x, 95)
+    
+        # Contraste robusto del espectro
+        contrast_db = p95 - p50
+    
+        # Estimación de ocupación:
+        # bins que están claramente por encima del piso central del espectro
+        occupied_mask = x > (p50 + peak_margin_db)
+        occupancy_fraction = np.mean(occupied_mask)
+    
+        # Decisión:
+        # si hay suficiente contraste o suficiente fracción ocupada, asumimos emisiones
+        if (contrast_db >= contrast_threshold_db) or (occupancy_fraction >= occupancy_fraction_threshold):
+            mode = "occupied"
+            decision = "occupied_by_contrast_or_fraction"
+        else:
+            mode = "low_occupancy"
+            decision = "low_occupancy_flat_spectrum"
+    
+        metrics = {
+            "p10_dbm": float(p10),
+            "p50_dbm": float(p50),
+            "p90_dbm": float(p90),
+            "p95_dbm": float(p95),
+            "contrast_db": float(contrast_db),
+            "occupancy_fraction": float(occupancy_fraction),
+            "decision": decision
+        }
+    
+        return mode, metrics
+
     def _moving_average_edge(self, x: np.ndarray, window: int) -> np.ndarray:
         """
         Media móvil con padding en bordes para mantener el mismo tamaño.
@@ -416,43 +498,112 @@ class AcquireDual:
         """
         Aplica corrección DC conservando el mismo formato del dict de salida.
         Se asume que la PSD está en acquisition_result['Pxx'].
+    
+        Mejora:
+        -------
+        Se clasifica la PSD en dos casos:
+        1) 'occupied'       -> espectro con emisiones visibles
+        2) 'low_occupancy'  -> espectro casi vacío / dominado por ruido
+    
+        Según el caso, se ajustan los parámetros del removedor de DC spike.
         """
         if not isinstance(acquisition_result, dict):
             raise TypeError("Se esperaba que _single_acquire devolviera un dict.")
-
+    
         if "Pxx" not in acquisition_result:
             raise KeyError("No se encontró la llave 'Pxx' en acquisition_result.")
-
+    
         out = copy.deepcopy(acquisition_result)
-
+    
         pxx = np.asarray(out["Pxx"], dtype=float)
-
+    
+        # ---------------------------------------------------------
+        # 0) Clasificar el régimen espectral
+        # ---------------------------------------------------------
+        occupancy_mode, occupancy_metrics = self._classify_spectral_occupancy(
+            pxx,
+            contrast_threshold_db=6.0,
+            occupancy_fraction_threshold=0.08,
+            peak_margin_db=8.0
+        )
+    
+        # ---------------------------------------------------------
+        # 1) Selección adaptativa de parámetros según el régimen
+        # ---------------------------------------------------------
+        if occupancy_mode == "occupied":
+            # Modo normal / conservador:
+            # protege mejor posibles emisiones cercanas al centro
+            baseline_window = self.BASELINE_WINDOW
+            threshold_scale = self.THRESHOLD_SCALE
+            max_search_bins = self.MAX_SEARCH_BINS
+            expansion_factor = self.EXPANSION_FACTOR
+            min_half_width = self.MIN_HALF_WIDTH
+            max_half_width = self.MAX_HALF_WIDTH
+            support_bins = self.SUPPORT_BINS
+            poly_degree = self.POLY_DEGREE
+    
+        else:  # low_occupancy
+            # Modo agresivo:
+            # al haber poco contenido real, conviene ampliar la reparación
+            baseline_window = max(self.BASELINE_WINDOW, 51)
+            threshold_scale = max(2.0, self.THRESHOLD_SCALE - 0.7)
+            max_search_bins = max(self.MAX_SEARCH_BINS, 35)
+            expansion_factor = max(2.0, self.EXPANSION_FACTOR)
+            min_half_width = max(4, self.MIN_HALF_WIDTH)
+            max_half_width = max(28, self.MAX_HALF_WIDTH)
+            support_bins = max(12, self.SUPPORT_BINS)
+            poly_degree = self.POLY_DEGREE
+    
+        # ---------------------------------------------------------
+        # 2) Aplicar remoción adaptativa de DC
+        # ---------------------------------------------------------
         pxx_filtered, center_idx, repair_slice, baseline, residual = \
             self._remove_dc_spike_adaptive(
                 power_dbm=pxx,
-                baseline_window=self.BASELINE_WINDOW,
-                threshold_scale=self.THRESHOLD_SCALE,
-                max_search_bins=self.MAX_SEARCH_BINS,
-                expansion_factor=self.EXPANSION_FACTOR,
-                min_half_width=self.MIN_HALF_WIDTH,
-                max_half_width=self.MAX_HALF_WIDTH,
-                support_bins=self.SUPPORT_BINS,
-                poly_degree=self.POLY_DEGREE
+                baseline_window=baseline_window,
+                threshold_scale=threshold_scale,
+                max_search_bins=max_search_bins,
+                expansion_factor=expansion_factor,
+                min_half_width=min_half_width,
+                max_half_width=max_half_width,
+                support_bins=support_bins,
+                poly_degree=poly_degree
             )
-
-        # Mantener mismo formato: Pxx como lista
+    
+        # ---------------------------------------------------------
+        # 3) Determinar si realmente hubo cambio
+        # ---------------------------------------------------------
+        correction_changed = not np.allclose(pxx_filtered, pxx, rtol=0.0, atol=1e-12)
+    
+        # ---------------------------------------------------------
+        # 4) Mantener mismo formato
+        # ---------------------------------------------------------
         out["Pxx_raw"] = out["Pxx"]
         out["Pxx"] = pxx_filtered.tolist()
-
-        # Diagnóstico opcional
+    
+        # ---------------------------------------------------------
+        # 5) Diagnóstico
+        # ---------------------------------------------------------
         out["dc_correction"] = {
-            "applied": True,
+            "applied": bool(correction_changed),
+            "mode": occupancy_mode,
             "center_idx": int(center_idx),
             "repair_slice": (int(repair_slice[0]), int(repair_slice[1])),
             "start_freq_hz": int(out.get("start_freq_hz", 0)),
             "end_freq_hz": int(out.get("end_freq_hz", 0)),
+            "occupancy_metrics": occupancy_metrics,
+            "params_used": {
+                "baseline_window": int(baseline_window),
+                "threshold_scale": float(threshold_scale),
+                "max_search_bins": int(max_search_bins),
+                "expansion_factor": float(expansion_factor),
+                "min_half_width": int(min_half_width),
+                "max_half_width": int(max_half_width),
+                "support_bins": int(support_bins),
+                "poly_degree": int(poly_degree),
+            }
         }
-
+    
         return out
 
 
