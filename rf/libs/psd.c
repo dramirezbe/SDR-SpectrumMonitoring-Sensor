@@ -34,64 +34,151 @@ signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size) {
     return signal_data;
 }
 
-void iq_compensation(signal_iq_t* signal_data) {
-    if (!signal_data || !signal_data->signal_iq || signal_data->n_signal == 0)
+/**
+ * @brief Compensación ciega básica de IQ imbalance por bloque.
+ *
+ * Esta rutina realiza:
+ *   1) Remoción de DC en I y Q
+ *   2) Balance de ganancia entre ramas I/Q
+ *   3) Decorrelación lineal de Q respecto de I
+ *
+ * Es una compensación global, ciega y de segundo orden.
+ * No corrige efectos dependientes de frecuencia.
+ *
+ * @param signal_data Puntero a la estructura con las muestras IQ.
+ */
+void iq_compensation(signal_iq_t* signal_data)
+{
+    if (signal_data == NULL || signal_data->signal_iq == NULL || signal_data->n_signal == 0)
         return;
 
-    size_t N = signal_data->n_signal;
+    const size_t N = signal_data->n_signal;
     double complex* x = signal_data->signal_iq;
 
-    double meanI = 0.0, meanQ = 0.0;
-    double pI = 0.0, pQ = 0.0;
+    /* ---------------------------------------------
+     * Parámetro de robustez numérica
+     * --------------------------------------------- */
+    const double eps = 1e-20;
+
+    double meanI = 0.0;
+    double meanQ = 0.0;
+
+    double pI = 0.0;
+    double pQ = 0.0;
+
     double crossIQ = 0.0;
 
-    // -------------------------------------------------
-    // 1) DC offset removal
-    // -------------------------------------------------
+    /* =========================================================
+     * 1) Remoción de DC offset
+     * =========================================================
+     * Calculamos la media de I y Q:
+     *   meanI = (1/N) sum I[n]
+     *   meanQ = (1/N) sum Q[n]
+     * y luego las restamos para centrar la nube IQ en el origen.
+     */
     #pragma omp parallel for reduction(+:meanI, meanQ)
     for (size_t n = 0; n < N; n++) {
         meanI += creal(x[n]);
         meanQ += cimag(x[n]);
     }
-    meanI /= N;
-    meanQ /= N;
+
+    meanI /= (double)N;
+    meanQ /= (double)N;
 
     #pragma omp parallel for
     for (size_t n = 0; n < N; n++) {
-        x[n] = (creal(x[n]) - meanI) + (cimag(x[n]) - meanQ) * I;
+        const double I_n = creal(x[n]) - meanI;
+        const double Q_n = cimag(x[n]) - meanQ;
+        x[n] = I_n + I * Q_n;
     }
 
-    // -------------------------------------------------
-    // 2) Gain imbalance
-    // -------------------------------------------------
-    #pragma omp parallel for reduction(+:pI, pQ, crossIQ)
+    /* =========================================================
+     * 2) Estimación de potencia por rama
+     * =========================================================
+     * Calculamos:
+     *   pI = sum I[n]^2
+     *   pQ = sum Q[n]^2
+     * para estimar el desbalance de ganancia entre ramas.
+     */
+    #pragma omp parallel for reduction(+:pI, pQ)
     for (size_t n = 0; n < N; n++) {
-        double I_n = creal(x[n]);
-        double Q_n = cimag(x[n]);
+        const double I_n = creal(x[n]);
+        const double Q_n = cimag(x[n]);
         pI += I_n * I_n;
         pQ += Q_n * Q_n;
+    }
+
+    /* Protección ante casos degenerados */
+    if (pI <= eps || pQ <= eps)
+        return;
+
+    /* =========================================================
+     * 3) Balance de ganancia
+     * =========================================================
+     * Si queremos que ambas ramas tengan energía similar:
+     *   g = sqrt(pI / pQ)
+     * y escalamos Q:
+     *   Q <- g * Q
+     *
+     * Se deja I fija y se corrige solo Q, siguiendo la lógica
+     * de tu implementación original.
+     */
+    const double gain = sqrt(pI / pQ);
+
+    #pragma omp parallel for
+    for (size_t n = 0; n < N; n++) {
+        const double I_n = creal(x[n]);
+        const double Q_n = cimag(x[n]) * gain;
+        x[n] = I_n + I * Q_n;
+    }
+
+    /* =========================================================
+     * 4) Recalcular correlación cruzada después del escalado
+     * =========================================================
+     * Esta es la mejora clave frente a tu versión original:
+     * crossIQ debe calcularse sobre la señal ya balanceada
+     * en ganancia.
+     *
+     *   crossIQ = sum I[n] * Q[n]
+     */
+    crossIQ = 0.0;
+
+    #pragma omp parallel for reduction(+:crossIQ)
+    for (size_t n = 0; n < N; n++) {
+        const double I_n = creal(x[n]);
+        const double Q_n = cimag(x[n]);
         crossIQ += I_n * Q_n;
     }
 
-    if (pI <= 0.0 || pQ <= 0.0)
-        return;
+    /* =========================================================
+     * 5) Estimar coeficiente de decorrelación
+     * =========================================================
+     * Interpretamos rho como el coeficiente de regresión lineal
+     * de Q sobre I:
+     *
+     *   rho = sum(I*Q) / sum(I^2)
+     *
+     * Así, la parte de Q explicada linealmente por I se sustrae
+     * en el siguiente paso.
+     */
+    const double rho = crossIQ / (pI + eps);
 
-    double gain = sqrt(pI / pQ);
-
+    /* =========================================================
+     * 6) Decorrelación lineal (corrección aproximada de fase)
+     * =========================================================
+     * Aplicamos:
+     *   Q <- Q - rho * I
+     *
+     * Esto reduce la fuga lineal de I dentro de Q, que suele
+     * interpretarse como una aproximación al desbalance de fase
+     * o a la falta de ortogonalidad entre ramas.
+     */
     #pragma omp parallel for
     for (size_t n = 0; n < N; n++) {
-        x[n] = creal(x[n]) + (cimag(x[n]) * gain) * I;
-    }
-
-    // -------------------------------------------------
-    // 3) Phase correction (decorrelation)
-    // -------------------------------------------------
-    double rho = crossIQ / pI;
-
-    for (size_t n = 0; n < N; n++) {
-        double I_n = creal(x[n]);
-        double Q_n = cimag(x[n]);
-        x[n] = I_n + (Q_n - rho * I_n) * I;
+        const double I_n = creal(x[n]);
+        const double Q_n = cimag(x[n]);
+        const double Q_corr = Q_n - rho * I_n;
+        x[n] = I_n + I * Q_corr;
     }
 }
 
