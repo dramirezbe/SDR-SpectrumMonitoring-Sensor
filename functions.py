@@ -19,6 +19,7 @@ import numpy as np
 import re
 import asyncio
 from copy import deepcopy
+import copy
 
 class SysState(Enum):
     """
@@ -224,6 +225,7 @@ class CronSchedulerCampaign:
         
         return winner is not None
 
+
 class AcquireDual:
     """
     Motor de Adquisición de Datos y Limpieza Espectral.
@@ -238,6 +240,14 @@ class AcquireDual:
         # These are initialized as defaults but updated dynamically
         self.OFFSET_HZ = 2e6  
         self.PATCH_BW_HZ = 1e6 
+        self.BASELINE_WINDOW = 41
+        self.THRESHOLD_SCALE = 3.0
+        self.MAX_SEARCH_BINS = 25
+        self.EXPANSION_FACTOR = 1.5
+        self.MIN_HALF_WIDTH = 2
+        self.MAX_HALF_WIDTH = 20
+        self.SUPPORT_BINS = 10
+        self.POLY_DEGREE = 2
 
     def _update_stitching_params(self, sample_rate_hz):
         """
@@ -254,6 +264,198 @@ class AcquireDual:
             self.PATCH_BW_HZ = 200_000 
             self._log.info(f"Stitching: Narrow-Band Logic (Offset 0.5MHz, Patch 0.2MHz)")
 
+    def _moving_average_edge(self, x: np.ndarray, window: int) -> np.ndarray:
+        """
+        Media móvil con padding en bordes para mantener el mismo tamaño.
+        """
+        x = np.asarray(x, dtype=float)
+
+        if window < 3:
+            return x.copy()
+
+        if window % 2 == 0:
+            window += 1
+
+        pad = window // 2
+        xpad = np.pad(x, pad_width=pad, mode="edge")
+        kernel = np.ones(window, dtype=float) / window
+        y = np.convolve(xpad, kernel, mode="same")
+        return y[pad:-pad]
+    
+    def _robust_mad(self, x: np.ndarray) -> float:
+        """
+        Estimador robusto de dispersión basado en MAD.
+        """
+        x = np.asarray(x, dtype=float)
+        med = np.median(x)
+        mad = np.median(np.abs(x - med))
+        return 1.4826 * mad
+    
+    def _remove_dc_spike_adaptive(
+        self,
+        power_dbm: np.ndarray,
+        baseline_window: int,
+        threshold_scale: float,
+        max_search_bins: int,
+        expansion_factor: float,
+        min_half_width: int,
+        max_half_width: int,
+        support_bins: int,
+        poly_degree: int
+    ):
+        """
+        Corrige el DC spike en el centro de la PSD usando:
+        1) detección adaptativa del ancho del artefacto
+        2) expansión moderada de la región detectada
+        3) reconstrucción suave por ajuste polinómico local
+
+        Retorna
+        -------
+        x_filtered : np.ndarray
+            PSD corregida.
+        center_idx : int
+            Índice del bin central.
+        repair_slice : tuple[int, int]
+            (i0, i1) región corregida.
+        baseline : np.ndarray
+            Fondo local estimado.
+        residual : np.ndarray
+            Residuo respecto al fondo local.
+        """
+        x = np.asarray(power_dbm, dtype=float).copy()
+        N = len(x)
+
+        if N < 2 * support_bins + 2 * max_half_width + 5:
+            # Seguridad: si el espectro es muy corto, mejor no intentar reparar.
+            return x.copy(), N // 2, (N // 2, N // 2), x.copy(), np.zeros_like(x)
+
+        center_idx = N // 2
+
+        # 1) Fondo local
+        baseline = self._moving_average_edge(x, baseline_window)
+        residual = x - baseline
+
+        # 2) Umbral robusto local cerca del centro
+        local_left = max(0, center_idx - max_search_bins)
+        local_right = min(N, center_idx + max_search_bins + 1)
+
+        residual_local = residual[local_left:local_right]
+        sigma_r = self._robust_mad(residual_local)
+
+        # Evitar sigma demasiado pequeño
+        sigma_r = max(sigma_r, 0.15)
+        threshold = threshold_scale * sigma_r
+
+        # 3) Detección del ancho real desde el centro
+        center_amp = abs(residual[center_idx])
+
+        if center_amp < threshold:
+            detected_half_width = min_half_width
+        else:
+            left = center_idx
+            while left > max(0, center_idx - max_search_bins):
+                if abs(residual[left - 1]) >= threshold:
+                    left -= 1
+                else:
+                    break
+
+            right = center_idx
+            while right < min(N - 1, center_idx + max_search_bins):
+                if abs(residual[right + 1]) >= threshold:
+                    right += 1
+                else:
+                    break
+
+            detected_half_width = max(center_idx - left, right - center_idx)
+            detected_half_width = max(detected_half_width, min_half_width)
+
+        # 4) Expandir moderadamente la región
+        expanded_half_width = int(np.ceil(expansion_factor * detected_half_width))
+        expanded_half_width = max(expanded_half_width, min_half_width)
+        expanded_half_width = min(expanded_half_width, max_half_width)
+
+        i0 = center_idx - expanded_half_width
+        i1 = center_idx + expanded_half_width
+
+        # Soportes laterales
+        left_support_start = i0 - support_bins
+        left_support_end = i0 - 1
+
+        right_support_start = i1 + 1
+        right_support_end = i1 + support_bins
+
+        # Si no hay soporte suficiente, no se corrige
+        if left_support_start < 0 or right_support_end >= N:
+            return x.copy(), center_idx, (i0, i1), baseline, residual
+
+        # 5) Reconstrucción polinómica local
+        support_idx = np.concatenate([
+            np.arange(left_support_start, left_support_end + 1),
+            np.arange(right_support_start, right_support_end + 1)
+        ])
+
+        support_vals = x[support_idx]
+
+        # Recentrar eje para estabilidad numérica
+        k_support = support_idx - center_idx
+        k_repair = np.arange(i0, i1 + 1) - center_idx
+
+        degree = min(poly_degree, len(k_support) - 1)
+        coeffs = np.polyfit(k_support, support_vals, deg=degree)
+        poly = np.poly1d(coeffs)
+
+        reconstructed = poly(k_repair)
+
+        x_filtered = x.copy()
+        x_filtered[i0:i1 + 1] = reconstructed
+
+        return x_filtered, center_idx, (i0, i1), baseline, residual
+    
+
+    def _apply_dc_correction_to_acquisition(self, acquisition_result):
+        """
+        Aplica corrección DC conservando el mismo formato del dict de salida.
+        Se asume que la PSD está en acquisition_result['Pxx'].
+        """
+        if not isinstance(acquisition_result, dict):
+            raise TypeError("Se esperaba que _single_acquire devolviera un dict.")
+
+        if "Pxx" not in acquisition_result:
+            raise KeyError("No se encontró la llave 'Pxx' en acquisition_result.")
+
+        out = copy.deepcopy(acquisition_result)
+
+        pxx = np.asarray(out["Pxx"], dtype=float)
+
+        pxx_filtered, center_idx, repair_slice, baseline, residual = \
+            self._remove_dc_spike_adaptive(
+                power_dbm=pxx,
+                baseline_window=self.BASELINE_WINDOW,
+                threshold_scale=self.THRESHOLD_SCALE,
+                max_search_bins=self.MAX_SEARCH_BINS,
+                expansion_factor=self.EXPANSION_FACTOR,
+                min_half_width=self.MIN_HALF_WIDTH,
+                max_half_width=self.MAX_HALF_WIDTH,
+                support_bins=self.SUPPORT_BINS,
+                poly_degree=self.POLY_DEGREE
+            )
+
+        # Mantener mismo formato: Pxx como lista
+        out["Pxx_raw"] = out["Pxx"]
+        out["Pxx"] = pxx_filtered.tolist()
+
+        # Diagnóstico opcional
+        out["dc_correction"] = {
+            "applied": True,
+            "center_idx": int(center_idx),
+            "repair_slice": (int(repair_slice[0]), int(repair_slice[1])),
+            "start_freq_hz": int(out.get("start_freq_hz", 0)),
+            "end_freq_hz": int(out.get("end_freq_hz", 0)),
+        }
+
+        return out
+
+
     async def _single_acquire(self, rf_params):
         """Low-level acquisition with PLL cooling time."""
         await self.controller.send_command(rf_params)
@@ -262,12 +464,16 @@ class AcquireDual:
         # PLL/Hardware settle time
         await asyncio.sleep(0.05) 
         return data
+    
 
     async def just_acquire(self, rf_params):
         """
-        Adquisición en bruto sin eliminación de artefacto DC.
+        Adquisición de PSD con corrección adaptativa de DC spike.
+        Devuelve el mismo formato que _single_acquire, pero con Pxx corregido.
         """
-        return await self._single_acquire(rf_params)
+        acquisition_result = await self._single_acquire(rf_params)
+        acquisition_result = self._apply_dc_correction_to_acquisition(acquisition_result)
+        return acquisition_result
     
     async def raw_acquire(self, rf_params):
         """
