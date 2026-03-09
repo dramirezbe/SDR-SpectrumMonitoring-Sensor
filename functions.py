@@ -249,23 +249,6 @@ class AcquireDual:
         self.SUPPORT_BINS = 10
         self.POLY_DEGREE = 2
 
-    def _update_stitching_params(self, sample_rate_hz):
-        """
-        Dynamically adjusts stitching constants based on hardware bandwidth.
-        Prevents using an offset larger than the available Nyquist zone.
-        """
-        if sample_rate_hz >= 4_000_000:
-            self.OFFSET_HZ = 2_000_000
-            self.PATCH_BW_HZ = 1_000_000
-            self._log.info(f"Stitching: Wide-Band Logic (Offset 2MHz, Patch 1MHz)")
-        else:
-            # For lower rates like 2MHz, a smaller offset is required to stay in-band
-            self.OFFSET_HZ = 500_000
-            self.PATCH_BW_HZ = 200_000 
-            self._log.info(f"Stitching: Narrow-Band Logic (Offset 0.5MHz, Patch 0.2MHz)")
-
-
-
     def _classify_spectral_occupancy(
         self,
         power_dbm: np.ndarray,
@@ -619,11 +602,10 @@ class AcquireDual:
 
     async def just_acquire(self, rf_params):
         """
-        Adquisición de PSD con corrección adaptativa de DC spike.
-        Devuelve el mismo formato que _single_acquire, pero con Pxx corregido.
+        Adquisición pura. Retorna los datos crudos del SDR 
+        sin aplicar ninguna corrección espectral.
         """
         acquisition_result = await self._single_acquire(rf_params)
-        acquisition_result = self._apply_dc_correction_to_acquisition(acquisition_result)
         return acquisition_result
     
     async def raw_acquire(self, rf_params):
@@ -682,20 +664,10 @@ class AcquireDual:
 
     async def get_corrected_data(self, rf_params):
         """
-        Adquisición mediante técnica de 'Stitching' (Cosido).
-        
-        Realiza una captura en la frecuencia central y otra con offset. Luego 
-        aplica una rampa de corrección lineal y un fundido de coseno para 
-        sustituir el centro ruidoso de la primera con datos limpios de la segunda.
+        Adquisición con corrección adaptativa de DC spike.
+        Devuelve el mismo formato que _single_acquire, pero con Pxx corregido.
         """
-        sr = rf_params.get("sample_rate_hz", 8e6)
-        self._update_stitching_params(sr)
-        
-        orig_params = deepcopy(rf_params)
-        orig_cf = orig_params["center_freq_hz"]
-
-        # 1. Adquisiciones
-        data1 = await self._single_acquire(orig_params)
+        data1 = await self._single_acquire(rf_params)
         try:
             data1 = self._apply_dc_correction_to_acquisition(data1)
             return data1
