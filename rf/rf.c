@@ -706,7 +706,7 @@ int main() {
             signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb.total_bytes);
             
             if (sig) {
-                iq_compensation(sig);
+                //iq_compensation(sig);
                 double* freq = malloc(local_psd.nperseg * sizeof(double));
                 double* psd = malloc(local_psd.nperseg * sizeof(double));
 

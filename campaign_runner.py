@@ -145,7 +145,7 @@ class CampaignRunner:
                 # AcquireDual aplica la lógica de "patching" para corregir el centro
                 acquirer = AcquireDual(zmq_ctrl, log)
                 log.info(f"Starting Campaign Acquisition ID: {self.campaign_id}")
-                return await acquirer.get_corrected_data(rf_cfg)
+                return await acquirer.just_acquire(rf_cfg)
         except OSError as e:
             if "Address already in use" in str(e):
                 log.warning("ZMQ Socket busy. Skipping.")
