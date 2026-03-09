@@ -696,62 +696,8 @@ class AcquireDual:
 
         # 1. Adquisiciones
         data1 = await self._single_acquire(orig_params)
-        offset_params = deepcopy(orig_params)
-        offset_params["center_freq_hz"] = orig_cf + self.OFFSET_HZ
-        data2 = await self._single_acquire(offset_params)
-
         try:
-            pxx1 = np.array(data1['Pxx'])
-            pxx2 = np.array(data2['Pxx'])
-            total_bins = len(pxx1)
-            
-            df = (data1['end_freq_hz'] - data1['start_freq_hz']) / total_bins
-            bin_shift = int(self.OFFSET_HZ / df)
-            
-            center_idx = total_bins // 2
-            half_patch = int((self.PATCH_BW_HZ / df) // 2)
-            s1, e1 = center_idx - half_patch, center_idx + half_patch
-            
-            s2 = s1 - bin_shift
-            e2 = s2 + (e1 - s1)
-
-            # --- MEJORA: VENTANA DE REFERENCIA POR PORCENTAJE (0.5%) ---
-            
-            # Calculamos k como el 0.5% del total de bins del espectro
-            k = max(1, int(total_bins * 0.005))
-            self._log.debug(f"Stitching: Usando ventana de referencia de {k} puntos ({0.5}%)")
-            
-            # Validación de límites para evitar IndexError en los bordes del array
-            idx_start_min = max(0, s1 - k)
-            idx_end_max = min(total_bins, e1 + k)
-
-            # Calculamos el delta al inicio del parche (usando mediana para robustez)
-            ref_start1 = np.median(pxx1[idx_start_min : s1])
-            ref_start2 = np.median(pxx2[s2 - (s1 - idx_start_min) : s2])
-            delta_start = ref_start1 - ref_start2
-            
-            # Calculamos el delta al final del parche
-            ref_end1 = np.median(pxx1[e1 : idx_end_max])
-            ref_end2 = np.median(pxx2[e2 : e2 + (idx_end_max - e1)])
-            delta_end = ref_end1 - ref_end2
-            
-            # --- ALINEACIÓN DE PENDIENTE Y BLENDING ---
-            
-            # Rampa de corrección lineal para unir ambos deltas
-            correction_slope = np.linspace(delta_start, delta_end, (e1 - s1))
-            pxx2_patch = pxx2[s2:e2] + correction_slope
-
-            actual_len = e1 - s1
-            blend_width = max(2, int(actual_len * 0.15)) 
-            mask = np.ones(actual_len)
-            ramp = 0.5 * (1 - np.cos(np.pi * np.linspace(0, 1, blend_width)))
-            mask[:blend_width] = ramp
-            mask[-blend_width:] = ramp[::-1]
-
-            # Inserción del parche corregido
-            pxx1[s1:e1] = (pxx1[s1:e1] * (1 - mask)) + (pxx2_patch * mask)
-
-            data1['Pxx'] = pxx1.tolist()
+            data1 = self._apply_dc_correction_to_acquisition(data1)
             return data1
 
         except Exception as e:
