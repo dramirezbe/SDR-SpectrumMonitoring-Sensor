@@ -1,309 +1,127 @@
 #!/usr/bin/env python3
-# kal_sync.py
-
-"""
-Módulo de Sincronización de Frecuencia (Kalibrate).
-
-Este script actúa como una utilidad de autocalibración para el SDR (HackRF). 
-Utiliza la herramienta externa `kalibrate-hackrf` para escanear bandas GSM, 
-encontrar la estación base con la señal más fuerte, calcular el desplazamiento 
-de frecuencia (PPM error) del oscilador local y guardarlo en memoria persistente.
-
-Cuenta con un mecanismo de "heartbeat" para indicar actividad y un "timeout" 
-global estricto para evitar bloqueos del sistema.
-"""
-
-import subprocess
-import re
-import time
-import sys
-import traceback
-import threading
-
-# Importaciones personalizadas del proyecto
-import cfg
 from utils import ShmStore
-
-# Inicialización del logger
+import cfg
 log = cfg.set_logger()
 
-# Tiempo máximo de ejecución permitido para todo el script (1 minuto y 30 segundos)
-GLOBAL_TIMEOUT = 90  
+import subprocess, os
+import numpy as np
+import pandas as pd
+import scipy.signal as sig
 
-def heartbeat(start_time, duration):
-    """
-    Función que se ejecuta en un hilo secundario para imprimir un latido de vida.
-    
-    Imprime un mensaje en la consola cada 10 segundos exactos (ej. [10s], [20s]) 
-    para indicar que el proceso sigue vivo, útil si el escaneo tarda en responder.
+SR = 20_000_000
+FC = 98_000_000
+DEC_SR = 200_000
+IQ_FILE = "oneshot.bin"
 
-    Args:
-        start_time (float): El timestamp (time.time()) en el que inició el programa.
-        duration (int): La duración máxima permitida en segundos (GLOBAL_TIMEOUT).
-    """
-    next_beat = 10
-    while True:
-        elapsed = time.time() - start_time
-        # Salir si superamos el tiempo global
-        if elapsed >= duration:
-            break
-        # Si pasamos el próximo umbral de 10 segundos, imprimimos
-        if elapsed >= next_beat:
-            print(f"[{next_beat}s]")
-            next_beat += 10
-        # Dormimos brevemente para no consumir CPU innecesariamente
-        time.sleep(0.1)
+def refine_peak(f, p):
+    k = np.argmax(p)
+    if k == 0 or k == len(p) - 1: return f[k]
+    y1, y2, y3 = p[k-1], p[k], p[k+1]
+    d = y1 - 2*y2 + y3
+    if abs(d) < 1e-10: return f[k]
+    return f[k] + 0.5 * (y1 - y3) / d * (f[1] - f[0])
 
-def check_hackrf_status():
-    """
-    Verifica la disponibilidad del hardware HackRF mediante el comando hackrf_info.
-    
-    Returns:
-        tuple: (bool, str) Un booleano indicando si el hardware está listo, 
-               y un mensaje descriptivo del estado o error.
-    """
-    try:
-        # Ejecutamos hackrf_info con un timeout corto de seguridad
-        result = subprocess.run(['hackrf_info'], capture_output=True, text=True, timeout=10)
-        output = (result.stdout + result.stderr).lower()
+def main():
+    subprocess.run([
+        "hackrf_transfer", "-f", str(FC), "-s", str(SR), 
+        "-n", str(SR), "-a", "1", "-l", "32", "-g", "32", "-r", IQ_FILE
+    ], capture_output=True)
+
+    raw = np.fromfile(IQ_FILE, dtype=np.int8)
+    os.remove(IQ_FILE)
+    iq = raw[0::2].astype(np.float32) + 1j * raw[1::2].astype(np.float32)
+
+    f, p = sig.welch(iq, fs=SR, nperseg=65536, return_onesided=False)
+    f = np.fft.fftshift(f)
+    p = 10 * np.log10(np.fft.fftshift(p))
+
+    peaks, _ = sig.find_peaks(p, height=np.median(p) + 5, distance=300)
+    top_peaks = sorted(peaks, key=lambda x: p[x], reverse=True)[:6]
+    cands = sorted([(FC + f[k], p[k]) for k in top_peaks])
+
+    log.info("Strong FM candidates from sweep:")
+    for i, (freq, pwr) in enumerate(cands, 1):
+        log.info(f"{i:2d}.  {freq/1e6:8.3f} MHz    sweep power = {pwr:5.2f} dB")
+
+    log.info("\nChecking stereo pilot presence...\n")
+    results = []
+    t = np.arange(len(iq)) / SR
+
+    for freq, pwr in cands:
+        freq_mhz = freq / 1e6
+        log.info(f"Testing {freq_mhz:.3f} MHz ...")
         
-        # Analizamos la salida buscando estados de error comunes
-        if "busy" in output:
-            return False, "HackRF is currently busy."
-        if "not found" in output:
-            return False, "No HackRF detected."
-        return True, "HackRF Ready."
-    except Exception as e:
-        return False, f"Error checking HackRF: {str(e)}"
-
-def run_kal_scan(band, deadline):
-    """
-    Escanea una banda GSM específica en busca de estaciones base usando kalibrate.
-
-    Se ejecuta el comando más simple posible: `kal -s <banda>`. Lee la salida en
-    tiempo real para extraer los canales y sus potencias correspondientes.
-
-    Args:
-        band (str): Nombre de la banda a escanear (ej. 'GSM900').
-        deadline (float): Timestamp límite en el que el escaneo debe abortarse obligatoriamente.
-
-    Returns:
-        tuple: (list, bool) Una lista de tuplas con los canales y sus potencias 
-               [(canal, potencia), ...], y un flag booleano que indica si hubo un timeout.
-    """
-    log.info(f"Scanning band: {band}")
-    print(f"\n--- Scanning band: {band} ---")
-    found_in_band = []
-    
-    # Comando simplificado: solo se indica el escaneo (-s) y la banda
-    cmd = ['kal', '-s', band]
-    
-    # Popen nos permite leer la salida estándar (stdout) de forma asíncrona línea por línea
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, # Redirigimos stderr a stdout para leer todo en un solo flujo
-        text=True,
-        bufsize=1,
-        universal_newlines=True
-    )
-
-    try:
-        while True:
-            # Comprobación de timeout global antes de cada lectura
-            if time.time() > deadline:
-                log.warning(f"Global timeout reached during scan of {band}. Terminating.")
-                process.terminate() # Matamos el proceso hijo de kalibrate
-                return found_in_band, True
-                
-            line = process.stdout.readline()
-            
-            # Si readline() devuelve vacío y el proceso ya terminó, rompemos el ciclo
-            if not line and process.poll() is not None:
-                break
-            
-            if line:
-                clean_line = line.strip()
-                # Imprimimos la salida en pantalla omitiendo líneas de banner
-                if clean_line and not clean_line.startswith("kalibrate"):
-                    print(f"  [scan]: {clean_line}")
-                
-                # Expresión regular para buscar el número de canal y su potencia (power)
-                # Ejemplo de salida esperada: "chan: 1 (935.2MHz + 2.3kHz) power: 23145.2"
-                match = re.search(r"chan:\s+(\d+).*power:\s+([\d.]+)", clean_line)
-                if match:
-                    channel = match.group(1)
-                    power = float(match.group(2))
-                    found_in_band.append((channel, power))
-
-    except Exception as e:
-        log.error(f"Error during scan: {e}")
-        process.kill()
-
-    # Retornamos los picos encontrados y el flag de timeout en Falso
-    return found_in_band, False
-
-def calibrate_channel(channel, deadline):
-    """
-    Calcula el error de frecuencia (PPM) sintonizando un canal específico.
-
-    Ejecuta el comando: `kal -c <canal>`. Parsea la salida para encontrar el 
-    promedio de error absoluto en partes por millón (ppm).
-
-    Args:
-        channel (str): El canal GSM a utilizar para la calibración.
-        deadline (float): Timestamp límite de seguridad global.
-
-    Returns:
-        tuple: (bool, float, str, bool) 
-            - Éxito del cálculo (True/False)
-            - Valor en coma flotante del error PPM (ej. 15.2)
-            - Mensaje formateado para display
-            - Flag booleano de timeout
-    """
-    log.info(f"Calibrating on Channel {channel}")
-    print(f"\n--- Starting Real-Time Calibration on Channel {channel} ---")
-    
-    # Comando simplificado: solo se indica calcular (-c) y el canal
-    cmd = ['kal', '-c', str(channel)]
-    
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True
-    )
-
-    ppm_val = None
-
-    try:
-        while True:
-            # Comprobación de seguridad para evitar bloqueos
-            if time.time() > deadline:
-                log.warning("Global timeout reached during calibration. Terminating.")
-                process.terminate()
-                return False, None, "0 (Global Timeout reached)", True
-
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-            
-            if line:
-                clean_line = line.strip()
-                if clean_line:
-                    print(f"  [kal]: {clean_line}")
-                
-                # Expresión regular para encontrar el valor final del error ppm
-                # Ejemplo esperado: "average absolute error: 12.345 ppm"
-                match = re.search(r"average absolute error:\s+([-+]?[\d.]+)\s+ppm", clean_line)
-                if match:
-                    ppm_val = float(match.group(1))
-
-    except Exception as e:
-        log.error(f"Unexpected error in calibration: {traceback.format_exc()}")
-        process.kill()
-        return False, None, f"0 (error: {str(e)})", False
-
-    # Si encontramos el valor, retornamos éxito
-    if ppm_val is not None:
-        return True, ppm_val, f"{ppm_val} ppm", False
-    else:
-        return False, None, "0 (no ppm found)", False
-
-def main() -> int:
-    """
-    Lógica principal (Orquestador) de la campaña de calibración.
-
-    Coordina el escaneo de múltiples bandas, selecciona el canal más fuerte,
-    calibra sobre él y persiste el error PPM en el `ShmStore`. 
-
-    Returns:
-        int: 0 si la calibración fue exitosa o se manejó el timeout de forma grácil. 
-             1 en caso de error crítico de hardware o si no se encuentran señales.
-    """
-    start_program = time.time()
-    deadline = start_program + GLOBAL_TIMEOUT
-
-    # Iniciamos el hilo secundario para el latido (heartbeat)
-    # Al ser "daemon=True", este hilo se cerrará automáticamente cuando el hilo principal termine
-    hb_thread = threading.Thread(target=heartbeat, args=(start_program, GLOBAL_TIMEOUT), daemon=True)
-    hb_thread.start()
-
-    # 1. Verificación del Hardware
-    success, msg = check_hackrf_status()
-    if not success:
-        log.error(f"Abort: {msg}")
-        return 1
-
-    bands = ["GSM850", "GSM-R", "GSM900"]
-    all_peaks = []
-    PEAK_LIMIT = 10 # Si encontramos suficientes estaciones, podemos detener el escaneo temprano
-
-    # 2. Fase de Escaneo
-    for band in bands:
-        # Verificamos si ya no nos queda tiempo antes de pasar a la siguiente banda
-        if time.time() > deadline:
-            break
-            
-        found, timed_out = run_kal_scan(band, deadline)
-        all_peaks.extend(found)
+        offset = freq - FC
+        iq_bb = iq * np.exp(-1j * 2 * np.pi * offset * t)
+        iq_dec = sig.decimate(sig.decimate(iq_bb, 10), 10)
         
-        # Abortar escaneos posteriores si se nos acabó el tiempo o ya tenemos suficientes canales
-        if timed_out or len(all_peaks) >= PEAK_LIMIT:
-            break
+        audio = np.angle(iq_dec[1:] * np.conj(iq_dec[:-1]))
+        f_a, P_a = sig.welch(audio, fs=DEC_SR, nperseg=65536)
+        
+        mask = (f_a >= 18000) & (f_a <= 20000)
+        f_win, P_win = f_a[mask], P_a[mask]
+        
+        pilot = refine_peak(f_win, P_win)
+        snr = 10 * np.log10(np.max(P_win) / np.median(P_win))
+        stereo = snr > 8.0
+        df_hz = DEC_SR / 65536
+        
+        log.info(f"  {freq_mhz:.3f} MHz | pilot={pilot:10.3f} Hz | SNR={snr:6.2f} dB | stereo={stereo} | df={df_hz:.3f} Hz")
+        
+        results.append({
+            "freq_mhz": freq_mhz,
+            "sweep_power_db": pwr,
+            "pilot_freq_hz": pilot,
+            "pilot_snr_db": snr,
+            "stereo_detected": stereo,
+            "welch_bin_spacing_hz": df_hz
+        })
 
-    # Si no se encontró ninguna señal tras los escaneos
-    if not all_peaks:
-        if time.time() > deadline:
-            # Si no hay señales y se acabó el tiempo, salimos con 0 (timeout manejado)
-            return 0
-        log.warning("No GSM peaks found.")
-        return 1
+    log.info("\n================ Ranked Results ================\n")
+    df = pd.DataFrame(results).sort_values(
+        by=["stereo_detected", "pilot_snr_db", "sweep_power_db"], 
+        ascending=[False, False, False]
+    ).reset_index(drop=True)
+    log.info(df.to_string(index=False))
 
-    # 3. Ordenamiento y Selección del Mejor Canal
-    # Ordenamos la lista basándonos en la potencia (índice 1 de la tupla), de mayor a menor
-    all_peaks.sort(key=lambda x: x[1], reverse=True)
-    best_channel = all_peaks[0][0] # Extraemos solo el número del canal con mayor potencia
+    stereo_df = df[df["stereo_detected"] == True]
+    if len(stereo_df) == 0:
+        log.info("\nNo stereo FM station found with sufficient pilot SNR.")
+        return
+
+    best = stereo_df.iloc[0]
+    best_freq = best["freq_mhz"] * 1e6
     
-    # 4. Fase de Calibración
-    if time.time() > deadline:
-        return 0
+    offset = best_freq - FC
+    iq_bb = iq * np.exp(-1j * 2 * np.pi * offset * t)
+    iq_dec = sig.decimate(sig.decimate(iq_bb, 10), 10)
 
-    cal_success, ppm_float, ppm_display, timed_out = calibrate_channel(best_channel, deadline)
+    f_bb, P_bb = sig.welch(iq_dec, fs=DEC_SR, nperseg=16384, return_onesided=False)
+    f_bb, P_bb = np.fft.fftshift(f_bb), np.fft.fftshift(P_bb.real)
 
-    if timed_out:
-        print("\n!!! Global Timeout Reached During Calibration - Graceful Exit !!!")
-        return 0
+    deltas = np.linspace(-15000, 15000, 1000)
+    u = np.linspace(30000, 90000, 1000)
+    costs = [np.mean(((np.interp(d - u, f_bb, P_bb) - np.interp(d + u, f_bb, P_bb))**2) / 
+             np.maximum((np.interp(d - u, f_bb, P_bb) + np.interp(d + u, f_bb, P_bb))**2, 1e-20)) 
+             for d in deltas]
+    
+    fine_offset = deltas[np.argmin(costs)]
+    ppm_error = (fine_offset / best_freq) * 1e6
+    sug_ppm = -ppm_error
 
-    # 5. Reporte Final y Persistencia en Memoria (ShmStore)
-    print("\n" + "="*40)
-    print(f"FINAL CALIBRATION REPORT")
-    print(f"Status:        {'SUCCESS' if cal_success else 'FAILED'}")
-    print(f"Channel Used:  {best_channel}")
-    print(f"PPM Error:     {ppm_display}")
-    print("="*40)
+    log.info("\n================ Best Station ==================\n")
+    log.info(f"Best stereo station: {best['freq_mhz']:.6f} MHz")
+    log.info(f"Sweep power        : {best['sweep_power_db']:.2f} dB")
+    log.info(f"Pilot frequency    : {best['pilot_freq_hz']:.3f} Hz")
+    log.info(f"Pilot SNR          : {best['pilot_snr_db']:.2f} dB")
 
-    # Si todo salió bien, guardamos los resultados en el almacenamiento persistente
-    if cal_success and ppm_float is not None:
-        try:
-            store = ShmStore()
-            # Guardamos el error de frecuencia para que el SDR lo aplique
-            store.add_to_persistent("ppm_error", float(ppm_float))
-            # Guardamos el timestamp de esta calibración exitosa
-            store.add_to_persistent("last_kal_ms", cfg.get_time_ms())
-            
-            log.info(f"Calibration successful: {ppm_float:.3f} ppm")
-            return 0
-        except Exception:
-            log.error(f"Error saving to ShmStore:\n{traceback.format_exc()}")
-            return 1
-    else:
-        # Si la calibración falló por motivos ajenos a un timeout
-        return 1
+    log.info("\n================ RF PPM Estimate ==============\n")
+    log.info(f"Reference station tuned frequency : {best_freq/1e6:.6f} MHz")
+    log.info(f"Estimated RF center offset        : {fine_offset:+.3f} Hz")
+    log.info(f"Estimated RF ppm error            : {ppm_error:+.6f} ppm")
+    log.info("Suggested correction to apply:")
+    log.info(f"  Frequency shift to apply        : {-fine_offset:+.3f} Hz")
+    log.info(f"  Approximate ppm adjustment      : {sug_ppm:+.6f} ppm")
 
 if __name__ == "__main__":
-    # Garantizamos que la aplicación capture cualquier error y retorne un código de salida limpio
-    rc = cfg.run_and_capture(main)
-    sys.exit(rc)
+    main()
