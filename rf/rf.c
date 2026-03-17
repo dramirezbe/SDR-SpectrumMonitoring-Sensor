@@ -706,6 +706,7 @@ int main() {
             signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb.total_bytes);
             
             if (sig) {
+                // Apply IQ compensation to correct hardware imperfections before any further processing
                 iq_compensation(sig);
                 double* freq = malloc(local_psd.nperseg * sizeof(double));
                 double* psd = malloc(local_psd.nperseg * sizeof(double));
