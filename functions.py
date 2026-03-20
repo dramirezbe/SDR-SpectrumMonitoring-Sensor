@@ -366,7 +366,8 @@ class AcquireDual:
         min_half_width: int,
         max_half_width: int,
         support_bins: int,
-        poly_degree: int
+        poly_degree: int,
+        noise_std_db: float
     ):
         """
         Corrige el DC spike en el centro de la PSD usando:
@@ -389,93 +390,264 @@ class AcquireDual:
         """
         x = np.asarray(power_dbm, dtype=float).copy()
         N = len(x)
-
-        if N < 2 * support_bins + 2 * max_half_width + 5:
-            # Seguridad: si el espectro es muy corto, mejor no intentar reparar.
-            return x.copy(), N // 2, (N // 2, N // 2), x.copy(), np.zeros_like(x)
-
         center_idx = N // 2
 
-        # 1) Fondo local
+        # Verificación de tamaño mínimo del espectro
+        if self._check_spectrum_size(N, support_bins, max_half_width):
+            return x.copy(), center_idx, (center_idx, center_idx), x.copy(), np.zeros_like(x)
+
+        # 1) Fondo local y residual
         baseline = self._moving_average_edge(x, baseline_window)
         residual = x - baseline
 
-        # 2) Umbral robusto local cerca del centro
+        # 2) Detección adaptativa del ancho del artefacto
+        detected_half_width = self._detect_artifact_width(
+            residual, center_idx, max_search_bins, min_half_width,
+            threshold_scale
+        )
+
+        # 3) Expansión de la región detectada
+        expanded_half_width = self._expand_detected_region(
+            detected_half_width, expansion_factor, min_half_width, max_half_width
+        )
+
+        # 4) Definición de regiones de soporte y reparación
+        i0, i1, left_support, right_support = self._define_support_regions(
+            center_idx, expanded_half_width, support_bins, N
+        )
+
+        # Verificar si hay soporte suficiente
+        if left_support[0] < 0 or right_support[1] >= N:
+            return x.copy(), center_idx, (i0, i1), baseline, residual
+
+        # 5) Reconstrucción polinómica
+        x_filtered = self._polynomial_reconstruction(
+            x, center_idx, i0, i1, left_support, right_support, poly_degree,noise_std_db=noise_std_db
+        )
+
+        return x_filtered, center_idx, (i0, i1), baseline, residual
+
+
+    def _check_spectrum_size(self, N: int, support_bins: int, max_half_width: int) -> bool:
+        """Verifica si el espectro tiene tamaño suficiente para la corrección."""
+        return N < 2 * support_bins + 2 * max_half_width + 5
+
+
+    def _detect_artifact_width(
+        self,
+        residual: np.ndarray,
+        center_idx: int,
+        max_search_bins: int,
+        min_half_width: int,
+        threshold_scale: float
+    ) -> int:
+        """
+        Detecta el ancho del artefacto basado en el umbral adaptativo.
+        
+        Parameters
+        ----------
+        residual : np.ndarray
+            Residuo respecto al fondo local.
+        center_idx : int
+            Índice del bin central.
+        max_search_bins : int
+            Máxima distancia de búsqueda desde el centro.
+        min_half_width : int
+            Ancho mínimo a considerar.
+        threshold_scale : float
+            Escala del umbral (multiplica la desviación robusta).
+        
+        Returns
+        -------
+        detected_half_width : int
+            Semi-ancho detectado del artefacto.
+        """
+        N = len(residual)
+        
+        # Región local para calcular umbral
         local_left = max(0, center_idx - max_search_bins)
         local_right = min(N, center_idx + max_search_bins + 1)
-
         residual_local = residual[local_left:local_right]
+        
+        # Cálculo del umbral robusto
         sigma_r = self._robust_mad(residual_local)
-
-        # Evitar sigma demasiado pequeño
         sigma_r = max(sigma_r, 0.15)
         threshold = threshold_scale * sigma_r
-
-        # 3) Detección del ancho real desde el centro
+        
+        # Detección del ancho
         center_amp = abs(residual[center_idx])
-
+        
         if center_amp < threshold:
             detected_half_width = min_half_width
         else:
+            # Expandir hacia la izquierda
             left = center_idx
             while left > max(0, center_idx - max_search_bins):
                 if abs(residual[left - 1]) >= threshold:
                     left -= 1
                 else:
                     break
-
+            
+            # Expandir hacia la derecha
             right = center_idx
             while right < min(N - 1, center_idx + max_search_bins):
                 if abs(residual[right + 1]) >= threshold:
                     right += 1
                 else:
                     break
-
+            
             detected_half_width = max(center_idx - left, right - center_idx)
             detected_half_width = max(detected_half_width, min_half_width)
+        
+        return detected_half_width
 
-        # 4) Expandir moderadamente la región
+
+    def _expand_detected_region(
+        self,
+        detected_half_width: int,
+        expansion_factor: float,
+        min_half_width: int,
+        max_half_width: int
+    ) -> int:
+        """
+        Expande la región detectada según el factor de expansión.
+        
+        Returns
+        -------
+        expanded_half_width : int
+            Semi-ancho expandido de la región a corregir.
+        """
         expanded_half_width = int(np.ceil(expansion_factor * detected_half_width))
         expanded_half_width = max(expanded_half_width, min_half_width)
         expanded_half_width = min(expanded_half_width, max_half_width)
+        
+        return expanded_half_width
 
-        i0 = center_idx - expanded_half_width
-        i1 = center_idx + expanded_half_width
 
-        # Soportes laterales
+    def _define_support_regions(
+        self,
+        center_idx: int,
+        half_width: int,
+        support_bins: int,
+        N: int
+    ) -> tuple:
+        """
+        Define las regiones de soporte y la región a reparar.
+        
+        Returns
+        -------
+        i0, i1 : int, int
+            Índices de inicio y fin de la región a reparar.
+        left_support : tuple[int, int]
+            (inicio, fin) de la región de soporte izquierda.
+        right_support : tuple[int, int]
+            (inicio, fin) de la región de soporte derecha.
+        """
+        i0 = center_idx - half_width
+        i1 = center_idx + half_width
+        
         left_support_start = i0 - support_bins
         left_support_end = i0 - 1
-
+        left_support = (left_support_start, left_support_end)
+        
         right_support_start = i1 + 1
         right_support_end = i1 + support_bins
+        right_support = (right_support_start, right_support_end)
+        
+        return i0, i1, left_support, right_support
 
-        # Si no hay soporte suficiente, no se corrige
-        if left_support_start < 0 or right_support_end >= N:
-            return x.copy(), center_idx, (i0, i1), baseline, residual
 
-        # 5) Reconstrucción polinómica local
-        support_idx = np.concatenate([
-            np.arange(left_support_start, left_support_end + 1),
-            np.arange(right_support_start, right_support_end + 1)
-        ])
+    def generate_reconstruction_noise(self, n_samples, noise_std_db=None, rng=None):
+        """
+        Genera ruido aditivo para la reconstrucción en unidades de dB/dBm.
+        """
+        if noise_std_db is None or noise_std_db <= 0.0 or n_samples <= 0:
+            return np.zeros(int(n_samples), dtype=float)
 
+        noise_std_db = float(noise_std_db)
+
+        if rng is None:
+            rng = np.random.default_rng()
+
+        return rng.normal(loc=0.0, scale=noise_std_db, size=int(n_samples))
+
+
+    def _polynomial_reconstruction(
+        self,
+        x: np.ndarray,
+        center_idx: int,
+        i0: int,
+        i1: int,
+        left_support: tuple,
+        right_support: tuple,
+        poly_degree: int,
+        noise_std_db: float,
+        rng: np.random.Generator = None
+    ) -> np.ndarray:
+        """
+        Reconstruye la región del artefacto usando ajuste polinómico
+        basado en los soportes laterales y añade ruido opcional.
+        
+        Parameters
+        ----------
+        x : np.ndarray
+            Señal original.
+        center_idx : int
+            Índice del bin central.
+        i0, i1 : int
+            Índices de inicio y fin de la región a reparar.
+        left_support : tuple
+            (inicio, fin) de la región de soporte izquierda.
+        right_support : tuple
+            (inicio, fin) de la región de soporte derecha.
+        poly_degree : int
+            Grado máximo del polinomio.
+        noise_std_db : float, optional
+            Desviación estándar del ruido aditivo en dB.
+        rng : np.random.Generator, optional
+            Generador aleatorio para reproducibilidad.
+        
+        Returns
+        -------
+        x_filtered : np.ndarray
+            Señal con la región del artefacto corregida.
+        """
+        # Índices de soporte
+        left_idx = np.arange(left_support[0], left_support[1] + 1)
+        right_idx = np.arange(right_support[0], right_support[1] + 1)
+        support_idx = np.concatenate([left_idx, right_idx])
+        
         support_vals = x[support_idx]
-
-        # Recentrar eje para estabilidad numérica
-        k_support = support_idx - center_idx
-        k_repair = np.arange(i0, i1 + 1) - center_idx
-
+        
+        # Recentrar eje para estabilidad numérica (usando coordenadas absolutas)
+        k_support = support_idx.astype(float)
+        k_repair = np.arange(i0, i1 + 1, dtype=float)
+        
+        # Ajuste polinómico
         degree = min(poly_degree, len(k_support) - 1)
+        degree = max(degree, 1)  # Asegurar al menos grado 1 si hay suficientes puntos
+        
         coeffs = np.polyfit(k_support, support_vals, deg=degree)
         poly = np.poly1d(coeffs)
-
+        
+        # Reconstrucción
         reconstructed = poly(k_repair)
-
+        
+        # Añadir ruido si se especifica
+        if noise_std_db is not None and noise_std_db > 0:
+            noise = self.generate_reconstruction_noise(
+                n_samples=len(reconstructed),
+                noise_std_db=noise_std_db,
+                rng=rng
+            )
+            reconstructed = reconstructed + noise
+        
+        # Aplicar corrección
         x_filtered = x.copy()
         x_filtered[i0:i1 + 1] = reconstructed
-
-        return x_filtered, center_idx, (i0, i1), baseline, residual
-    
+        
+        return x_filtered
+        
 
     def _apply_dc_correction_to_acquisition(self, acquisition_result):
         """
@@ -499,6 +671,15 @@ class AcquireDual:
         out = copy.deepcopy(acquisition_result)
     
         pxx = np.asarray(out["Pxx"], dtype=float)
+
+        if len(pxx) > 16385:
+            NOISE_STD_DB = 0.45
+        elif len(pxx) > 4096:
+            NOISE_STD_DB = 0.20
+        elif len(pxx) > 1024:
+            NOISE_STD_DB = 0.12
+        else:
+            NOISE_STD_DB = 0.06
     
         # ---------------------------------------------------------
         # 0) Clasificar el régimen espectral
@@ -550,7 +731,8 @@ class AcquireDual:
                 min_half_width=min_half_width,
                 max_half_width=max_half_width,
                 support_bins=support_bins,
-                poly_degree=poly_degree
+                poly_degree=poly_degree,
+                noise_std_db= NOISE_STD_DB
             )
     
         # ---------------------------------------------------------
