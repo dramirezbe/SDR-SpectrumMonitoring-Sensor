@@ -702,6 +702,11 @@ int main() {
         // --- 5. PROCESSING WITH SAFETY CHECKS ---
         int8_t* linear_buffer = malloc(local_rb.total_bytes);
         if (linear_buffer) {
+            size_t buf_bytes = local_rb.total_bytes;
+            size_t iq_points = buf_bytes / 2; /* interleaved I,Q each 1 byte */
+            double buf_mb = (double)buf_bytes / (1024.0 * 1024.0);
+            fprintf(stderr, "[RF] linear_buffer: %zu bytes (%zu IQ points), %.3f MB; PSD nperseg=%d\n",
+                    buf_bytes, iq_points, buf_mb, local_psd.nperseg);
             rb_read(&rb, linear_buffer, local_rb.total_bytes);
             signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb.total_bytes);
             
