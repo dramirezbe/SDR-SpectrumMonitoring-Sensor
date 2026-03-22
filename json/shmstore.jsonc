@@ -13,6 +13,8 @@
   //last valid GPS coordinates received from gps-lte.c
   "last_lat": 40.7128,
   "last_lng": -74.0060,
+  //flag to indicate if GPS coordinates have changed for change of more than 200 meters, set by gps-lte.c
+  "changed_gps": "false",
 
   //current campaign params
   "center_freq_hz": 98000000,
