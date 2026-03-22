@@ -23,6 +23,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include <string.h>
+#include <ctype.h>
 
 #include "utils.h"       
 #include "bacn_LTE.h"
@@ -31,6 +32,41 @@
 
 void run_cmd(const char *cmd);
 int get_ppp_ip(char *ip);
+
+static bool has_nonzero_coordinate_rounded(const char *coord_str) {
+    if (coord_str == NULL || coord_str[0] == '\0') {
+        return false;
+    }
+
+    while (isspace((unsigned char)*coord_str)) {
+        coord_str++;
+    }
+
+    if (*coord_str == '\0') {
+        return false;
+    }
+
+    char *endptr = NULL;
+    double val = strtod(coord_str, &endptr);
+    if (endptr == coord_str) {
+        return false;
+    }
+
+    while (endptr && isspace((unsigned char)*endptr)) {
+        endptr++;
+    }
+
+    if (endptr != NULL && *endptr != '\0') {
+        return false;
+    }
+
+    if (!isfinite(val)) {
+        return false;
+    }
+
+    long rounded = lround(val);
+    return rounded != 0;
+}
 
 
 /**
@@ -257,14 +293,23 @@ int main(void)
                 count = 0; // Reset counter
 		        printf("Latitude: %s, Longitude: %s, Altitude: %s\n", GPSInfo.Latitude, GPSInfo.Longitude, GPSInfo.Altitude);
                 // --- A. SEND DATA ---
-                if(GPSInfo.Latitude != NULL) {
+                status = -1;
+                if (GPSInfo.Latitude != NULL &&
+                    GPSInfo.Longitude != NULL &&
+                    has_nonzero_coordinate_rounded(GPSInfo.Latitude) &&
+                    has_nonzero_coordinate_rounded(GPSInfo.Longitude)) {
                     status = post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
+                } else {
+                    fprintf(stderr, "Skipping GPS POST: invalid/null coordinates\n");
                 }
 
                 if (status == 0) {
                         printf("Success: Data posted to %s\n", api_url);
+                        shm_add_to_persistent_gps("last_lat", GPSInfo.Latitude);
+                        shm_add_to_persistent_gps("last_lng", GPSInfo.Longitude);
+                        shm_add_to_persistent_gps("last_alt", GPSInfo.Altitude);
                 } else {
-                	fprintf(stderr, "Failed with error code: %d\n", status);
+                	fprintf(stderr, "Failed gps POST with error code: %d\n", status);
                 }
 
                 // --- B. CHECK CONNECTIVITY ---

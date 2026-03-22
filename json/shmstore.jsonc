@@ -1,0 +1,40 @@
+{
+  // Snapshot of live ShmStore file: /dev/shm/persistent.json
+  // Generated from current runtime state.
+  // Current live object may be empty after reboot/init.
+  // Example below shows a typical populated state.
+
+  //flag for campgin_runner.py protection against multiple instances running simultaneously
+  "campaign_runner_running": false,
+  "campaign_id": 123,
+  //protection against freezing campaign_runner.py
+  "expires_at_ms": 1764000000000,
+
+  //last valid GPS coordinates received from gps-lte.c
+  "last_lat": 40.7128,
+  "last_lng": -74.0060,
+  "last_alt": 10.0,
+
+  //current campaign params
+  "center_freq_hz": 98000000,
+  "sample_rate_hz": 20000000,
+  "rbw_hz": 100000,
+  "window": "hann",
+  "overlap": 0.5,
+  "lna_gain": 0,
+  "vga_gain": 0,
+  "antenna_amp": true,
+  "antenna_port": 1,
+  "ppm_error": 0,
+  "method_psd": "pfb",
+
+  "filter": {
+    "start_freq_hz": 87500000,
+    "end_freq_hz": 107500000
+  },
+
+  //Last ms between https shaking with server 
+  "delta_t_ms": 120,
+  //Last timestamp of succesfull SDR calibration
+  "last_kal_ms": 1763990000000
+}

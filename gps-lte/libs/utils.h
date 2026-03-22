@@ -4,8 +4,8 @@
  * @note This module is self-contained and requires libcurl.
  */
 
-#ifndef UTILS_H
-#define UTILS_H
+#ifndef GPS_LTE_UTILS_H
+#define GPS_LTE_UTILS_H
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <linux/if.h>
 #include <unistd.h>
 #include <netinet/in.h>
 
@@ -61,6 +62,38 @@ int post_gps_data(
     const char *longitude_str
 );
 
+/**
+ * @brief Adds or updates a key in /dev/shm/persistent.json (GPS-LTE variant).
+ *
+ * Uses exclusive file lock + fsync for safe multi-process writes,
+ * matching Python ShmStore protection semantics.
+ *
+ * @param key JSON key to insert/update.
+ * @param value_text Value as text. If valid JSON, it is stored typed;
+ * otherwise it is stored as JSON string.
+ * @return int 0 on success, -1 on error.
+ */
+int shm_add_to_persistent_gps(const char *key, const char *value_text);
+
+/**
+ * @brief Reads a key from /dev/shm/persistent.json (GPS-LTE variant).
+ *
+ * Uses shared file lock for safe concurrent reads.
+ * - If JSON value is string: returns raw string content (no quotes).
+ * - Otherwise: returns unformatted JSON text.
+ *
+ * @param key JSON key to query.
+ * @return char* Heap-allocated string (caller must free), or NULL on not found/error.
+ */
+char *shm_consult_persistent_gps(const char *key);
+
+/**
+ * @brief Compatibility alias for shm_consult_persistent_gps.
+ * @param key JSON key to query.
+ * @return char* Same return contract as shm_consult_persistent_gps.
+ */
+char *ashm_consult_persistent_gps(const char *key);
+
 /** @}  */
 
-#endif // UTILS_H
+#endif // GPS_LTE_UTILS_H

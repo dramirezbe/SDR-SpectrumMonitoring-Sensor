@@ -4,8 +4,6 @@ dotenv==0.9.9
 idna==3.11
 ntplib==0.4.0
 numpy==2.2.0
-PyQt5==5.15.11
-pyqtgraph==0.13.7
 python-crontab==3.3.0
 python-dotenv==1.2.1
 pyzmq==27.1.0

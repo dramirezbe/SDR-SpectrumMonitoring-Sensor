@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdint.h>
 
 
 /**
@@ -31,6 +32,39 @@
  * @retval NULL Si el archivo no existe o la clave no se encuentra.
  */
 char *getenv_c(const char *key);
+
+/**
+ * @brief Agrega/actualiza una clave en /dev/shm/persistent.json de forma segura.
+ *
+ * Implementa protección concurrente con file-lock exclusivo (flock) y
+ * persistencia con fsync, emulando el patrón de ShmStore en Python.
+ *
+ * @param key Clave JSON a insertar/actualizar.
+ * @param value_text Valor en texto. Si es JSON válido (número, bool, objeto, array,
+ *                   string con comillas), se guarda tipado. Si no, se guarda como string.
+ * @return int 0 en éxito, -1 en error.
+ */
+int shm_add_to_persistent(const char *key, const char *value_text);
+
+/**
+ * @brief Consulta una clave en /dev/shm/persistent.json de forma segura.
+ *
+ * Usa lock compartido (flock) para lectura concurrente segura.
+ * - Si el valor es string JSON, retorna el contenido sin comillas.
+ * - En otros tipos (número/bool/objeto/array), retorna JSON serializado.
+ *
+ * @param key Clave JSON a consultar.
+ * @return char* Memoria dinámica con el valor; liberar con free().
+ *               Retorna NULL si no existe o hay error.
+ */
+char *shm_consult_persistent(const char *key);
+
+/**
+ * @brief Alias de compatibilidad para shm_consult_persistent().
+ * @param key Clave JSON a consultar.
+ * @return char* Igual que shm_consult_persistent(). Liberar con free().
+ */
+char *ashm_consult_persistent(const char *key);
 
 /** @} */
 
