@@ -13,7 +13,6 @@
   //last valid GPS coordinates received from gps-lte.c
   "last_lat": 40.7128,
   "last_lng": -74.0060,
-  "last_alt": 10.0,
 
   //current campaign params
   "center_freq_hz": 98000000,

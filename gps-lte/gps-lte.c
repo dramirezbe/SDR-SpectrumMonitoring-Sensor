@@ -33,6 +33,83 @@
 void run_cmd(const char *cmd);
 int get_ppp_ip(char *ip);
 
+static bool parse_double_strict(const char *text, double *out) {
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+
+    while (isspace((unsigned char)*text)) {
+        text++;
+    }
+
+    if (*text == '\0') {
+        return false;
+    }
+
+    char *endptr = NULL;
+    double val = strtod(text, &endptr);
+    if (endptr == text || !isfinite(val)) {
+        return false;
+    }
+
+    while (endptr != NULL && isspace((unsigned char)*endptr)) {
+        endptr++;
+    }
+
+    if (endptr != NULL && *endptr != '\0') {
+        return false;
+    }
+
+    *out = val;
+    return true;
+}
+
+static double nmea_to_decimal_local(double raw_coord) {
+    double degrees = floor(raw_coord / 100.0);
+    double minutes = raw_coord - (degrees * 100.0);
+    return degrees + (minutes / 60.0);
+}
+
+static bool gps_to_decimal(const char *coord_str, const char *dir_str, bool is_longitude, double *out) {
+    if (!parse_double_strict(coord_str, out)) {
+        return false;
+    }
+
+    double val = *out;
+    if (fabs(val) > 180.0) {
+        val = nmea_to_decimal_local(fabs(val));
+    }
+
+    if (dir_str != NULL && dir_str[0] != '\0') {
+        char dir = (char)toupper((unsigned char)dir_str[0]);
+        if (dir == 'S' || dir == 'W') {
+            val = -fabs(val);
+        } else if (dir == 'N' || dir == 'E') {
+            val = fabs(val);
+        }
+    } else if (is_longitude && val > 0.0) {
+        val = -val;
+    }
+
+    *out = val;
+    return true;
+}
+
+static double haversine_m(double lat1, double lon1, double lat2, double lon2) {
+    const double earth_radius_m = 6371008.8;
+    double lat1_rad = lat1 * M_PI / 180.0;
+    double lon1_rad = lon1 * M_PI / 180.0;
+    double lat2_rad = lat2 * M_PI / 180.0;
+    double lon2_rad = lon2 * M_PI / 180.0;
+
+    double dlat = lat2_rad - lat1_rad;
+    double dlon = lon2_rad - lon1_rad;
+    double a = sin(dlat / 2.0) * sin(dlat / 2.0) +
+               cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2.0) * sin(dlon / 2.0);
+    double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+    return earth_radius_m * c;
+}
+
 static bool has_nonzero_coordinate_rounded(const char *coord_str) {
     if (coord_str == NULL || coord_str[0] == '\0') {
         return false;
@@ -304,12 +381,52 @@ int main(void)
                 }
 
                 if (status == 0) {
-                        printf("Success: Data posted to %s\n", api_url);
-                        shm_add_to_persistent_gps("last_lat", GPSInfo.Latitude);
-                        shm_add_to_persistent_gps("last_lng", GPSInfo.Longitude);
-                        shm_add_to_persistent_gps("last_alt", GPSInfo.Altitude);
+                    printf("Success: Data posted to %s\n", api_url);
+
+                    // --- HISTÉRESIS (200 m) usando last_lat/last_lng ---
+                    double cur_lat = 0.0;
+                    double cur_lng = 0.0;
+                    bool cur_ok = gps_to_decimal(GPSInfo.Latitude, GPSInfo.LatDir, false, &cur_lat) &&
+                                  gps_to_decimal(GPSInfo.Longitude, GPSInfo.LonDir, true, &cur_lng);
+
+                    if (!cur_ok) {
+                        fprintf(stderr, "Skipping shared-memory GPS update: invalid current coordinates\n");
+                        shm_add_to_persistent_gps("changed_gps", "false");
+                    } else {
+                        char *last_lat_str = shm_consult_persistent_gps("last_lat");
+                        char *last_lng_str = shm_consult_persistent_gps("last_lng");
+
+                        double last_lat = 0.0;
+                        double last_lng = 0.0;
+                        bool has_last = parse_double_strict(last_lat_str, &last_lat) &&
+                                        parse_double_strict(last_lng_str, &last_lng);
+
+                        bool should_update = true;
+                        if (has_last) {
+                            double distance_m = haversine_m(last_lat, last_lng, cur_lat, cur_lng);
+                            should_update = (distance_m > 200.0);
+                            printf("GPS hysteresis distance: %.2f m (threshold: 200.00 m)\n", distance_m);
+                        }
+
+                        if (should_update) {
+                            char lat_text[32];
+                            char lng_text[32];
+                            snprintf(lat_text, sizeof(lat_text), "%.7f", cur_lat);
+                            snprintf(lng_text, sizeof(lng_text), "%.7f", cur_lng);
+
+                            shm_add_to_persistent_gps("last_lat", lat_text);
+                            shm_add_to_persistent_gps("last_lng", lng_text);
+                            
+                            shm_add_to_persistent_gps("changed_gps", "true");
+                        } else {
+                            shm_add_to_persistent_gps("changed_gps", "false");
+                        }
+
+                        free(last_lat_str); // free(NULL) es seguro en C
+                        free(last_lng_str);
+                    }
                 } else {
-                	fprintf(stderr, "Failed gps POST with error code: %d\n", status);
+                    fprintf(stderr, "Failed gps POST with error code: %d\n", status);
                 }
 
                 // --- B. CHECK CONNECTIVITY ---
