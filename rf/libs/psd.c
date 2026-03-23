@@ -262,6 +262,11 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
         hack_cfg->lna_gain = desired.lna_gain;
         hack_cfg->vga_gain = desired.vga_gain;
         hack_cfg->ppm_error = desired.ppm_error;
+        
+        // Calculate PPM-corrected frequency for internal DSP processing
+        // Formula: f_corrected = f_nominal * (1 + PPM/1e6)
+        double correction = 1.0 + ((double)desired.ppm_error / 1000000.0);
+        hack_cfg->center_freq_corrected = (uint64_t)((double)desired.center_freq * correction);
     }
 
     // Default to ~1 second of data if not specified

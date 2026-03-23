@@ -28,7 +28,7 @@ import time
 import subprocess
 
 WEBRTC_CMD = f"{cfg.PYTHON_ENV_STR} -u server_webrtc.py 2>&1 | systemd-cat -t WEBRTC_SERVER"
-KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync.py 2>&1 | systemd-cat -t KAL_SYNC"
+KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync_legal_FM.py 2>&1 | systemd-cat -t KAL_SYNC"
 #log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
 
 # --- CONFIG FETCHING ---

@@ -53,7 +53,7 @@ class ServerRealtimeConfig:
                 self.center_freq_hz = 1_000_000
             if self.center_freq_hz > 6_000_000_000:
                 self.center_freq_hz = 6_000_000_000
-            raise ValueError(f"Frecuencia central {self.center_freq_hz} Hz fuera de rango.")
+            raise ValueError(f"Frecuencia central {self.center_freq_hz} Hz fuera de rango. Volviendo a límites permitidos {self.center_freq_hz/1e6} MHz.")
         
         if not (2_000_000 <= self.sample_rate_hz <= 20_000_000):
             if self.center_freq_hz < 2_000_000:

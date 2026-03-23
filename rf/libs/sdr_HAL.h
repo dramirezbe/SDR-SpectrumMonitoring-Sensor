@@ -33,12 +33,13 @@
  * @brief Estructura que contiene los parámetros de configuración del SDR.
  */
 typedef struct {
-    double sample_rate;    /**< Frecuencia de muestreo en Hz. */
-    uint64_t center_freq;  /**< Frecuencia central de sintonización en Hz. */
-    bool amp_enabled;      /**< Activar/Desactivar el amplificador de RF frontal (0 o 14 dB). */
-    int lna_gain;          /**< Ganancia de FI (LNA) en pasos de 8 dB (0-40 dB). */
-    int vga_gain;          /**< Ganancia de banda base (VGA) en pasos de 2 dB (0-62 dB). */
-    int ppm_error;         /**< Corrección de error de frecuencia en partes por millón (PPM). */
+    double sample_rate;        /**< Frecuencia de muestreo en Hz. */
+    uint64_t center_freq;      /**< Frecuencia central nominal de sintonización en Hz (sin corrección PPM). */
+    uint64_t center_freq_corrected; /**< Frecuencia central corregida según error PPM. Usada para procesamiento DSP interno. */
+    bool amp_enabled;          /**< Activar/Desactivar el amplificador de RF frontal (0 o 14 dB). */
+    int lna_gain;              /**< Ganancia de FI (LNA) en pasos de 8 dB (0-40 dB). */
+    int vga_gain;              /**< Ganancia de banda base (VGA) en pasos de 2 dB (0-62 dB). */
+    int ppm_error;             /**< Corrección de error de frecuencia en partes por millón (PPM). */
 } SDR_cfg_t;
 
 /**

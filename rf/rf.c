@@ -218,13 +218,15 @@ int recover_hackrf(void) {
  * @param[in] am_depth Profundidad de modulación AM calculada.
  * @param[in] fm_dev Desviación de frecuencia FM calculada.
  */
-void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, int rf_mode, float am_depth, float fm_dev) {
+void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, uint64_t original_center_freq, int rf_mode, float am_depth, float fm_dev) {
     if (!zmq_channel || !psd_array || length <= 0) return;
     
     cJSON *root = cJSON_CreateObject();
     double fs = local_hack->sample_rate;
-    double start_freq = (double)local_hack->center_freq - (fs / 2.0);
-    double end_freq   = (double)local_hack->center_freq + (fs / 2.0);
+    /* Use original center_freq (without PPM correction) for frequency labels.
+       This ensures the payload reports nominal frequencies, not corrected ones. */
+    double start_freq = (double)original_center_freq - (fs / 2.0);
+    double end_freq   = (double)original_center_freq + (fs / 2.0);
     
     cJSON_AddNumberToObject(root, "start_freq_hz", start_freq);
     cJSON_AddNumberToObject(root, "end_freq_hz", end_freq);
@@ -629,7 +631,8 @@ int main() {
         bool needs_tune = (local_hack.center_freq != current_hw_cfg.center_freq ||
                            local_hack.sample_rate != current_hw_cfg.sample_rate ||
                            local_hack.lna_gain    != current_hw_cfg.lna_gain    ||
-                           local_hack.vga_gain    != current_hw_cfg.vga_gain);
+                           local_hack.vga_gain    != current_hw_cfg.vga_gain    ||
+                           local_hack.ppm_error   != current_hw_cfg.ppm_error);
 
         if (needs_tune) {
             printf("[HAL] Tuning: %" PRIu64 " Hz | LNA: %u | VGA: %u\n", 
@@ -718,7 +721,7 @@ int main() {
                 if (freq && psd) {
                     if (local_desired.filter_enabled) {
                         chan_filter_apply_inplace_abs(sig, &local_desired.filter_cfg, 
-                                                      local_hack.center_freq, local_hack.sample_rate);
+                                                      local_hack.center_freq_corrected, local_hack.sample_rate);
                     }
 
                     // [PATCH D START: Rate Limit PSD to ~20Hz]
@@ -741,10 +744,14 @@ int main() {
                             psd, 
                             local_psd.nperseg, 
                             &local_hack, 
+                            local_desired.center_freq,
                             (int)local_desired.rf_mode, 
                             audio_ctx.am_depth.depth_ema, 
                             audio_ctx.fm_dev.dev_ema_hz
                         );
+                        
+                        printf("[RF_PSD] Acquisition | PPM Error: %d | Fc: %" PRIu64 " Hz\n", 
+                               local_hack.ppm_error, local_hack.center_freq);
                         
                         clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
                     }

@@ -22,6 +22,8 @@ def refine_peak(f, p):
     return f[k] + 0.5 * (y1 - y3) / d * (f[1] - f[0])
 
 def main():
+    shm = ShmStore()
+
     subprocess.run([
         "hackrf_transfer", "-f", str(FC), "-s", str(SR), 
         "-n", str(SR), "-a", "1", "-l", "32", "-g", "32", "-r", IQ_FILE
@@ -122,6 +124,10 @@ def main():
     log.info("Suggested correction to apply:")
     log.info(f"  Frequency shift to apply        : {-fine_offset:+.3f} Hz")
     log.info(f"  Approximate ppm adjustment      : {sug_ppm:+.6f} ppm")
+
+    ppm_to_store = int(round(sug_ppm))
+    shm.update_from_dict({"ppm_error": ppm_to_store, "last_kal_ms": cfg.get_time_ms()})
+    log.info(f"Persisted calibration in shm: ppm_error={ppm_to_store}")
 
 if __name__ == "__main__":
     main()

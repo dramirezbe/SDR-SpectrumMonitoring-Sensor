@@ -20,6 +20,7 @@ import time
 import fcntl
 from typing import Any 
 from typing import Optional
+from typing import Callable
 
 # Configuración del logger local
 log = logging.getLogger(__name__)
@@ -130,12 +131,45 @@ class ShmStore:
         Args:
             data (dict): Diccionario de datos a persistir.
         """
-        with open(self.filepath, 'w') as f:
+        with open(self.filepath, 'a+') as f:
             fcntl.flock(f, fcntl.LOCK_EX) # Bloqueo exclusivo
             try:
+                f.seek(0)
+                f.truncate(0)
                 json.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno()) # Persistencia inmediata en RAM
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+    def _update_file(self, updater: Callable[[dict], None]):
+        """
+        Aplica una actualización read-modify-write bajo un único lock exclusivo.
+
+        Evita condiciones de carrera entre múltiples procesos que actualicen
+        claves distintas casi al mismo tiempo.
+
+        Args:
+            updater (Callable[[dict], None]): Función que muta el diccionario actual.
+        """
+        with open(self.filepath, 'a+') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                try:
+                    current_data = json.load(f)
+                    if not isinstance(current_data, dict):
+                        current_data = {}
+                except (json.JSONDecodeError, ValueError):
+                    current_data = {}
+
+                updater(current_data)
+
+                f.seek(0)
+                f.truncate(0)
+                json.dump(current_data, f)
+                f.flush()
+                os.fsync(f.fileno())
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
@@ -147,9 +181,10 @@ class ShmStore:
             key (str): Nombre de la clave.
             value (Any): Valor a almacenar.
         """
-        current_data = self._read_file()
-        current_data[key] = value
-        self._write_file(current_data)
+        def _setter(current_data: dict):
+            current_data[key] = value
+
+        self._update_file(_setter)
 
     def consult_persistent(self, key: str) -> Optional[Any]:
         """
@@ -171,10 +206,13 @@ class ShmStore:
         Args:
             data_dict (dict): Conjunto de pares clave-valor a actualizar.
         """
-        current_data = self._read_file()
-        if isinstance(data_dict, dict):
+        if not isinstance(data_dict, dict):
+            return
+
+        def _merger(current_data: dict):
             current_data.update(data_dict)
-        self._write_file(current_data)
+
+        self._update_file(_merger)
 
     def clear_persistent(self):
         """Limpia todo el almacenamiento, dejándolo como un objeto vacío `{}`."""
