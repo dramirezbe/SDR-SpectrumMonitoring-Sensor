@@ -2,16 +2,21 @@
 
 import sys
 import numpy as np
-import pyqtgraph as pg
 from scipy.signal import find_peaks  # Añadido
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import QTimer
 
-from UI import PSDLiveUI
-
 
 def main() -> int:
     app = QApplication(sys.argv)
+    print(f"[PSD_LIVE_UI] python={sys.executable}")
+
+    import pyqtgraph as pg
+
+    # Import after QApplication creation to avoid any accidental QWidget
+    # construction during module import side effects.
+    from UI import PSDLiveUI
+
     window = PSDLiveUI()
 
     psd_curve = window.plot_widget.plot(pen=pg.mkPen(color="y", width=1.5), name="PSD")

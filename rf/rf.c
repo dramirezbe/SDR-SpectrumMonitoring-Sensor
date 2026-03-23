@@ -703,6 +703,26 @@ int main() {
         }
 
         // --- 5. PROCESSING WITH SAFETY CHECKS ---
+        // With smaller IQ chunks, this loop runs more often.
+        // Watchdog cadence: publish PSD at most once per second.
+        static struct timespec last_psd_run = {0};
+        struct timespec now_psd;
+        clock_gettime(CLOCK_MONOTONIC, &now_psd);
+
+        double time_diff = (now_psd.tv_sec - last_psd_run.tv_sec) +
+                           (now_psd.tv_nsec - last_psd_run.tv_nsec) / 1e9;
+
+        // Watchdog pacing without dropping request/response:
+        // if less than 1 second has elapsed, wait only the remaining time,
+        // then continue processing this same request.
+        if (time_diff < 1.0) {
+            double remaining_s = 1.0 - time_diff;
+            useconds_t remaining_us = (useconds_t)(remaining_s * 1000000.0);
+            if (remaining_us > 0) {
+                usleep(remaining_us);
+            }
+        }
+
         int8_t* linear_buffer = malloc(local_rb.total_bytes);
         if (linear_buffer) {
             size_t buf_bytes = local_rb.total_bytes;
@@ -711,6 +731,7 @@ int main() {
             fprintf(stderr, "[RF] linear_buffer: %zu bytes (%zu IQ points), %.3f MB; PSD nperseg=%d\n",
                     buf_bytes, iq_points, buf_mb, local_psd.nperseg);
             rb_read(&rb, linear_buffer, local_rb.total_bytes);
+
             signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb.total_bytes);
             
             if (sig) {
@@ -724,37 +745,26 @@ int main() {
                                                       local_hack.center_freq_corrected, local_hack.sample_rate);
                     }
 
-                    // [PATCH D START: Rate Limit PSD to ~20Hz]
-                    static struct timespec last_psd_run = {0};
-                    struct timespec now_psd;
-                    clock_gettime(CLOCK_MONOTONIC, &now_psd);
-                    
-                    double time_diff = (now_psd.tv_sec - last_psd_run.tv_sec) + 
-                                       (now_psd.tv_nsec - last_psd_run.tv_nsec) / 1e9;
-
-                    // Only calculate and publish if > 50ms has passed
-                    if (time_diff > 0.05) { 
-                        if (local_desired.method_psd == PFB) {
-                            execute_pfb_psd(sig, &local_psd, freq, psd);
-                        } else {
-                            execute_welch_psd(sig, &local_psd, freq, psd);
-                        }
-                        
-                        publish_results(
-                            psd, 
-                            local_psd.nperseg, 
-                            &local_hack, 
-                            local_desired.center_freq,
-                            (int)local_desired.rf_mode, 
-                            audio_ctx.am_depth.depth_ema, 
-                            audio_ctx.fm_dev.dev_ema_hz
-                        );
-                        
-                        printf("[RF_PSD] Acquisition | PPM Error: %d | Fc: %" PRIu64 " Hz\n", 
-                               local_hack.ppm_error, local_hack.center_freq);
-                        
-                        clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
+                    if (local_desired.method_psd == PFB) {
+                        execute_pfb_psd(sig, &local_psd, freq, psd);
+                    } else {
+                        execute_welch_psd(sig, &local_psd, freq, psd);
                     }
+
+                    publish_results(
+                        psd,
+                        local_psd.nperseg,
+                        &local_hack,
+                        local_desired.center_freq,
+                        (int)local_desired.rf_mode,
+                        audio_ctx.am_depth.depth_ema,
+                        audio_ctx.fm_dev.dev_ema_hz
+                    );
+
+                    printf("[RF_PSD] Acquisition | PPM Error: %d | Fc: %" PRIu64 " Hz\n",
+                           local_hack.ppm_error, local_hack.center_freq);
+
+                    clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
                 } else {
                     fprintf(stderr, "[RF] Error: PSD buffer allocation failed.\n");
                 }

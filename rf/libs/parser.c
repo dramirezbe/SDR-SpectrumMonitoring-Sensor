@@ -228,12 +228,12 @@ void print_config_summary_DEPLOY(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *
 
     // Line 2: DSP, Windowing, Buffer, and Filter Range
     // Format: Method | RBW | Overlap | Window Name | Buffer Size | Filter Range
-    printf("      %s | RBW:%d | OVP:%.0f%% | WIN:%s | BUF:%zuMB",
+        printf("      %s | RBW:%d | OVP:%.0f%% | WIN:%s | BUF:%.3fMB",
            p_m[des->method_psd % 2],
            des->rbw,
            des->overlap * 100.0,
            w_n[psd->window_type % 8],
-           rb->total_bytes / (1024 * 1024));
+            (double)rb->total_bytes / (1024.0 * 1024.0));
 
     if (des->filter_enabled) {
         printf(" | FILT:%d-%dHz\n", 

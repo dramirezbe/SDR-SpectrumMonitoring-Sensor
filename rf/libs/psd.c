@@ -269,8 +269,17 @@ int find_params_psd(DesiredCfg_t desired, SDR_cfg_t *hack_cfg, PsdConfig_t *psd_
         hack_cfg->center_freq_corrected = (uint64_t)((double)desired.center_freq * correction);
     }
 
-    // Default to ~1 second of data if not specified
-    rb_cfg->total_bytes = (size_t)(desired.sample_rate * 2);
+    // Target smaller IQ chunk for lower latency/load.
+    // Use Fs/4 bytes as requested, but keep coherence with PSD needs:
+    // - Ensure at least one FFT segment worth of interleaved IQ bytes.
+    // - Ensure an even number of bytes (I,Q pairs).
+    const double target_chunk_bytes = desired.sample_rate / 4.0;
+    size_t min_chunk_bytes = (size_t)psd_cfg->nperseg * 2U;
+    if (min_chunk_bytes < 2048U) min_chunk_bytes = 2048U;
+
+    rb_cfg->total_bytes = (size_t)target_chunk_bytes;
+    if (rb_cfg->total_bytes < min_chunk_bytes) rb_cfg->total_bytes = min_chunk_bytes;
+    if (rb_cfg->total_bytes & 1U) rb_cfg->total_bytes += 1U;
     return 0;
 }
 
@@ -437,23 +446,67 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     // Reset Output
     memset(p_out, 0, nfft * sizeof(double));
 
+    /*
+     * FFTW plan cache (thread-local):
+     * - Reuse plan/buffers across calls to reduce planning overhead and CPU heat.
+     * - Watchdog: if nfft changes, rebuild only for that worker thread.
+     */
+    static __thread int tl_welch_nfft = 0;
+    static __thread double complex* tl_welch_in = NULL;
+    static __thread double complex* tl_welch_out = NULL;
+    static __thread fftw_plan tl_welch_plan = NULL;
+
     // Welch Averaging Loop - Parallelized
     #pragma omp parallel
     {
-        // Thread-local FFT arrays
-        double complex* local_fft_in = fftw_alloc_complex(nfft);
-        double complex* local_fft_out = fftw_alloc_complex(nfft);
-        fftw_plan local_plan;
+        // Per-thread watchdog: rebuild plan only when FFT size changes
+        if (tl_welch_plan == NULL || tl_welch_nfft != nfft) {
+            #pragma omp critical(fftw_welch_plan_guard)
+            {
+                if (tl_welch_plan) {
+                    fftw_destroy_plan(tl_welch_plan);
+                    tl_welch_plan = NULL;
+                }
+                if (tl_welch_in) {
+                    fftw_free(tl_welch_in);
+                    tl_welch_in = NULL;
+                }
+                if (tl_welch_out) {
+                    fftw_free(tl_welch_out);
+                    tl_welch_out = NULL;
+                }
 
-        // FFTW planning must be isolated
-        #pragma omp critical
-        {
-            local_plan = fftw_plan_dft_1d(nfft, local_fft_in, local_fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
+                tl_welch_in = fftw_alloc_complex(nfft);
+                tl_welch_out = fftw_alloc_complex(nfft);
+                if (tl_welch_in && tl_welch_out) {
+                    tl_welch_plan = fftw_plan_dft_1d(nfft, tl_welch_in, tl_welch_out, FFTW_FORWARD, FFTW_ESTIMATE);
+                }
+
+                if (!tl_welch_plan) {
+                    if (tl_welch_in) {
+                        fftw_free(tl_welch_in);
+                        tl_welch_in = NULL;
+                    }
+                    if (tl_welch_out) {
+                        fftw_free(tl_welch_out);
+                        tl_welch_out = NULL;
+                    }
+                    tl_welch_nfft = 0;
+                } else {
+                    tl_welch_nfft = nfft;
+                }
+            }
         }
+
+        double complex* local_fft_in = tl_welch_in;
+        double complex* local_fft_out = tl_welch_out;
+        fftw_plan local_plan = tl_welch_plan;
 
         // [PATCH C] Use dynamic scheduling to handle load imbalance
         #pragma omp for schedule(dynamic, 1)
         for (int k = 0; k < k_segments; k++) {
+            if (!local_plan || !local_fft_in || !local_fft_out) continue;
+
             size_t start = k * step;
             
             for (int i = 0; i < nperseg; i++) {
@@ -475,13 +528,6 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
                 p_out[i] += mag2;
             }
         }
-
-        #pragma omp critical
-        {
-            fftw_destroy_plan(local_plan);
-        }
-        fftw_free(local_fft_in);
-        fftw_free(local_fft_out);
     }
 
     // Normalization
@@ -585,6 +631,16 @@ void execute_pfb_psd(
 
     memset(p_out, 0, M * sizeof(double));
 
+    /*
+     * FFTW plan cache (thread-local):
+     * - Reuse plan/buffers across calls to reduce planning overhead and CPU heat.
+     * - Watchdog: if M (FFT size) changes, rebuild only for that worker thread.
+     */
+    static __thread int tl_pfb_m = 0;
+    static __thread double complex* tl_pfb_in = NULL;
+    static __thread double complex* tl_pfb_out = NULL;
+    static __thread fftw_plan tl_pfb_plan = NULL;
+
     // -------------------------------------------------
     // Prototype filter
     // -------------------------------------------------
@@ -609,20 +665,54 @@ void execute_pfb_psd(
 
     #pragma omp parallel
     {
-        // Thread-local FFT buffers to prevent data corruption
-        double complex* local_fft_in  = fftw_alloc_complex(M);
-        double complex* local_fft_out = fftw_alloc_complex(M);
-        fftw_plan local_plan;
+        // Per-thread watchdog: rebuild plan only when FFT size changes
+        if (tl_pfb_plan == NULL || tl_pfb_m != M) {
+            #pragma omp critical(fftw_pfb_plan_guard)
+            {
+                if (tl_pfb_plan) {
+                    fftw_destroy_plan(tl_pfb_plan);
+                    tl_pfb_plan = NULL;
+                }
+                if (tl_pfb_in) {
+                    fftw_free(tl_pfb_in);
+                    tl_pfb_in = NULL;
+                }
+                if (tl_pfb_out) {
+                    fftw_free(tl_pfb_out);
+                    tl_pfb_out = NULL;
+                }
 
-        // FFTW planning is not thread-safe by default, must be isolated
-        #pragma omp critical
-        {
-            local_plan = fftw_plan_dft_1d(M, local_fft_in, local_fft_out, FFTW_FORWARD, FFTW_ESTIMATE);
+                tl_pfb_in = fftw_alloc_complex(M);
+                tl_pfb_out = fftw_alloc_complex(M);
+                if (tl_pfb_in && tl_pfb_out) {
+                    tl_pfb_plan = fftw_plan_dft_1d(M, tl_pfb_in, tl_pfb_out, FFTW_FORWARD, FFTW_ESTIMATE);
+                }
+
+                if (!tl_pfb_plan) {
+                    if (tl_pfb_in) {
+                        fftw_free(tl_pfb_in);
+                        tl_pfb_in = NULL;
+                    }
+                    if (tl_pfb_out) {
+                        fftw_free(tl_pfb_out);
+                        tl_pfb_out = NULL;
+                    }
+                    tl_pfb_m = 0;
+                } else {
+                    tl_pfb_m = M;
+                }
+            }
         }
+
+        double complex* local_fft_in  = tl_pfb_in;
+        double complex* local_fft_out = tl_pfb_out;
+        fftw_plan local_plan = tl_pfb_plan;
 
         // [PATCH C] Use dynamic scheduling to handle load imbalance
         #pragma omp for schedule(dynamic, 1)
         for (int b = 0; b < blocks; b++) {
+            if (!local_plan || !local_fft_in || !local_fft_out) continue;
+
             memset(local_fft_in, 0, M * sizeof(double complex));
 
             for (int t = 0; t < T; t++) {
@@ -643,13 +733,6 @@ void execute_pfb_psd(
                 p_out[k] += mag2;
             }
         }
-
-        #pragma omp critical
-        {
-            fftw_destroy_plan(local_plan);
-        }
-        fftw_free(local_fft_in);
-        fftw_free(local_fft_out);
     }
 
     // -------------------------------------------------
