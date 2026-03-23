@@ -38,7 +38,7 @@ void audio_stream_ctx_defaults(audio_stream_ctx_t *ctx, fm_radio_t *fm, am_radio
 
     // init current mode / fs (will be updated by main on first config)
     atomic_store(&ctx->current_mode, (int)FM_MODE);
-    atomic_store(&ctx->current_fs_hz, 2000000.0);
+    atomic_store(&ctx->current_fs_hz, 0.0);
 
     // init FM deviation state (already zero via memset, but explicit is ok)
     memset(&ctx->fm_dev, 0, sizeof(ctx->fm_dev));

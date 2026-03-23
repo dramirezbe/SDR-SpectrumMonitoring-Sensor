@@ -36,6 +36,11 @@
 typedef struct {
     double _Complex prev_sample; /**< Almacena la muestra anterior para el cálculo de \f$ \Delta\phi \f$. */
 
+    double _Complex iq_acc;      /**< Acumulador complejo para pre-diezmado IQ. */
+    int pre_decim_factor;        /**< Factor de pre-diezmado IQ antes del discriminador FM. */
+    int pre_samples_in_acc;      /**< Contador de muestras acumuladas para pre-diezmado. */
+    double demod_fs_hz;          /**< Tasa efectiva de demodulación tras pre-diezmado. */
+
     double audio_acc;           /**< Acumulador para diezmado. */
     int samples_in_acc;         /**< Contador de muestras acumuladas. */
     int decim_factor;           /**< Factor de diezmado \f$ M = f_{in} / f_{out} \f$. */

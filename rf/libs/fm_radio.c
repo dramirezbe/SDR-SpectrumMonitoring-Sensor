@@ -121,12 +121,24 @@ void fm_radio_init(fm_radio_t *radio, double fs, int audio_fs, int deemph_us) {
     if (!radio) return;
 
     radio->prev_sample = 1.0 + 0.0*I;
+    radio->iq_acc = 0.0 + 0.0*I;
+    radio->pre_samples_in_acc = 0;
     radio->audio_acc = 0;
     radio->samples_in_acc = 0;
     radio->deemph_acc = 0;
     radio->gain = 60000.0f;
 
-    radio->decim_factor = (int)llround(fs / (double)audio_fs);
+    // Pre-diezmado IQ dinámico para mantener el discriminador FM en una
+    // tasa intermedia estable (evita que dphi sea demasiado pequeño a Fs altas).
+    // 500 kS/s conserva canal FM ancho (Nyquist 250 kHz) con BW IQ típica 200 kHz.
+    const double target_demod_fs_hz = 500000.0;
+    radio->pre_decim_factor = (int)llround(fs / target_demod_fs_hz);
+    if (radio->pre_decim_factor < 1) radio->pre_decim_factor = 1;
+
+    radio->demod_fs_hz = fs / (double)radio->pre_decim_factor;
+    if (!(radio->demod_fs_hz > 0.0)) radio->demod_fs_hz = fs;
+
+    radio->decim_factor = (int)llround(radio->demod_fs_hz / (double)audio_fs);
     if (radio->decim_factor < 1) radio->decim_factor = 1;
 
     float tau = (float)deemph_us * 1e-6f;
@@ -156,12 +168,23 @@ int fm_radio_iq_to_pcm(fm_radio_t *radio, signal_iq_t *sig, int16_t *pcm_out,
     int out_idx = 0;
 
     for (size_t i = 0; i < sig->n_signal; i++) {
-        // 1) FM demod: phase difference
-        double complex diff = sig->signal_iq[i] * conj(radio->prev_sample);
-        double angle = atan2(cimag(diff), creal(diff));
-        radio->prev_sample = sig->signal_iq[i];
+        // 1) IQ pre-decimation by averaging (simple anti-noise stage)
+        radio->iq_acc += sig->signal_iq[i];
+        radio->pre_samples_in_acc++;
+        if (radio->pre_samples_in_acc < radio->pre_decim_factor) {
+            continue;
+        }
 
-        // 2) crude decimation: accumulate then average
+        double complex x = radio->iq_acc / (double)radio->pre_samples_in_acc;
+        radio->iq_acc = 0.0 + 0.0*I;
+        radio->pre_samples_in_acc = 0;
+
+        // 2) FM demod: phase difference
+        double complex diff = x * conj(radio->prev_sample);
+        double angle = atan2(cimag(diff), creal(diff));
+        radio->prev_sample = x;
+
+        // 3) decimation to audio: accumulate then average
         radio->audio_acc += angle;
         radio->samples_in_acc++;
 
@@ -172,7 +195,9 @@ int fm_radio_iq_to_pcm(fm_radio_t *radio, signal_iq_t *sig, int16_t *pcm_out,
 
             // --- FM excursion metrics (using decimated avg phase diff) ---
             if (dev_st) {
-                update_fm_deviation_ctx(dev_st, val, fs_demod);
+                int eff_fs_demod = (int)llround(radio->demod_fs_hz);
+                if (eff_fs_demod <= 0) eff_fs_demod = fs_demod;
+                update_fm_deviation_ctx(dev_st, val, eff_fs_demod);
             }
 
             // 3) de-emphasis

@@ -142,6 +142,31 @@ static inline void msleep_int(int ms) {
 }
 
 /**
+ * @brief Resuelve la frecuencia de muestreo IQ para demodulación en tiempo de ejecución.
+ * @details Prioriza el valor atómico actualizado por el hilo principal con la configuración
+ * activa de HackRF. Si aún no está disponible, reconstruye la tasa a partir del estado
+ * del demodulador (decimation_factor * audio_fs), evitando asumir 2 MS/s fijos.
+ */
+static inline double resolve_demod_fs_hz(const audio_stream_ctx_t *ctx, int mode) {
+    if (!ctx) return (double)AUDIO_FS;
+
+    double fs_hz = atomic_load(&ctx->current_fs_hz);
+    if (fs_hz > 0.0) return fs_hz;
+
+    int audio_fs = (ctx->opus_sample_rate > 0) ? ctx->opus_sample_rate : AUDIO_FS;
+
+    if (mode == AM_MODE && ctx->am_radio && ctx->am_radio->decim_factor > 0) {
+        return (double)ctx->am_radio->decim_factor * (double)audio_fs;
+    }
+
+    if (ctx->fm_radio && ctx->fm_radio->decim_factor > 0) {
+        return (double)ctx->fm_radio->decim_factor * (double)audio_fs;
+    }
+
+    return (double)audio_fs;
+}
+
+/**
  * @brief Manejador de señales para SIGINT (Ctrl+C).
  * @details Cambia la bandera global @ref keep_running a falso para iniciar un apagado controlado.
  * @param[in] sig El número de señal (ignorado).
@@ -386,8 +411,7 @@ void* audio_thread_fn(void* arg) {
 
         // Read current mode/fs (set by main thread)
         int mode = atomic_load(&ctx->current_mode);
-        double fs_hz = atomic_load(&ctx->current_fs_hz);
-        if (fs_hz <= 0.0) fs_hz = 2000000.0;
+        double fs_hz = resolve_demod_fs_hz(ctx, mode);
 
         // ===== IQ CHANNEL FILTER =====
         if (IQ_FILTER_ENABLE) {
