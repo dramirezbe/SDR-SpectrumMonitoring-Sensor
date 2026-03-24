@@ -248,528 +248,203 @@ class AcquireDual:
         self.MAX_HALF_WIDTH = 20
         self.SUPPORT_BINS = 10
         self.POLY_DEGREE = 2
-
-    def _classify_spectral_occupancy(
-        self,
-        power_dbm: np.ndarray,
-        contrast_threshold_db: float = 6.0,
-        occupancy_fraction_threshold: float = 0.08,
-        peak_margin_db: float = 8.0
-    ):
-        """
-        Clasifica la PSD en dos regímenes:
-        - 'occupied': hay emisiones visibles / estructura espectral
-        - 'low_occupancy': espectro casi vacío o dominado por ruido
-    
-        La decisión se toma con métricas robustas basadas en percentiles.
-    
-        Parámetros
-        ----------
-        power_dbm : np.ndarray
-            PSD en dBm.
-        contrast_threshold_db : float
-            Umbral mínimo de contraste robusto para considerar que hay ocupación.
-        occupancy_fraction_threshold : float
-            Fracción mínima de bins significativamente por encima del piso de ruido.
-        peak_margin_db : float
-            Margen sobre la mediana para contar bins "ocupados".
-    
-        Retorna
-        -------
-        mode : str
-            'occupied' o 'low_occupancy'
-        metrics : dict
-            Métricas diagnósticas calculadas.
-        """
-        x = np.asarray(power_dbm, dtype=float)
-        N = len(x)
-    
-        if N < 16:
-            return "low_occupancy", {
-                "p10_dbm": float(np.median(x)) if N > 0 else 0.0,
-                "p50_dbm": float(np.median(x)) if N > 0 else 0.0,
-                "p90_dbm": float(np.median(x)) if N > 0 else 0.0,
-                "contrast_db": 0.0,
-                "occupancy_fraction": 0.0,
-                "decision": "low_occupancy_small_array"
-            }
-    
-        # Percentiles robustos
-        p10 = np.percentile(x, 10)
-        p50 = np.percentile(x, 50)
-        p90 = np.percentile(x, 90)
-        p95 = np.percentile(x, 95)
-    
-        # Contraste robusto del espectro
-        contrast_db = p95 - p50
-    
-        # Estimación de ocupación:
-        # bins que están claramente por encima del piso central del espectro
-        occupied_mask = x > (p50 + peak_margin_db)
-        occupancy_fraction = np.mean(occupied_mask)
-    
-        # Decisión:
-        # si hay suficiente contraste o suficiente fracción ocupada, asumimos emisiones
-        if (contrast_db >= contrast_threshold_db) or (occupancy_fraction >= occupancy_fraction_threshold):
-            mode = "occupied"
-            decision = "occupied_by_contrast_or_fraction"
-        else:
-            mode = "low_occupancy"
-            decision = "low_occupancy_flat_spectrum"
-    
-        metrics = {
-            "p10_dbm": float(p10),
-            "p50_dbm": float(p50),
-            "p90_dbm": float(p90),
-            "p95_dbm": float(p95),
-            "contrast_db": float(contrast_db),
-            "occupancy_fraction": float(occupancy_fraction),
-            "decision": decision
-        }
-    
-        return mode, metrics
-
-    def _moving_average_edge(self, x: np.ndarray, window: int) -> np.ndarray:
-        """
-        Media móvil con padding en bordes para mantener el mismo tamaño.
-        """
-        x = np.asarray(x, dtype=float)
-
-        if window < 3:
-            return x.copy()
-
-        if window % 2 == 0:
-            window += 1
-
-        pad = window // 2
-        xpad = np.pad(x, pad_width=pad, mode="edge")
-        kernel = np.ones(window, dtype=float) / window
-        y = np.convolve(xpad, kernel, mode="same")
-        return y[pad:-pad]
-    
-    def _robust_mad(self, x: np.ndarray) -> float:
-        """
-        Estimador robusto de dispersión basado en MAD.
-        """
-        x = np.asarray(x, dtype=float)
-        med = np.median(x)
-        mad = np.median(np.abs(x - med))
-        return 1.4826 * mad
-    
-    def _remove_dc_spike_adaptive(
-        self,
-        power_dbm: np.ndarray,
-        baseline_window: int,
-        threshold_scale: float,
-        max_search_bins: int,
-        expansion_factor: float,
-        min_half_width: int,
-        max_half_width: int,
-        support_bins: int,
-        poly_degree: int,
-        noise_std_db: float
-    ):
-        """
-        Corrige el DC spike en el centro de la PSD usando:
-        1) detección adaptativa del ancho del artefacto
-        2) expansión moderada de la región detectada
-        3) reconstrucción suave por ajuste polinómico local
-
-        Retorna
-        -------
-        x_filtered : np.ndarray
-            PSD corregida.
-        center_idx : int
-            Índice del bin central.
-        repair_slice : tuple[int, int]
-            (i0, i1) región corregida.
-        baseline : np.ndarray
-            Fondo local estimado.
-        residual : np.ndarray
-            Residuo respecto al fondo local.
-        """
-        x = np.asarray(power_dbm, dtype=float).copy()
-        N = len(x)
-        center_idx = N // 2
-
-        # Verificación de tamaño mínimo del espectro
-        if self._check_spectrum_size(N, support_bins, max_half_width):
-            return x.copy(), center_idx, (center_idx, center_idx), x.copy(), np.zeros_like(x)
-
-        # 1) Fondo local y residual
-        baseline = self._moving_average_edge(x, baseline_window)
-        residual = x - baseline
-
-        # 2) Detección adaptativa del ancho del artefacto
-        detected_half_width = self._detect_artifact_width(
-            residual, center_idx, max_search_bins, min_half_width,
-            threshold_scale
-        )
-
-        # 3) Expansión de la región detectada
-        expanded_half_width = self._expand_detected_region(
-            detected_half_width, expansion_factor, min_half_width, max_half_width
-        )
-
-        # 4) Definición de regiones de soporte y reparación
-        i0, i1, left_support, right_support = self._define_support_regions(
-            center_idx, expanded_half_width, support_bins, N
-        )
-
-        # Verificar si hay soporte suficiente
-        if left_support[0] < 0 or right_support[1] >= N:
-            return x.copy(), center_idx, (i0, i1), baseline, residual
-
-        # 5) Reconstrucción polinómica
-        x_filtered = self._polynomial_reconstruction(
-            x, center_idx, i0, i1, left_support, right_support, poly_degree,noise_std_db=noise_std_db
-        )
-
-        return x_filtered, center_idx, (i0, i1), baseline, residual
-
-
-    def _check_spectrum_size(self, N: int, support_bins: int, max_half_width: int) -> bool:
-        """Verifica si el espectro tiene tamaño suficiente para la corrección."""
-        return N < 2 * support_bins + 2 * max_half_width + 5
-
-
-    def _detect_artifact_width(
-        self,
-        residual: np.ndarray,
-        center_idx: int,
-        max_search_bins: int,
-        min_half_width: int,
-        threshold_scale: float
-    ) -> int:
-        """
-        Detecta el ancho del artefacto basado en el umbral adaptativo.
-        
-        Parameters
-        ----------
-        residual : np.ndarray
-            Residuo respecto al fondo local.
-        center_idx : int
-            Índice del bin central.
-        max_search_bins : int
-            Máxima distancia de búsqueda desde el centro.
-        min_half_width : int
-            Ancho mínimo a considerar.
-        threshold_scale : float
-            Escala del umbral (multiplica la desviación robusta).
-        
-        Returns
-        -------
-        detected_half_width : int
-            Semi-ancho detectado del artefacto.
-        """
-        N = len(residual)
-        
-        # Región local para calcular umbral
-        local_left = max(0, center_idx - max_search_bins)
-        local_right = min(N, center_idx + max_search_bins + 1)
-        residual_local = residual[local_left:local_right]
-        
-        # Cálculo del umbral robusto
-        sigma_r = self._robust_mad(residual_local)
-        sigma_r = max(sigma_r, 0.15)
-        threshold = threshold_scale * sigma_r
-        
-        # Detección del ancho
-        center_amp = abs(residual[center_idx])
-        
-        if center_amp < threshold:
-            detected_half_width = min_half_width
-        else:
-            # Expandir hacia la izquierda
-            left = center_idx
-            while left > max(0, center_idx - max_search_bins):
-                if abs(residual[left - 1]) >= threshold:
-                    left -= 1
-                else:
-                    break
-            
-            # Expandir hacia la derecha
-            right = center_idx
-            while right < min(N - 1, center_idx + max_search_bins):
-                if abs(residual[right + 1]) >= threshold:
-                    right += 1
-                else:
-                    break
-            
-            detected_half_width = max(center_idx - left, right - center_idx)
-            detected_half_width = max(detected_half_width, min_half_width)
-        
-        return detected_half_width
-
-
-    def _expand_detected_region(
-        self,
-        detected_half_width: int,
-        expansion_factor: float,
-        min_half_width: int,
-        max_half_width: int
-    ) -> int:
-        """
-        Expande la región detectada según el factor de expansión.
-        
-        Returns
-        -------
-        expanded_half_width : int
-            Semi-ancho expandido de la región a corregir.
-        """
-        expanded_half_width = int(np.ceil(expansion_factor * detected_half_width))
-        expanded_half_width = max(expanded_half_width, min_half_width)
-        expanded_half_width = min(expanded_half_width, max_half_width)
-        
-        return expanded_half_width
-
-
-    def _define_support_regions(
-        self,
-        center_idx: int,
-        half_width: int,
-        support_bins: int,
-        N: int
-    ) -> tuple:
-        """
-        Define las regiones de soporte y la región a reparar.
-        
-        Returns
-        -------
-        i0, i1 : int, int
-            Índices de inicio y fin de la región a reparar.
-        left_support : tuple[int, int]
-            (inicio, fin) de la región de soporte izquierda.
-        right_support : tuple[int, int]
-            (inicio, fin) de la región de soporte derecha.
-        """
-        i0 = center_idx - half_width
-        i1 = center_idx + half_width
-        
-        left_support_start = i0 - support_bins
-        left_support_end = i0 - 1
-        left_support = (left_support_start, left_support_end)
-        
-        right_support_start = i1 + 1
-        right_support_end = i1 + support_bins
-        right_support = (right_support_start, right_support_end)
-        
-        return i0, i1, left_support, right_support
-
-
-    def generate_reconstruction_noise(self, n_samples, noise_std_db=None, rng=None):
-        """
-        Genera ruido aditivo para la reconstrucción en unidades de dB/dBm.
-        """
-        if noise_std_db is None or noise_std_db <= 0.0 or n_samples <= 0:
-            return np.zeros(int(n_samples), dtype=float)
-
-        noise_std_db = float(noise_std_db)
-
-        if rng is None:
-            rng = np.random.default_rng()
-
-        return rng.normal(loc=0.0, scale=noise_std_db, size=int(n_samples))
-
-
-    def _polynomial_reconstruction(
-        self,
-        x: np.ndarray,
-        center_idx: int,
-        i0: int,
-        i1: int,
-        left_support: tuple,
-        right_support: tuple,
-        poly_degree: int,
-        noise_std_db: float,
-        rng: np.random.Generator = None
-    ) -> np.ndarray:
-        """
-        Reconstruye la región del artefacto usando ajuste polinómico
-        basado en los soportes laterales y añade ruido opcional.
-        
-        Parameters
-        ----------
-        x : np.ndarray
-            Señal original.
-        center_idx : int
-            Índice del bin central.
-        i0, i1 : int
-            Índices de inicio y fin de la región a reparar.
-        left_support : tuple
-            (inicio, fin) de la región de soporte izquierda.
-        right_support : tuple
-            (inicio, fin) de la región de soporte derecha.
-        poly_degree : int
-            Grado máximo del polinomio.
-        noise_std_db : float, optional
-            Desviación estándar del ruido aditivo en dB.
-        rng : np.random.Generator, optional
-            Generador aleatorio para reproducibilidad.
-        
-        Returns
-        -------
-        x_filtered : np.ndarray
-            Señal con la región del artefacto corregida.
-        """
-        # Índices de soporte
-        left_idx = np.arange(left_support[0], left_support[1] + 1)
-        right_idx = np.arange(right_support[0], right_support[1] + 1)
-        support_idx = np.concatenate([left_idx, right_idx])
-        
-        support_vals = x[support_idx]
-        
-        # Recentrar eje para estabilidad numérica (usando coordenadas absolutas)
-        k_support = support_idx.astype(float)
-        k_repair = np.arange(i0, i1 + 1, dtype=float)
-        
-        # Ajuste polinómico
-        degree = min(poly_degree, len(k_support) - 1)
-        degree = max(degree, 1)  # Asegurar al menos grado 1 si hay suficientes puntos
-        
-        coeffs = np.polyfit(k_support, support_vals, deg=degree)
-        poly = np.poly1d(coeffs)
-        
-        # Reconstrucción
-        reconstructed = poly(k_repair)
-        
-        # Añadir ruido si se especifica
-        if noise_std_db is not None and noise_std_db > 0:
-            noise = self.generate_reconstruction_noise(
-                n_samples=len(reconstructed),
-                noise_std_db=noise_std_db,
-                rng=rng
-            )
-            reconstructed = reconstructed + noise
-        
-        # Aplicar corrección
-        x_filtered = x.copy()
-        x_filtered[i0:i1 + 1] = reconstructed
-        
-        return x_filtered
         
 
     def _apply_dc_correction_to_acquisition(self, acquisition_result):
         """
-        Aplica corrección DC conservando el mismo formato del dict de salida.
-        Se asume que la PSD está en acquisition_result['Pxx'].
-    
-        Mejora:
-        -------
-        Se clasifica la PSD en dos casos:
-        1) 'occupied'       -> espectro con emisiones visibles
-        2) 'low_occupancy'  -> espectro casi vacío / dominado por ruido
-    
-        Según el caso, se ajustan los parámetros del removedor de DC spike.
+        Aplica corrección DC usando el nuevo pipeline adaptativo.
+        Mantiene el mismo formato del dict de salida.
         """
         if not isinstance(acquisition_result, dict):
             raise TypeError("Se esperaba que _single_acquire devolviera un dict.")
-    
+        
         if "Pxx" not in acquisition_result:
             raise KeyError("No se encontró la llave 'Pxx' en acquisition_result.")
-    
+        
+        # Copia profunda para no modificar original
         out = copy.deepcopy(acquisition_result)
-    
         pxx = np.asarray(out["Pxx"], dtype=float)
-
-        if len(pxx) > 16385:
-            NOISE_STD_DB = 0.45
-        elif len(pxx) > 4096:
-            NOISE_STD_DB = 0.20
-        elif len(pxx) > 1024:
-            NOISE_STD_DB = 0.12
-        else:
-            NOISE_STD_DB = 0.06
-    
-        # ---------------------------------------------------------
-        # 0) Clasificar el régimen espectral
-        # ---------------------------------------------------------
-        occupancy_mode, occupancy_metrics = self._classify_spectral_occupancy(
-            pxx,
-            contrast_threshold_db=6.0,
-            occupancy_fraction_threshold=0.08,
-            peak_margin_db=8.0
-        )
-    
-        # ---------------------------------------------------------
-        # 1) Selección adaptativa de parámetros según el régimen
-        # ---------------------------------------------------------
-        if occupancy_mode == "occupied":
-            # Modo normal / conservador:
-            # protege mejor posibles emisiones cercanas al centro
-            baseline_window = self.BASELINE_WINDOW
-            threshold_scale = self.THRESHOLD_SCALE
-            max_search_bins = self.MAX_SEARCH_BINS
-            expansion_factor = self.EXPANSION_FACTOR
-            min_half_width = self.MIN_HALF_WIDTH
-            max_half_width = self.MAX_HALF_WIDTH
-            support_bins = self.SUPPORT_BINS
-            poly_degree = self.POLY_DEGREE
-    
-        else:  # low_occupancy
-            # Modo agresivo:
-            # al haber poco contenido real, conviene ampliar la reparación
-            baseline_window = max(self.BASELINE_WINDOW, 51)
-            threshold_scale = max(2.0, self.THRESHOLD_SCALE - 0.7)
-            max_search_bins = max(self.MAX_SEARCH_BINS, 35)
-            expansion_factor = max(2.0, self.EXPANSION_FACTOR)
-            min_half_width = max(4, self.MIN_HALF_WIDTH)
-            max_half_width = max(28, self.MAX_HALF_WIDTH)
-            support_bins = max(12, self.SUPPORT_BINS)
-            poly_degree = self.POLY_DEGREE
-    
-        # ---------------------------------------------------------
-        # 2) Aplicar remoción adaptativa de DC
-        # ---------------------------------------------------------
-        pxx_filtered, center_idx, repair_slice, baseline, residual = \
-            self._remove_dc_spike_adaptive(
-                power_dbm=pxx,
-                baseline_window=baseline_window,
-                threshold_scale=threshold_scale,
-                max_search_bins=max_search_bins,
-                expansion_factor=expansion_factor,
-                min_half_width=min_half_width,
-                max_half_width=max_half_width,
-                support_bins=support_bins,
-                poly_degree=poly_degree,
-                noise_std_db= NOISE_STD_DB
+        
+        # Determinar noise_std_db basado en tamaño de FFT
+        noise_std_db = self._get_noise_std_db(len(pxx))
+        
+        # Configurar parámetros para la detección de baja ocupación
+        # Estos valores pueden ajustarse según necesidades específicas
+        low_content_params = {
+            "enable_low_content_expansion": True,
+            "low_content_center_fraction": 0.10,
+            "low_content_exclusion_multiplier": 2.5,
+            "low_content_expand_factor": 3.0,
+            "low_content_mean_median_max_diff_db": 0.11,
+            "low_content_high_tail_sigma_factor": 2.5,
+            "low_content_max_high_tail_fraction": 0.025
+        }
+        
+        # Aplicar el nuevo pipeline de remoción de DC spike
+        try:
+            pxx_filtered, center_idx, repair_slice, debug_info = (
+                DCSpikeRemovalPipeline.remove_dc_spike_adaptive_symmetric(
+                    power_dbm=pxx,
+                    analysis_fraction=0.05,  # Fracción centrada para análisis
+                    smooth_window=9,          # Suavizado inicial
+                    slope_smooth_window=7,    # Suavizado para pendientes
+                    support_bins=14,          # Bins laterales para reconstrucción
+                    poly_degree=2,            # Grado del polinomio
+                    min_half_width=2,         # Semi-ancho mínimo
+                    debug=False,              # Deshabilitar debug en producción
+                    noise_std_db=noise_std_db,
+                    **low_content_params
+                )
             )
-    
-        # ---------------------------------------------------------
-        # 3) Determinar si realmente hubo cambio
-        # ---------------------------------------------------------
-        correction_changed = not np.allclose(pxx_filtered, pxx, rtol=0.0, atol=1e-12)
-    
-        # ---------------------------------------------------------
-        # 4) Mantener mismo formato
-        # ---------------------------------------------------------
+            
+            # Determinar si realmente hubo cambio
+            correction_changed = not np.allclose(pxx_filtered, pxx, rtol=0.0, atol=1e-12)
+            
+            # Clasificar el modo de ocupación basado en low_content_info
+            occupancy_mode = self._classify_occupancy_from_debug_info(debug_info)
+            
+            # Extraer métricas de ocupación para diagnóstico
+            occupancy_metrics = self._extract_occupancy_metrics(debug_info, pxx)
+            
+        except Exception as e:
+            # Si falla la corrección, loguear y retornar datos originales
+            self._log.error(f"DC spike removal failed: {e}", exc_info=True)
+            return out
+        
+        # Actualizar resultado manteniendo formato
         out["Pxx_raw"] = out["Pxx"]
         out["Pxx"] = pxx_filtered.tolist()
-    
-        # ---------------------------------------------------------
-        # 5) Diagnóstico
-        # ---------------------------------------------------------
-        out["dc_correction"] = {
+        
+        # Añadir metadatos de corrección
+        out["dc_correction"] = self._build_correction_metadata(
+            correction_changed=correction_changed,
+            occupancy_mode=occupancy_mode,
+            center_idx=center_idx,
+            repair_slice=repair_slice,
+            debug_info=debug_info,
+            params_used={
+                "analysis_fraction": 0.05,
+                "smooth_window": 9,
+                "slope_smooth_window": 7,
+                "support_bins": 14,
+                "poly_degree": 2,
+                "min_half_width": 2,
+                "noise_std_db": noise_std_db,
+                **low_content_params
+            },
+            out=out
+        )
+        
+        return out
+
+    def _get_noise_std_db(self, pxx_length):
+        """
+        Determina la desviación estándar del ruido según el tamaño de FFT.
+        """
+        if pxx_length > 16385:
+            return 0.33
+        elif pxx_length > 4096:
+            return 0.20
+        elif pxx_length > 1024:
+            return 0.12
+        else:
+            return 0.06
+
+    def _classify_occupancy_from_debug_info(self, debug_info):
+        """
+        Clasifica el régimen espectral basado en la información de debug.
+        """
+        low_content_info = debug_info.get("low_content_info", {})
+        
+        # Verificar si se detectó baja ocupación
+        if low_content_info and isinstance(low_content_info, dict):
+            reason = low_content_info.get("reason", "")
+            if reason and "low spectral content" in reason:
+                return "low_occupancy"
+        
+        # Verificar si se aplicó expansión por baja ocupación
+        if debug_info.get("low_content_expansion_applied", False):
+            return "low_occupancy"
+        
+        # Por defecto, considerar como ocupado
+        return "occupied"
+
+    def _extract_occupancy_metrics(self, debug_info, pxx):
+        """
+        Extrae métricas de ocupación para diagnóstico.
+        """
+        low_content_info = debug_info.get("low_content_info", {})
+        detect_info = debug_info.get("detect_info", {})
+        
+        metrics = {
+            "original_detected_half_width": debug_info.get("original_detected_half_width", 0),
+            "final_half_width": debug_info.get("final_half_width", 0),
+            "low_content_expansion_applied": debug_info.get("low_content_expansion_applied", False),
+            "termination_mode": debug_info.get("termination_mode", "unknown"),
+            "reconstruction_mode": debug_info.get("reconstruction_mode", "unknown"),
+            "detection_reason": detect_info.get("reason", "unknown")
+        }
+        
+        # Agregar métricas de baja ocupación si existen
+        if low_content_info:
+            metrics.update({
+                "low_content_reason": low_content_info.get("reason", "N/A"),
+                "mean_minus_median": low_content_info.get("mean_minus_median", None),
+                "high_tail_fraction": low_content_info.get("high_tail_fraction", None)
+            })
+        
+        return metrics
+
+    def _build_correction_metadata(self, correction_changed, occupancy_mode, 
+                                center_idx, repair_slice, debug_info, 
+                                params_used, out):
+        """
+        Construye el diccionario de metadatos de corrección.
+        """
+        # Extraer información relevante del debug_info
+        detect_info = debug_info.get("detect_info", {})
+        low_content_info = debug_info.get("low_content_info", {})
+        
+        metadata = {
             "applied": bool(correction_changed),
             "mode": occupancy_mode,
             "center_idx": int(center_idx),
             "repair_slice": (int(repair_slice[0]), int(repair_slice[1])),
             "start_freq_hz": int(out.get("start_freq_hz", 0)),
             "end_freq_hz": int(out.get("end_freq_hz", 0)),
-            "occupancy_metrics": occupancy_metrics,
-            "params_used": {
-                "baseline_window": int(baseline_window),
-                "threshold_scale": float(threshold_scale),
-                "max_search_bins": int(max_search_bins),
-                "expansion_factor": float(expansion_factor),
-                "min_half_width": int(min_half_width),
-                "max_half_width": int(max_half_width),
-                "support_bins": int(support_bins),
-                "poly_degree": int(poly_degree),
+            "params_used": params_used,
+            
+            # Métricas detalladas del nuevo pipeline
+            "detection_metrics": {
+                "original_half_width": debug_info.get("original_detected_half_width", 0),
+                "final_half_width": debug_info.get("final_half_width", 0),
+                "termination_mode": debug_info.get("termination_mode", "unknown"),
+                "detection_reason": detect_info.get("reason", "unknown"),
+                "peak_value_db": detect_info.get("peak_value_db", None),
+                "peak_snr_db": detect_info.get("peak_snr_db", None)
+            },
+            
+            "reconstruction_metrics": {
+                "reconstruction_mode": debug_info.get("reconstruction_mode", "unknown"),
+                "support_bins_used": params_used.get("support_bins", 14),
+                "poly_degree_used": params_used.get("poly_degree", 2)
+            },
+            
+            "low_content_metrics": {
+                "expansion_applied": debug_info.get("low_content_expansion_applied", False),
+                "expansion_factor": debug_info.get("low_content_expand_factor", 1.0),
+                "reason": low_content_info.get("reason", "N/A") if low_content_info else "N/A"
             }
         }
-    
-        return out
+        
+        # Agregar métricas de baja ocupación si existen
+        if low_content_info:
+            metadata["low_content_metrics"].update({
+                "mean_minus_median": low_content_info.get("mean_minus_median", None),
+                "high_tail_fraction": low_content_info.get("high_tail_fraction", None)
+            })
+        
+        return metadata
 
 
     async def _single_acquire(self, rf_params):
@@ -852,6 +527,10 @@ class AcquireDual:
         data1 = await self._single_acquire(rf_params)
         try:
             data1 = self._apply_dc_correction_to_acquisition(data1)
+            return data1
+
+        except Exception as e:
+            self._log.error(f"Spectral correction failed: {e}")
             return data1
 
         except Exception as e:
