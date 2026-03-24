@@ -20,6 +20,8 @@ import re
 import asyncio
 from copy import deepcopy
 import copy
+from dc_spike_removal import DCSpikeRemovalPipeline
+import pandas as pd
 
 class SysState(Enum):
     """
@@ -465,8 +467,6 @@ class AcquireDual:
         acquisition_result = await self._single_acquire(rf_params)
         return acquisition_result
     
-
-
     async def get_corrected_data(self, rf_params):
         """
         Adquisición con corrección adaptativa de DC spike.
@@ -475,10 +475,6 @@ class AcquireDual:
         data1 = await self._single_acquire(rf_params)
         try:
             data1 = self._apply_dc_correction_to_acquisition(data1)
-            return data1
-
-        except Exception as e:
-            self._log.error(f"Spectral correction failed: {e}")
             return data1
 
         except Exception as e:
