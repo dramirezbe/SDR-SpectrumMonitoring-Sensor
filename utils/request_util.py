@@ -42,11 +42,17 @@ class ServerRealtimeConfig:
     antenna_amp: bool
     antenna_port: int
     ppm_error: int
+    cooldown_request: float = 1.0
     demodulation: Optional[str] = None
     filter: Optional[FilterConfig] = None
 
     def __post_init__(self):
         """Valida las restricciones físicas del hardware SDR."""
+        try:
+            self.cooldown_request = float(self.cooldown_request)
+        except (TypeError, ValueError):
+            raise ValueError(f"cooldown_request {self.cooldown_request} inválido. Debe ser float >= 0.")
+
         # Validación de rango de frecuencia (1MHz a 6GHz)
         if not (1_000_000 <= self.center_freq_hz <= 6_000_000_000):
             if self.center_freq_hz < 1_000_000:
@@ -79,6 +85,9 @@ class ServerRealtimeConfig:
         if self.demodulation is not None:
             if self.demodulation not in ["am", "fm"]:
                 raise ValueError(f"Tipo de demodulación {self.demodulation} inválido.")
+
+        if self.cooldown_request < 0:
+            raise ValueError(f"cooldown_request {self.cooldown_request} inválido. Debe ser >= 0.")
 
 class RequestClient:
     """

@@ -97,6 +97,7 @@ ring_buffer_t audio_rb;               /**< Buffer circular para muestras de audi
  * @{
  */
 atomic_bool   audio_enabled = false;  /**< Bandera atómica que indica si el subsistema de audio está activo. */
+atomic_bool   calibration_running = false; /**< Indica calibración en curso para evitar cierre concurrente de HW. */
 volatile bool stop_streaming = true;  /**< Señal para detener la adquisición de datos del hardware. */
 volatile bool config_received = false;/**< Se activa cuando se procesa un nuevo paquete de configuración. */
 volatile bool keep_running = true;    /**< Bandera maestra de salida para el bucle principal de la aplicación. */
@@ -121,6 +122,527 @@ SDR_cfg_t    hack_cfg = {0};          /**< Ajustes de bajo nivel del hardware Ha
 RB_cfg_t     rb_cfg = {0};            /**< Parámetros de configuración para el tamaño del buffer circular. */
 SDR_cfg_t    current_hw_cfg = {0};    /**< Estado actual real del hardware para comparaciones de sintonización optimizada. */
 /** @} */
+
+static double g_request_cooldown_s = 1.0;
+
+int rx_callback(hackrf_transfer* transfer);
+
+static inline float calibration_finish(float final_ppm) {
+    printf("final_ppm = %.3f\n", final_ppm);
+    printf("calibration done\n");
+    atomic_store(&calibration_running, false);
+    return final_ppm;
+}
+
+static int cmp_double_asc(const void *a, const void *b) {
+    double x = *(const double*)a;
+    double y = *(const double*)b;
+    return (x < y) ? -1 : (x > y);
+}
+
+static double median_of_double_copy(const double *v, int n) {
+    if (!v || n <= 0) return 0.0;
+    double *tmp = (double*)malloc((size_t)n * sizeof(double));
+    if (!tmp) return 0.0;
+    memcpy(tmp, v, (size_t)n * sizeof(double));
+    qsort(tmp, (size_t)n, sizeof(double), cmp_double_asc);
+    double med = (n & 1) ? tmp[n / 2] : 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
+    free(tmp);
+    return med;
+}
+
+static double interp_linear(const double *x, const double *y, int n, double xq) {
+    if (!x || !y || n <= 0) return 0.0;
+    if (xq <= x[0]) return y[0];
+    if (xq >= x[n - 1]) return y[n - 1];
+
+    int lo = 0;
+    int hi = n - 1;
+    while (hi - lo > 1) {
+        int mid = lo + (hi - lo) / 2;
+        if (x[mid] <= xq) lo = mid;
+        else hi = mid;
+    }
+
+    double x0 = x[lo], x1 = x[hi];
+    double y0 = y[lo], y1 = y[hi];
+    double t = (xq - x0) / (x1 - x0 + 1e-20);
+    return y0 + t * (y1 - y0);
+}
+
+static float g_last_cal_ppm = 0.0f;
+static int g_has_last_cal_ppm = 0;
+
+
+static float calibrate_hackrf(void) {
+    float final_ppm = 0.0f;
+    printf("calibrating\n");
+    printf("[CALDBG] enter calibrate_hackrf\n");
+
+    if (atomic_exchange(&calibration_running, true)) {
+        printf("[CALDBG] calibration already running, skipping\n");
+        return calibration_finish(final_ppm);
+    }
+
+    if (!stop_streaming) {
+        printf("[CALDBG] stop_streaming=false, RX busy, skipping calibration\n");
+        return calibration_finish(final_ppm);
+    }
+
+    if (device == NULL) {
+        printf("[CALDBG] device is NULL, opening HackRF\n");
+        if (hackrf_open(&device) != HACKRF_SUCCESS) {
+            printf("[CALDBG] hackrf_open failed\n");
+            return calibration_finish(final_ppm);
+        }
+
+        SDR_cfg_t cfg_to_apply = current_hw_cfg;
+        if (cfg_to_apply.center_freq == 0 || cfg_to_apply.sample_rate <= 0.0) {
+            cfg_to_apply.center_freq = 98000000ULL;
+            cfg_to_apply.sample_rate = 20000000.0;
+            cfg_to_apply.lna_gain = 32;
+            cfg_to_apply.vga_gain = 32;
+            cfg_to_apply.amp_enabled = true;
+            cfg_to_apply.ppm_error = 0.0f;
+            printf("[CALDBG] applying default cfg for calibration\n");
+        }
+
+        hackrf_apply_cfg(device, &cfg_to_apply);
+        memcpy(&current_hw_cfg, &cfg_to_apply, sizeof(SDR_cfg_t));
+    }
+
+    const double fs = (current_hw_cfg.sample_rate > 0.0) ? current_hw_cfg.sample_rate : 20000000.0;
+    const uint64_t fc = (current_hw_cfg.center_freq > 0) ? current_hw_cfg.center_freq : 98000000ULL;
+    printf("[CALDBG] using fs=%.3f Hz fc=%" PRIu64 " Hz ppm=%.6f\n", fs, fc, current_hw_cfg.ppm_error);
+
+    size_t iq_samples = (size_t)(fs * 0.5); // ~0.5 s (balance entre robustez y memoria)
+    if (iq_samples < 262144U) iq_samples = 262144U;
+    if (iq_samples > 10000000U) iq_samples = 10000000U;
+    const size_t iq_bytes = iq_samples * 2U;
+    printf("[CALDBG] capture plan: iq_samples=%zu iq_bytes=%zu\n", iq_samples, iq_bytes);
+
+    rb_reset(&rb);
+    stop_streaming = false;
+    printf("[CALDBG] starting RX for calibration\n");
+    if (hackrf_start_rx(device, rx_callback, NULL) != HACKRF_SUCCESS) {
+        stop_streaming = true;
+        printf("[CALDBG] hackrf_start_rx failed\n");
+        return calibration_finish(final_ppm);
+    }
+
+    struct timespec ts_timeout;
+    clock_gettime(CLOCK_REALTIME, &ts_timeout);
+    ts_timeout.tv_sec += 6;
+
+    pthread_mutex_lock(&rb_mutex);
+    while (keep_running && rb_available(&rb) < iq_bytes) {
+        int rc = pthread_cond_timedwait(&rb_cond, &rb_mutex, &ts_timeout);
+        if (rc == ETIMEDOUT) break;
+    }
+    pthread_mutex_unlock(&rb_mutex);
+    printf("[CALDBG] rb_available after wait=%zu\n", rb_available(&rb));
+
+    if (rb_available(&rb) < iq_bytes) {
+        stop_streaming = true;
+        hackrf_stop_rx(device);
+        printf("[CALDBG] insufficient IQ bytes, timeout path\n");
+        return calibration_finish(final_ppm);
+    }
+
+    int8_t *linear_buffer = (int8_t*)malloc(iq_bytes);
+    if (!linear_buffer) {
+        stop_streaming = true;
+        hackrf_stop_rx(device);
+        printf("[CALDBG] malloc linear_buffer failed\n");
+        return calibration_finish(final_ppm);
+    }
+
+    rb_read(&rb, linear_buffer, iq_bytes);
+    stop_streaming = true;
+    hackrf_stop_rx(device);
+    printf("[CALDBG] read IQ buffer and stopped RX\n");
+
+    signal_iq_t *sig = load_iq_from_buffer(linear_buffer, iq_bytes);
+    free(linear_buffer);
+    if (!sig || !sig->signal_iq || sig->n_signal < 4096) {
+        printf("[CALDBG] load_iq_from_buffer failed or n_signal too small\n");
+        if (sig) free_signal_iq(sig);
+        return calibration_finish(final_ppm);
+    }
+    printf("[CALDBG] IQ loaded: n_signal=%zu\n", sig->n_signal);
+
+    iq_compensation(sig);
+    printf("[CALDBG] iq_compensation done\n");
+
+    PsdConfig_t sweep_cfg = {0};
+    int nperseg = 65536;
+    while ((size_t)nperseg > sig->n_signal && nperseg > 2048) nperseg >>= 1;
+    sweep_cfg.nperseg = nperseg;
+    sweep_cfg.noverlap = nperseg / 2;
+    sweep_cfg.sample_rate = fs;
+    sweep_cfg.window_type = HAMMING_TYPE;
+
+    double *f_sweep = (double*)malloc((size_t)nperseg * sizeof(double));
+    double *p_sweep = (double*)malloc((size_t)nperseg * sizeof(double));
+    if (!f_sweep || !p_sweep) {
+        if (f_sweep) free(f_sweep);
+        if (p_sweep) free(p_sweep);
+        free_signal_iq(sig);
+        return calibration_finish(final_ppm);
+    }
+    execute_welch_psd(sig, &sweep_cfg, f_sweep, p_sweep);
+    printf("[CALDBG] sweep welch done nperseg=%d\n", nperseg);
+
+    double sweep_median_db = median_of_double_copy(p_sweep, nperseg);
+    double sweep_thresh_db = sweep_median_db + 5.0;
+    printf("[CALDBG] sweep median=%.3f dB threshold=%.3f dB\n", sweep_median_db, sweep_thresh_db);
+
+    int top_idx[6] = {-1, -1, -1, -1, -1, -1};
+    double top_pow[6] = {-1e300, -1e300, -1e300, -1e300, -1e300, -1e300};
+    int min_peak_dist = (int)llround(300.0 * ((double)nperseg / 65536.0));
+    if (min_peak_dist < 8) min_peak_dist = 8;
+
+    for (int i = 1; i < nperseg - 1; ++i) {
+        if (p_sweep[i] < sweep_thresh_db) continue;
+        if (!(p_sweep[i] > p_sweep[i - 1] && p_sweep[i] >= p_sweep[i + 1])) continue;
+
+        int too_close = 0;
+        for (int k = 0; k < 6; ++k) {
+            if (top_idx[k] >= 0 && abs(i - top_idx[k]) < min_peak_dist) {
+                too_close = 1;
+                break;
+            }
+        }
+        if (too_close) continue;
+
+        int pos = -1;
+        for (int k = 0; k < 6; ++k) {
+            if (p_sweep[i] > top_pow[k]) {
+                pos = k;
+                break;
+            }
+        }
+        if (pos >= 0) {
+            for (int m = 5; m > pos; --m) {
+                top_pow[m] = top_pow[m - 1];
+                top_idx[m] = top_idx[m - 1];
+            }
+            top_pow[pos] = p_sweep[i];
+            top_idx[pos] = i;
+        }
+    }
+
+    for (int c = 0; c < 6; ++c) {
+        if (top_idx[c] >= 0) {
+            double cand_f = (double)fc + f_sweep[top_idx[c]];
+            printf("[CALDBG] cand[%d]: idx=%d f=%.3fHz p=%.3fdB\n", c, top_idx[c], cand_f, top_pow[c]);
+        } else {
+            printf("[CALDBG] cand[%d]: none\n", c);
+        }
+    }
+
+    int best_k = -1;
+    int best_stereo = 0;
+    double best_snr = -1e300;
+    double best_sweep = -1e300;
+
+    double strongest_sweep = -1e300;
+    for (int c = 0; c < 6; ++c) {
+        if (top_idx[c] >= 0 && top_pow[c] > strongest_sweep) strongest_sweep = top_pow[c];
+    }
+    const double sweep_gate_db = 8.0; // descarta candidatos muy débiles respecto al más fuerte
+    printf("[CALDBG] strongest_sweep=%.3f dB gate=%.3f dB\n", strongest_sweep, sweep_gate_db);
+
+    for (int c = 0; c < 6; ++c) {
+        if (top_idx[c] < 0) continue;
+
+        double cand_freq = (double)fc + f_sweep[top_idx[c]];
+        double offset_hz = cand_freq - (double)fc;
+
+        signal_iq_t cand_sig = {0};
+        cand_sig.n_signal = sig->n_signal;
+        cand_sig.signal_iq = (double complex*)malloc(sig->n_signal * sizeof(double complex));
+        if (!cand_sig.signal_iq) continue;
+
+        double phase = 0.0;
+        double dphi = -2.0 * M_PI * (offset_hz / fs);
+        for (size_t n = 0; n < sig->n_signal; ++n) {
+            double complex rot = cos(phase) + I * sin(phase);
+            cand_sig.signal_iq[n] = sig->signal_iq[n] * rot;
+            phase += dphi;
+            if (phase > M_PI) phase -= 2.0 * M_PI;
+            if (phase < -M_PI) phase += 2.0 * M_PI;
+        }
+
+        fm_radio_t fm = {0};
+        const int cal_audio_fs = 200000;
+        fm_radio_init(&fm, fs, cal_audio_fs, 0);
+        fm.enable_lpf = 0;
+        fm.enable_dc_block = 0;
+        fm.gain = 4000.0f;
+
+        int16_t *pcm = (int16_t*)malloc(cand_sig.n_signal * sizeof(int16_t));
+        if (!pcm) {
+            free(cand_sig.signal_iq);
+            continue;
+        }
+
+        int n_audio = fm_radio_iq_to_pcm(&fm, &cand_sig, pcm, NULL, (int)llround(fs));
+        free(cand_sig.signal_iq);
+        if (n_audio < 2048) {
+            printf("[CALDBG] cand[%d] rejected: n_audio=%d\n", c, n_audio);
+            free(pcm);
+            continue;
+        }
+        printf("[CALDBG] cand[%d] demod ok: n_audio=%d fs_audio_eff_pre=%.3f\n", c, n_audio, fs * ((double)n_audio / (double)sig->n_signal));
+
+        signal_iq_t audio_sig = {0};
+        audio_sig.n_signal = (size_t)n_audio;
+        audio_sig.signal_iq = (double complex*)malloc((size_t)n_audio * sizeof(double complex));
+        if (!audio_sig.signal_iq) {
+            free(pcm);
+            continue;
+        }
+        for (int n = 0; n < n_audio; ++n) {
+            audio_sig.signal_iq[n] = (double)pcm[n] + I * 0.0;
+        }
+        free(pcm);
+
+        double fs_audio_eff = fs * ((double)n_audio / (double)sig->n_signal);
+        if (!(fs_audio_eff > 0.0)) fs_audio_eff = (double)cal_audio_fs;
+
+        PsdConfig_t aud_cfg = {0};
+        int aud_nperseg = 65536;
+        while (aud_nperseg > n_audio && aud_nperseg > 1024) aud_nperseg >>= 1;
+        aud_cfg.nperseg = aud_nperseg;
+        aud_cfg.noverlap = aud_nperseg / 2;
+        aud_cfg.sample_rate = fs_audio_eff;
+        aud_cfg.window_type = HAMMING_TYPE;
+
+        double *f_a = (double*)malloc((size_t)aud_nperseg * sizeof(double));
+        double *p_a = (double*)malloc((size_t)aud_nperseg * sizeof(double));
+        if (!f_a || !p_a) {
+            if (f_a) free(f_a);
+            if (p_a) free(p_a);
+            free(audio_sig.signal_iq);
+            continue;
+        }
+
+        execute_welch_psd(&audio_sig, &aud_cfg, f_a, p_a);
+        free(audio_sig.signal_iq);
+
+        double max_lin = 0.0;
+        int pilot_max_idx = -1;
+        double *pilot_lin = (double*)malloc((size_t)aud_nperseg * sizeof(double));
+        int cnt_db = 0;
+        for (int i = 0; i < aud_nperseg; ++i) {
+            if (f_a[i] >= 18000.0 && f_a[i] <= 20000.0) {
+                double plin = pow(10.0, p_a[i] / 10.0);
+                pilot_lin[cnt_db] = plin;
+                if (plin > max_lin) {
+                    max_lin = plin;
+                    pilot_max_idx = i;
+                }
+                cnt_db++;
+            }
+        }
+
+        double median_lin = median_of_double_copy(pilot_lin, cnt_db);
+        free(pilot_lin);
+
+        double snr_db = -1e300;
+        if (cnt_db > 0 && median_lin > 0.0 && max_lin > 0.0) {
+            snr_db = 10.0 * log10(max_lin / median_lin);
+        }
+
+         double pilot_freq_hz = (pilot_max_idx >= 0) ? f_a[pilot_max_idx] : 0.0;
+
+        int stereo = (snr_db > 8.0) ? 1 : 0;
+        int strong_enough = (top_pow[c] >= (strongest_sweep - sweep_gate_db)) ? 1 : 0;
+         printf("[CALDBG] cand[%d] pilot: freq=%.3fHz bins=%d max_lin=%.6e med_lin=%.6e snr=%.3fdB stereo=%d\n",
+             c, pilot_freq_hz, cnt_db, max_lin, median_lin, snr_db, stereo);
+        printf("[CALDBG] cand[%d] sweep=%.3f strong_enough=%d\n", c, top_pow[c], strong_enough);
+
+        if (!strong_enough) {
+            free(f_a);
+            free(p_a);
+            continue;
+        }
+
+        if ((stereo > best_stereo) ||
+            (stereo == best_stereo && top_pow[c] > best_sweep) ||
+            (stereo == best_stereo && fabs(top_pow[c] - best_sweep) < 1e-9 && snr_db > best_snr)) {
+            best_stereo = stereo;
+            best_snr = snr_db;
+            best_sweep = top_pow[c];
+            best_k = c;
+            printf("[CALDBG] cand[%d] is new best\n", c);
+        }
+
+        free(f_a);
+        free(p_a);
+    }
+
+    printf("[CALDBG] best_k=%d best_stereo=%d best_snr=%.3f best_sweep=%.3f\n", best_k, best_stereo, best_snr, best_sweep);
+    if (best_k >= 0 && top_idx[best_k] >= 0) {
+        double best_freq = (double)fc + f_sweep[top_idx[best_k]];
+        double best_offset = best_freq - (double)fc;
+        printf("[CALDBG] best_freq=%.3fHz best_offset=%.3fHz\n", best_freq, best_offset);
+
+        int decim = 100;
+        size_t n_dec = sig->n_signal / (size_t)decim;
+        if (n_dec >= 4096) {
+            signal_iq_t bb_dec = {0};
+            bb_dec.n_signal = n_dec;
+            bb_dec.signal_iq = (double complex*)malloc(n_dec * sizeof(double complex));
+
+            if (bb_dec.signal_iq) {
+                double phase = 0.0;
+                double dphi = -2.0 * M_PI * (best_offset / fs);
+                size_t out = 0;
+                for (size_t i = 0; i + (size_t)decim <= sig->n_signal; i += (size_t)decim) {
+                    double complex acc = 0.0 + I * 0.0;
+                    for (int m = 0; m < decim; ++m) {
+                        double complex rot = cos(phase) + I * sin(phase);
+                        acc += sig->signal_iq[i + (size_t)m] * rot;
+                        phase += dphi;
+                        if (phase > M_PI) phase -= 2.0 * M_PI;
+                        if (phase < -M_PI) phase += 2.0 * M_PI;
+                    }
+                    bb_dec.signal_iq[out++] = acc / (double)decim;
+                }
+                bb_dec.n_signal = out;
+
+                if (bb_dec.n_signal >= 4096) {
+                    PsdConfig_t bb_cfg = {0};
+                    int bb_nperseg = 16384;
+                    while ((size_t)bb_nperseg > bb_dec.n_signal && bb_nperseg > 1024) bb_nperseg >>= 1;
+                    bb_cfg.nperseg = bb_nperseg;
+                    bb_cfg.noverlap = bb_nperseg / 2;
+                    bb_cfg.sample_rate = fs / (double)decim;
+                    bb_cfg.window_type = HAMMING_TYPE;
+
+                    double *f_bb = (double*)malloc((size_t)bb_nperseg * sizeof(double));
+                    double *p_bb_db = (double*)malloc((size_t)bb_nperseg * sizeof(double));
+                    double *p_bb_lin = (double*)malloc((size_t)bb_nperseg * sizeof(double));
+                    if (f_bb && p_bb_db && p_bb_lin) {
+                        execute_welch_psd(&bb_dec, &bb_cfg, f_bb, p_bb_db);
+                        for (int i = 0; i < bb_nperseg; ++i) {
+                            p_bb_lin[i] = pow(10.0, p_bb_db[i] / 10.0);
+                        }
+
+                        double f0 = f_bb[0];
+                        double f1 = f_bb[bb_nperseg - 1];
+                        double df = (f1 - f0) / (double)(bb_nperseg - 1);
+
+                        if (df > 0.0) {
+                            double best_cost = 1e300;
+                            double best_delta = 0.0;
+
+                            const int N_DELTA = 1000;
+                            const int N_U = 1000;
+                            double delta_center = 0.0;
+                            double delta_span = 4000.0; // +/- 4 kHz (~40 ppm @100MHz)
+                            if (g_has_last_cal_ppm) {
+                                delta_center = -((double)g_last_cal_ppm * best_freq) / 1000000.0;
+                                delta_span = 2500.0;
+                            }
+                            if (delta_center > 10000.0) delta_center = 10000.0;
+                            if (delta_center < -10000.0) delta_center = -10000.0;
+                            double delta_min = delta_center - delta_span;
+                            double delta_max = delta_center + delta_span;
+                            if (delta_min < -15000.0) delta_min = -15000.0;
+                            if (delta_max > 15000.0) delta_max = 15000.0;
+                            printf("[CALDBG] fine search window: center=%.3f span=%.3f -> [%.3f, %.3f]\n",
+                                   delta_center, delta_span, delta_min, delta_max);
+
+                            for (int id = 0; id < N_DELTA; ++id) {
+                                double d = delta_min + ((delta_max - delta_min) * (double)id) / (double)(N_DELTA - 1);
+                                double cost = 0.0;
+                                int ncost = 0;
+
+                                for (int iu = 0; iu < N_U; ++iu) {
+                                    double u = 30000.0 + (60000.0 * (double)iu) / (double)(N_U - 1);
+                                    double fl = d - u;
+                                    double fr = d + u;
+
+                                    if (fl < f0 || fl > f1 || fr < f0 || fr > f1) continue;
+
+                                    double pl = interp_linear(f_bb, p_bb_lin, bb_nperseg, fl);
+                                    double pr = interp_linear(f_bb, p_bb_lin, bb_nperseg, fr);
+                                    double denom = (pl + pr);
+                                    if (denom < 1e-20) denom = 1e-20;
+                                    double e = (pl - pr);
+                                    cost += (e * e) / (denom * denom);
+                                    ncost++;
+                                }
+
+                                if (ncost > 0) {
+                                    cost /= (double)ncost;
+                                    if (cost < best_cost) {
+                                        best_cost = cost;
+                                        best_delta = d;
+                                    }
+                                }
+                            }
+
+                            double ppm_suggest = -(best_delta / best_freq) * 1000000.0;
+                            final_ppm = (float)ppm_suggest;
+                            printf("[CALDBG] fine: best_delta=%.3fHz ppm_suggest=%.6f\n", best_delta, ppm_suggest);
+                            if (fabs((double)final_ppm) > 80.0) {
+                                printf("[CALDBG] ppm out of guardrail, forcing 0\n");
+                                final_ppm = 0.0f;
+                            }
+
+                            if (!g_has_last_cal_ppm) {
+                                g_last_cal_ppm = final_ppm;
+                                g_has_last_cal_ppm = 1;
+                                printf("[CALDBG] lock first ppm=%.6f\n", g_last_cal_ppm);
+                            } else {
+                                float delta_ppm = fabsf(final_ppm - g_last_cal_ppm);
+                                if (delta_ppm > 20.0f) {
+                                    printf("[CALDBG] ppm outlier detected (delta=%.3f), keep last=%.6f\n", delta_ppm, g_last_cal_ppm);
+                                    final_ppm = g_last_cal_ppm;
+                                } else {
+                                    g_last_cal_ppm = 0.7f * g_last_cal_ppm + 0.3f * final_ppm;
+                                    final_ppm = g_last_cal_ppm;
+                                    printf("[CALDBG] ppm smoothed -> %.6f\n", final_ppm);
+                                }
+                            }
+                        }
+                        else {
+                            printf("[CALDBG] invalid df<=0 in fine stage\n");
+                        }
+                    }
+                    else {
+                        printf("[CALDBG] fine buffers alloc failed\n");
+                    }
+
+                    if (f_bb) free(f_bb);
+                    if (p_bb_db) free(p_bb_db);
+                    if (p_bb_lin) free(p_bb_lin);
+                }
+
+                free(bb_dec.signal_iq);
+            }
+            else {
+                printf("[CALDBG] bb_dec allocation failed\n");
+            }
+        }
+        else {
+            printf("[CALDBG] n_dec too small for fine stage: %zu\n", n_dec);
+        }
+    }
+    else {
+        printf("[CALDBG] no best candidate found\n");
+    }
+
+    free(f_sweep);
+    free(p_sweep);
+    free_signal_iq(sig);
+    printf("[CALDBG] calibration pipeline end final_ppm=%.6f\n", final_ppm);
+    return calibration_finish(final_ppm);
+}
 
 /**
  * @brief Obtiene el tiempo actual del sistema en milisegundos.
@@ -287,6 +809,12 @@ void on_command_received(const char *payload) {
     if (parse_config_rf(payload, &temp_desired) == 0) {
         printf("[RF]<<<<<zmq\n");
 
+        if (temp_desired.calibrate) {
+            float _cal_ppm = calibrate_hackrf();
+            (void)_cal_ppm;
+            return;
+        }
+
         //Enable or disable audio based on RF mode
         if (temp_desired.rf_mode == PSD_MODE) {
             atomic_store(&audio_enabled, false);
@@ -301,6 +829,10 @@ void on_command_received(const char *payload) {
         find_params_psd(temp_desired, &temp_hack, &temp_psd, &temp_rb);
         
         pthread_mutex_lock(&cfg_mutex);
+        if (temp_desired.cooldown_request_set) {
+            g_request_cooldown_s = temp_desired.cooldown_request;
+        }
+        temp_desired.cooldown_request = g_request_cooldown_s;
         desired_config = temp_desired;
         hack_cfg = temp_hack;
         psd_cfg = temp_psd;
@@ -616,7 +1148,7 @@ int main() {
             double elapsed = (now.tv_sec - last_activity_time.tv_sec) + 
                              (now.tv_nsec - last_activity_time.tv_nsec) / 1e9;
 
-            if (elapsed >= 15.0 && device != NULL) {
+            if (elapsed >= 15.0 && device != NULL && !atomic_load(&calibration_running)) {
                 printf("[RF] Idle timeout (%.1fs). Closing radio.\n", elapsed);
                 stop_streaming = true;
                 hackrf_stop_rx(device);
@@ -656,7 +1188,7 @@ int main() {
                            local_hack.sample_rate != current_hw_cfg.sample_rate ||
                            local_hack.lna_gain    != current_hw_cfg.lna_gain    ||
                            local_hack.vga_gain    != current_hw_cfg.vga_gain    ||
-                           local_hack.ppm_error   != current_hw_cfg.ppm_error);
+                   fabs((double)local_hack.ppm_error - (double)current_hw_cfg.ppm_error) > 1e-6);
 
         if (needs_tune) {
             printf("[HAL] Tuning: %" PRIu64 " Hz | LNA: %u | VGA: %u\n", 
@@ -728,19 +1260,24 @@ int main() {
 
         // --- 5. PROCESSING WITH SAFETY CHECKS ---
         // With smaller IQ chunks, this loop runs more often.
-        // Watchdog cadence: publish PSD at most once per second.
+        // Watchdog cadence: publish PSD using configurable cooldown.
         static struct timespec last_psd_run = {0};
         struct timespec now_psd;
         clock_gettime(CLOCK_MONOTONIC, &now_psd);
+
+        double cooldown_s = local_desired.cooldown_request;
+        if (cooldown_s < 0.0) {
+            cooldown_s = 0.0;
+        }
 
         double time_diff = (now_psd.tv_sec - last_psd_run.tv_sec) +
                            (now_psd.tv_nsec - last_psd_run.tv_nsec) / 1e9;
 
         // Watchdog pacing without dropping request/response:
-        // if less than 1 second has elapsed, wait only the remaining time,
+        // if less than configured cooldown has elapsed, wait only remaining time,
         // then continue processing this same request.
-        if (time_diff < 1.0) {
-            double remaining_s = 1.0 - time_diff;
+        if (time_diff < cooldown_s) {
+            double remaining_s = cooldown_s - time_diff;
             useconds_t remaining_us = (useconds_t)(remaining_s * 1000000.0);
             if (remaining_us > 0) {
                 usleep(remaining_us);
@@ -785,7 +1322,7 @@ int main() {
                         audio_ctx.fm_dev.dev_ema_hz
                     );
 
-                    printf("[RF_PSD] Acquisition | PPM Error: %d | Fc: %" PRIu64 " Hz\n",
+                          printf("[RF_PSD] Acquisition | PPM Error: %.3f | Fc: %" PRIu64 " Hz\n",
                            local_hack.ppm_error, local_hack.center_freq);
 
                     clock_gettime(CLOCK_MONOTONIC, &last_psd_run);

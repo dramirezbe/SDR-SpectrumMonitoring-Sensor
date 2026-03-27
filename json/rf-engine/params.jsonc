@@ -10,6 +10,7 @@
   "vga_gain": 20,
   "antenna_amp": true,
   "antenna_port": 1,
+  "cooldown_request": 1.0,
   "ppm_error": 0,
   //Can be None of not demod (fm, am)
   "demodulation": "fm",

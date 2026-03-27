@@ -39,7 +39,7 @@ typedef struct {
     bool amp_enabled;          /**< Activar/Desactivar el amplificador de RF frontal (0 o 14 dB). */
     int lna_gain;              /**< Ganancia de FI (LNA) en pasos de 8 dB (0-40 dB). */
     int vga_gain;              /**< Ganancia de banda base (VGA) en pasos de 2 dB (0-62 dB). */
-    int ppm_error;             /**< Corrección de error de frecuencia en partes por millón (PPM). */
+    float ppm_error;           /**< Corrección de error de frecuencia en partes por millón (PPM). */
 } SDR_cfg_t;
 
 /**

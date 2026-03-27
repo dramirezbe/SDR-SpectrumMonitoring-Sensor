@@ -85,6 +85,7 @@ def fetch_realtime_config(client):
                 antenna_amp=bool(json_payload.get("antenna_amp")),
                 antenna_port=int(json_payload.get("antenna_port")), 
                 ppm_error=0,
+                cooldown_request=float(json_payload.get("cooldown_request", 1.0))
             )
         
         if json_payload.get("demodulation") in ["fm","am"]:

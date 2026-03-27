@@ -39,6 +39,8 @@
       "vga_gain": 0,
       //bool
       "antenna_amp": false,
+      //float seconds between RF requests/PSD processing (>= 0)
+      "cooldown_request": 1.0,
 
       // Scheduled time window for the campaign.
       "timeframe": {

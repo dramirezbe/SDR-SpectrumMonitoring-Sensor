@@ -173,6 +173,7 @@ class CronSchedulerCampaign:
             "vga_gain": camp.get('vga_gain'),
             "antenna_amp": camp.get('antenna_amp'),
             "filter": camp.get('filter'),
+            "cooldown_request": float(camp.get('cooldown_request', 1.0)),
             "method_psd": "pfb"
         }
         store.update_from_dict(dict_persist_params)
@@ -451,6 +452,11 @@ class AcquireDual:
 
     async def _single_acquire(self, rf_params):
         """Low-level acquisition with PLL cooling time."""
+        rf_params = dict(rf_params)
+        if rf_params.get("cooldown_request") is None:
+            rf_params["cooldown_request"] = 1.0
+        else:
+            rf_params["cooldown_request"] = float(rf_params["cooldown_request"])
         await self.controller.send_command(rf_params)
         self._log.debug(f"Acquiring CF: {rf_params['center_freq_hz']/1e6} MHz")
         data = await asyncio.wait_for(self.controller.wait_for_data(), timeout=10)

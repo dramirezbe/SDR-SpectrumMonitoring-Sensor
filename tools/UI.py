@@ -281,13 +281,38 @@ class PSDLiveUI(QMainWindow):
         main_layout = QHBoxLayout(main_widget)
 
         controls = QWidget()
-        controls.setFixedWidth(250)
+        controls.setFixedWidth(330)
         grid = QGridLayout(controls)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
 
         self.txt_cf = QLineEdit("97.5")
         self.txt_span = QLineEdit("20.0")
         self.txt_rbw = QLineEdit("100")
         self.txt_overlap = QLineEdit("0.5")
+        self.txt_cooldown = QLineEdit("0.1")
+        self.sld_ymin = QSlider(Qt.Horizontal)
+        self.sld_ymin.setMinimum(-80)
+        self.sld_ymin.setMaximum(-20)
+        self.sld_ymin.setSingleStep(1)
+        self.sld_ymin.setPageStep(5)
+        self.sld_ymin.setTickInterval(5)
+        self.sld_ymin.setTickPosition(QSlider.TicksBelow)
+        self.sld_ymin.setValue(-80)
+
+        self.sld_ymax = QSlider(Qt.Horizontal)
+        self.sld_ymax.setMinimum(-50)
+        self.sld_ymax.setMaximum(5)
+        self.sld_ymax.setSingleStep(1)
+        self.sld_ymax.setPageStep(5)
+        self.sld_ymax.setTickInterval(5)
+        self.sld_ymax.setTickPosition(QSlider.TicksBelow)
+        self.sld_ymax.setValue(0)
+
+        self.lbl_ymin_val = QLabel("-80 dB")
+        self.lbl_ymax_val = QLabel("0 dB")
+        self.sld_ymin.valueChanged.connect(self._on_ymin_changed)
+        self.sld_ymax.valueChanged.connect(self._on_ymax_changed)
 
         grid.addWidget(QLabel("CF (MHz):"), 0, 0)
         grid.addWidget(self.txt_cf, 0, 1)
@@ -297,15 +322,40 @@ class PSDLiveUI(QMainWindow):
         grid.addWidget(self.txt_rbw, 2, 1)
         grid.addWidget(QLabel("Overlap:"), 3, 0)
         grid.addWidget(self.txt_overlap, 3, 1)
+        grid.addWidget(QLabel("Cooldown (s):"), 4, 0)
+        grid.addWidget(self.txt_cooldown, 4, 1)
+        grid.addWidget(QLabel("Y Min (dB):"), 5, 0)
+        grid.addWidget(self.sld_ymin, 5, 1)
+        grid.addWidget(self.lbl_ymin_val, 5, 2)
+        grid.addWidget(QLabel("Y Max (dB):"), 6, 0)
+        grid.addWidget(self.sld_ymax, 6, 1)
+        grid.addWidget(self.lbl_ymax_val, 6, 2)
 
         self.sld_lna = QSlider(Qt.Horizontal)
+        self.sld_lna.setMinimum(0)
         self.sld_lna.setMaximum(40)
+        self.sld_lna.setSingleStep(8)
+        self.sld_lna.setPageStep(8)
+        self.sld_lna.setTickInterval(8)
+        self.sld_lna.setTickPosition(QSlider.TicksBelow)
         self.sld_vga = QSlider(Qt.Horizontal)
+        self.sld_vga.setMinimum(0)
         self.sld_vga.setMaximum(62)
-        grid.addWidget(QLabel("LNA Gain:"), 4, 0)
-        grid.addWidget(self.sld_lna, 4, 1)
-        grid.addWidget(QLabel("VGA Gain:"), 5, 0)
-        grid.addWidget(self.sld_vga, 5, 1)
+        self.sld_vga.setSingleStep(2)
+        self.sld_vga.setPageStep(2)
+        self.sld_vga.setTickInterval(2)
+        self.sld_vga.setTickPosition(QSlider.TicksBelow)
+        self.lbl_lna_val = QLabel("0 dB")
+        self.lbl_vga_val = QLabel("0 dB")
+        self.sld_lna.valueChanged.connect(self._on_lna_changed)
+        self.sld_vga.valueChanged.connect(self._on_vga_changed)
+
+        grid.addWidget(QLabel("LNA Gain:"), 7, 0)
+        grid.addWidget(self.sld_lna, 7, 1)
+        grid.addWidget(self.lbl_lna_val, 7, 2)
+        grid.addWidget(QLabel("VGA Gain:"), 8, 0)
+        grid.addWidget(self.sld_vga, 8, 1)
+        grid.addWidget(self.lbl_vga_val, 8, 2)
 
         self.chk_amp = QCheckBox("Antenna Amp")
         self.chk_amp.setChecked(True)
@@ -314,21 +364,21 @@ class PSDLiveUI(QMainWindow):
         self.cmb_win = QComboBox()
         self.cmb_win.addItems(["hann", "hamming", "blackman"])
 
-        grid.addWidget(self.chk_amp, 6, 0, 1, 2)
-        grid.addWidget(QLabel("Port:"), 7, 0)
-        grid.addWidget(self.cmb_port, 7, 1)
-        grid.addWidget(QLabel("Window:"), 8, 0)
-        grid.addWidget(self.cmb_win, 8, 1)
+        grid.addWidget(self.chk_amp, 9, 0, 1, 2)
+        grid.addWidget(QLabel("Port:"), 10, 0)
+        grid.addWidget(self.cmb_port, 10, 1)
+        grid.addWidget(QLabel("Window:"), 11, 0)
+        grid.addWidget(self.cmb_win, 11, 1)
 
         self.chk_filter = QCheckBox("Enable Filter")
         self.chk_filter.setChecked(True)
         self.txt_f0 = QLineEdit("87.5")
         self.txt_f1 = QLineEdit("107.5")
-        grid.addWidget(self.chk_filter, 9, 0, 1, 2)
-        grid.addWidget(QLabel("Filtro Lo:"), 10, 0)
-        grid.addWidget(self.txt_f0, 10, 1)
-        grid.addWidget(QLabel("Filtro Hi:"), 11, 0)
-        grid.addWidget(self.txt_f1, 11, 1)
+        grid.addWidget(self.chk_filter, 12, 0, 1, 2)
+        grid.addWidget(QLabel("Filtro Lo:"), 13, 0)
+        grid.addWidget(self.txt_f0, 13, 1)
+        grid.addWidget(QLabel("Filtro Hi:"), 14, 0)
+        grid.addWidget(self.txt_f1, 14, 1)
 
         self.btn_apply = QPushButton("Apply")
         self.btn_start = QPushButton("Start")
@@ -339,19 +389,25 @@ class PSDLiveUI(QMainWindow):
         self.btn_demod_start = QPushButton("Demod Start")
         self.btn_demod_stop = QPushButton("Demod Stop")
 
+        self.btn_apply.setMinimumWidth(140)
+        self.btn_start.setMinimumWidth(120)
+        self.btn_stop.setMinimumWidth(120)
+        self.btn_demod_start.setMinimumWidth(120)
+        self.btn_demod_stop.setMinimumWidth(120)
+
         self.btn_apply.clicked.connect(self.apply_config)
         self.btn_start.clicked.connect(lambda: self._run_event.set())
         self.btn_stop.clicked.connect(lambda: self._run_event.clear())
         self.btn_demod_start.clicked.connect(self.start_demod)
         self.btn_demod_stop.clicked.connect(self.stop_demod)
 
-        grid.addWidget(self.btn_apply, 12, 0, 1, 2)
-        grid.addWidget(self.btn_start, 13, 0)
-        grid.addWidget(self.btn_stop, 13, 1)
-        grid.addWidget(QLabel("Demod:"), 14, 0)
-        grid.addWidget(self.cmb_demod, 14, 1)
-        grid.addWidget(self.btn_demod_start, 15, 0)
-        grid.addWidget(self.btn_demod_stop, 15, 1)
+        grid.addWidget(self.btn_apply, 15, 0, 1, 2)
+        grid.addWidget(self.btn_start, 16, 0)
+        grid.addWidget(self.btn_stop, 16, 1)
+        grid.addWidget(QLabel("Demod:"), 17, 0)
+        grid.addWidget(self.cmb_demod, 17, 1)
+        grid.addWidget(self.btn_demod_start, 18, 0)
+        grid.addWidget(self.btn_demod_stop, 18, 1)
 
         self.plot_widget = pg.PlotWidget(title="PSD Realtime (ZMQ)")
         self.plot_widget.setLabel("left", "Potencia", units="dB")
@@ -360,8 +416,62 @@ class PSDLiveUI(QMainWindow):
 
         main_layout.addWidget(controls)
         main_layout.addWidget(self.plot_widget)
+        main_layout.setStretch(0, 2)
+        main_layout.setStretch(1, 5)
 
+        self._on_lna_changed(self.sld_lna.value())
+        self._on_vga_changed(self.sld_vga.value())
+        self._on_ymin_changed(self.sld_ymin.value())
+        self._on_ymax_changed(self.sld_ymax.value())
         self.apply_config()
+
+    def _snap_value(self, value: int, step: int, min_v: int, max_v: int) -> int:
+        snapped = int(round((value - min_v) / step) * step + min_v)
+        return max(min_v, min(max_v, snapped))
+
+    def _on_lna_changed(self, value: int) -> None:
+        snapped = self._snap_value(value, 8, 0, 40)
+        if snapped != value:
+            self.sld_lna.blockSignals(True)
+            self.sld_lna.setValue(snapped)
+            self.sld_lna.blockSignals(False)
+        self.lbl_lna_val.setText(f"{snapped} dB")
+
+    def _on_vga_changed(self, value: int) -> None:
+        snapped = self._snap_value(value, 2, 0, 62)
+        if snapped != value:
+            self.sld_vga.blockSignals(True)
+            self.sld_vga.setValue(snapped)
+            self.sld_vga.blockSignals(False)
+        self.lbl_vga_val.setText(f"{snapped} dB")
+
+    def _on_ymin_changed(self, value: int) -> None:
+        y_min = int(value)
+        y_max = int(self.sld_ymax.value())
+
+        if y_min >= y_max:
+            new_y_max = min(self.sld_ymax.maximum(), y_min + 1)
+            self.sld_ymax.blockSignals(True)
+            self.sld_ymax.setValue(new_y_max)
+            self.sld_ymax.blockSignals(False)
+            y_max = new_y_max
+
+        self.lbl_ymin_val.setText(f"{y_min} dB")
+        self.lbl_ymax_val.setText(f"{y_max} dB")
+
+    def _on_ymax_changed(self, value: int) -> None:
+        y_max = int(value)
+        y_min = int(self.sld_ymin.value())
+
+        if y_max <= y_min:
+            new_y_min = max(self.sld_ymin.minimum(), y_max - 1)
+            self.sld_ymin.blockSignals(True)
+            self.sld_ymin.setValue(new_y_min)
+            self.sld_ymin.blockSignals(False)
+            y_min = new_y_min
+
+        self.lbl_ymin_val.setText(f"{y_min} dB")
+        self.lbl_ymax_val.setText(f"{y_max} dB")
 
     def _set_runtime_config(self, cfg_dict: dict) -> None:
         with self._config_lock:
@@ -394,16 +504,18 @@ class PSDLiveUI(QMainWindow):
                 antenna_amp=self.chk_amp.isChecked(),
                 antenna_port=int(self.cmb_port.currentText()),
                 ppm_error=0,
+                cooldown_request=float(self.txt_cooldown.text()),
                 demodulation=self._demod_mode,
                 filter=filter_cfg,
             )
             cfg_dict = asdict(cfg_obj)
             self._set_runtime_config(cfg_dict)
             log.info(
-                "[UI] apply_config cf=%.3fMHz fs=%.3fMHz rbw=%dkHz demod=%s filter=%s",
+                "[UI] apply_config cf=%.3fMHz fs=%.3fMHz rbw=%dkHz cooldown=%.3fs demod=%s filter=%s",
                 cfg_dict["center_freq_hz"] / 1e6,
                 cfg_dict["sample_rate_hz"] / 1e6,
                 int(cfg_dict["rbw_hz"] / 1000),
+                float(cfg_dict["cooldown_request"]),
                 cfg_dict.get("demodulation"),
                 bool(cfg_dict.get("filter")),
             )
@@ -553,6 +665,22 @@ class PSDLiveUI(QMainWindow):
             x_axis = np.linspace(start_f, end_f, pxx.size)
         else:
             x_axis = np.arange(pxx.size, dtype=float)
+
+        x_min = float(np.min(x_axis))
+        x_max = float(np.max(x_axis))
+        if x_max > x_min:
+            self.plot_widget.setLimits(xMin=x_min, xMax=x_max)
+            self.plot_widget.setXRange(x_min, x_max)
+
+        try:
+            y_min = float(self.sld_ymin.value())
+            y_max = float(self.sld_ymax.value())
+            if y_max > y_min:
+                self.plot_widget.setLimits(yMin=y_min, yMax=y_max)
+                self.plot_widget.setYRange(y_min, y_max)
+                self.plot_widget.enableAutoRange(axis='y', enable=False)
+        except Exception:
+            pass
 
         return plot_obj, x_axis, pxx
 

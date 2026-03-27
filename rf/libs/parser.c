@@ -51,6 +51,7 @@ static void set_default_config(DesiredCfg_t *target) {
     // Core Settings
     target->rf_mode        = PSD_MODE;      // Default: PSD
     target->method_psd     = WELCH;         // Default: Welch
+    target->calibrate      = false;
     
     // Hardware Settings
     target->center_freq    = 98000000ULL;   // Default: 98 MHz
@@ -59,12 +60,14 @@ static void set_default_config(DesiredCfg_t *target) {
     target->vga_gain       = 0;
     target->amp_enabled    = true;          // Default: true
     target->antenna_port   = 1;             // Default: 1
-    target->ppm_error      = 0;
+    target->ppm_error      = 0.0f;
 
     // PSD Settings
     target->rbw            = 100000;        // Default: 100 kHz
     target->overlap        = 0.5;           // Standard 50% default
     target->window_type    = HAMMING_TYPE;  // Default: 0
+    target->cooldown_request = 1.0;         // Default: 1 second
+    target->cooldown_request_set = false;
 
     // Filter Settings
     target->filter_enabled = false;         // Default: Filter NULL/Off
@@ -84,6 +87,9 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
         printf("[PARSER] Warning: JSON is NULL or invalid. Using defaults.\n");
         return 0; 
     } 
+
+    cJSON *calib = cJSON_GetObjectItemCaseSensitive(root, "calibrate");
+    if (cJSON_IsBool(calib)) target->calibrate = cJSON_IsTrue(calib);
 
     // 2. Parse Core Hardware Parameters FIRST (Required for clamping logic)
     cJSON *cf = cJSON_GetObjectItemCaseSensitive(root, "center_freq_hz");
@@ -148,6 +154,12 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
         free(clean_win);
     }
 
+    cJSON *cooldown = cJSON_GetObjectItemCaseSensitive(root, "cooldown_request");
+    if (cJSON_IsNumber(cooldown) && cooldown->valuedouble >= 0.0) {
+        target->cooldown_request = cooldown->valuedouble;
+        target->cooldown_request_set = true;
+    }
+
     // 6. Hardware Gains & Peripheral Settings
     cJSON *lna = cJSON_GetObjectItemCaseSensitive(root, "lna_gain");
     if (cJSON_IsNumber(lna)) target->lna_gain = (int)lna->valuedouble;
@@ -162,7 +174,7 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
     if (cJSON_IsNumber(port)) target->antenna_port = (int)port->valuedouble;
 
     cJSON *ppm = cJSON_GetObjectItemCaseSensitive(root, "ppm_error");
-    if (cJSON_IsNumber(ppm)) target->ppm_error = (int)ppm->valuedouble;
+    if (cJSON_IsNumber(ppm)) target->ppm_error = (float)ppm->valuedouble;
 
     cJSON_Delete(root);
     return 0;
@@ -188,7 +200,7 @@ void print_config_summary_DEBUG(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *p
     printf("  Sample Rate   : %.2f MS/s\n", hw->sample_rate / 1e6);
     printf("  Gains (L/V)   : %d dB / %d dB\n", hw->lna_gain, hw->vga_gain);
     printf("  Antenna       : Port %d (Amp: %s)\n", des->antenna_port, des->amp_enabled ? "ON" : "OFF");
-    printf("  PPM Error     : %d\n", des->ppm_error);
+    printf("  PPM Error     : %.3f\n", des->ppm_error);
 
     printf("\n--- SPECTRAL (PSD) ---\n");
     printf("  Method        : %s\n", psd_methods[des->method_psd]);

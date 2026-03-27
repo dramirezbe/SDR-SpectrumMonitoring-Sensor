@@ -157,7 +157,8 @@ sudo apt-get install -y texlive-latex-extra texlive-lang-spanish latexmk
   - defaults de seguridad,
   - parseo de campos,
   - clamping del filtro a banda Nyquist,
-  - parseo de `ppm_error`.
+  - parseo de `ppm_error`,
+  - parseo de `cooldown_request` (float en segundos, default `1.0`, comportamiento sticky).
 - C ejecuta adquisición/PSD y publica resultados JSON por ZMQ (`publish_results`).
 - Python consume respuesta (`wait_for_data`) y la usa en realtime/campaign/calibración.
 
@@ -206,6 +207,10 @@ Campos relevantes para calibración y GPS:
 - `last_lat`, `last_lng`, `changed_gps`
 - `legal_freqs` (cache para evitar recargar DB ANE cada corrida)
 - `ppm_error`, `last_kal_ms`
+
+Campos relevantes para pacing RF:
+- `cooldown_request` (float, segundos, `>= 0`): intervalo mínimo entre requests/procesamiento PSD en `rf_app`.
+- Si no se envía, el motor usa `1.0` s por defecto; si se envía, mantiene ese valor hasta nuevo update.
 
 ---
 

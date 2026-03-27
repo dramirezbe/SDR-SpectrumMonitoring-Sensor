@@ -70,9 +70,14 @@ class CampaignRunner:
         """
         keys = ["center_freq_hz", "sample_rate_hz", "rbw_hz", "overlap", 
                 "window", "lna_gain", "vga_gain", "antenna_amp", 
-                "antenna_port", "ppm_error", "filter"]
+                "antenna_port", "ppm_error", "filter", "cooldown_request"]
         try:
-            return {k: self.store.consult_persistent(k) for k in keys}
+            rf_params = {k: self.store.consult_persistent(k) for k in keys}
+            if rf_params.get("cooldown_request") is None:
+                rf_params["cooldown_request"] = 1.0
+            else:
+                rf_params["cooldown_request"] = float(rf_params["cooldown_request"])
+            return rf_params
         except Exception as e:
             log.error(f"Error reading rf params: {e}")
             return {}

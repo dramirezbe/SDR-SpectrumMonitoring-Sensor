@@ -117,6 +117,7 @@ typedef enum {
 typedef struct {
     rf_mode_t rf_mode;      /**< Modo de operación actual. */
     Psd_method method_psd;  /**< Algoritmo PSD seleccionado. */
+    bool calibrate;         /**< Solicita ejecutar rutina de calibración sin adquirir. */
     
     /** @name Parámetros de Hardware */
     /**@{*/
@@ -126,7 +127,7 @@ typedef struct {
     int vga_gain;         /**< Ganancia del amplificador de ganancia variable (VGA). */
     bool amp_enabled;     /**< Estado del amplificador de potencia interno. */
     int antenna_port;     /**< Puerto de antena seleccionado. */
-    int ppm_error;        /**< Corrección de error del oscilador en PPM. */
+    float ppm_error;      /**< Corrección de error del oscilador en PPM. */
     /**@}*/
 
     /** @name Parámetros de Análisis Espectral */
@@ -134,6 +135,8 @@ typedef struct {
     int rbw;                     /**< Resolution Bandwidth (Hz). */
     double overlap;              /**< Porcentaje de solapamiento (0.0 a 1.0). */
     PsdWindowType_t window_type; /**< Ventana aplicada al PSD. */
+    double cooldown_request;     /**< Cooldown entre requests/PSD en segundos. */
+    bool cooldown_request_set;   /**< Indica si cooldown_request vino explícitamente en el último JSON. */
     /**@}*/
 
     /** @name Bloque de Filtrado */
