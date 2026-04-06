@@ -24,47 +24,12 @@ from functions import (
 import sys
 import asyncio
 from dataclasses import asdict
-import os
 import time
 import subprocess
-import signal
 
-WEBRTC_CMD = [
-    "systemd-cat",
-    "-t",
-    "WEBRTC_SERVER",
-    cfg.PYTHON_ENV_STR,
-    "-u",
-    str(cfg.PROJECT_ROOT / "server_webrtc.py"),
-]
+WEBRTC_CMD = f"{cfg.PYTHON_ENV_STR} -u server_webrtc.py 2>&1 | systemd-cat -t WEBRTC_SERVER"
 #KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync_legal_FM.py 2>&1 | systemd-cat -t KAL_SYNC"
 #log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
-
-
-def _stop_process_group(proc: subprocess.Popen, label: str, timeout: float = 5.0) -> None:
-    """
-    Stops a subprocess launched in its own process group.
-
-    This is required for wrapped commands like systemd-cat, because calling
-    terminate() on the wrapper PID does not guarantee that the worker exits.
-    """
-    if proc is None or proc.poll() is not None:
-        return
-
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=timeout)
-    except ProcessLookupError:
-        return
-    except subprocess.TimeoutExpired:
-        log.warning(f"[{label}] Graceful shutdown timed out. Sending SIGKILL to process group...")
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=2)
-        except Exception as kill_err:
-            log.error(f"[{label}] Failed to kill process group: {kill_err}")
-    except Exception as stop_err:
-        log.error(f"[{label}] Failed to stop process group: {stop_err}")
 
 # --- CONFIG FETCHING ---
 def fetch_realtime_config(client):
@@ -248,13 +213,14 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 if is_demod:
                     if webrtc_proc is None or webrtc_proc.poll() is not None:
                         log.info("[REALTIME] Starting WebRTC Server...")
-                        webrtc_proc = subprocess.Popen(WEBRTC_CMD, start_new_session=True)
+                        webrtc_proc = subprocess.Popen(WEBRTC_CMD, shell=True)
                     DEMOD_CFG_SENT = True
                     dsp_payload = await acquirer.get_corrected_data(next_config)     
                 else:
                     if webrtc_proc is not None:
                         log.info("[REALTIME] Stopping WebRTC Server...")
-                        _stop_process_group(webrtc_proc, "WEBRTC_SERVER")
+                        webrtc_proc.terminate()
+                        webrtc_proc.wait() # Ensure it's fully closed
                         webrtc_proc = None # Reset the handle
                     dsp_payload = await acquirer.get_corrected_data(next_config) 
                     if DEMOD_CFG_SENT:
@@ -295,12 +261,16 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
 
     except Exception as e:
         if webrtc_proc:
-            _stop_process_group(webrtc_proc, "WEBRTC_SERVER")
+            webrtc_proc.terminate()
         log.error(f"[REALTIME] Critical loop error: {e}")
     finally:
         log.info("[REALTIME] Reverting to IDLE.")
         if webrtc_proc and webrtc_proc.poll() is None:
-            _stop_process_group(webrtc_proc, "WEBRTC_SERVER")
+            webrtc_proc.terminate()
+            try:
+                webrtc_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                webrtc_proc.kill() # Force kill if it won't stop
         GlobalSys.set(SysState.IDLE)
     
     return 0
