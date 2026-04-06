@@ -23,13 +23,278 @@ from functions import (
 
 import sys
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import time
 import subprocess
+import logging
+import os
+import shlex
+import signal
+import threading
+import time 
+from typing import Dict, List, Optional, Tuple
 
-WEBRTC_CMD = f"{cfg.PYTHON_ENV_STR} -u server_webrtc.py 2>&1 | systemd-cat -t WEBRTC_SERVER"
-#KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync_legal_FM.py 2>&1 | systemd-cat -t KAL_SYNC"
-#log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
+
+# -----------------------------------------------------------------------------
+# Process helpers
+# -----------------------------------------------------------------------------
+
+@dataclass
+class ManagedProc:
+    name: str
+    argv: List[str]
+    env: Dict[str, str]
+    proc: subprocess.Popen
+    log_thread: threading.Thread
+
+
+def _parse_exec_env(exec_str: str) -> Tuple[List[str], Dict[str, str]]:
+    """
+    Soporta valores como:
+      "/opt/venv/bin/python3"
+      "PYTHONUNBUFFERED=1 /opt/venv/bin/python3"
+    """
+    tokens = shlex.split(exec_str)
+    if not tokens:
+        raise ValueError("cfg.PYTHON_ENV_STR is empty")
+
+    env = os.environ.copy()
+    argv: List[str] = []
+
+    for tok in tokens:
+        if "=" in tok and not argv:
+            k, v = tok.split("=", 1)
+            if k and all(ch not in k for ch in " /\\"):
+                env[k] = v
+                continue
+        argv.append(tok)
+
+    if not argv:
+        raise ValueError(f"Could not parse executable from: {exec_str!r}")
+
+    return argv, env
+
+
+def _build_python_cmd(exec_str: str, script_name: str) -> Tuple[List[str], Dict[str, str]]:
+    base_argv, env = _parse_exec_env(exec_str)
+    argv = [*base_argv, "-u", script_name]
+    return argv, env
+
+
+
+def _read_proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+
+def _read_proc_state(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="ignore") as f:
+            parts = f.read().split()
+        return parts[2] if len(parts) > 2 else ""
+    except Exception:
+        return ""
+
+
+def _iter_matching_pids(match_terms: List[str]) -> List[int]:
+    found: List[int] = []
+    self_pid = os.getpid()
+
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+
+        pid = int(entry)
+        if pid == self_pid:
+            continue
+
+        if _read_proc_state(pid) == "Z":
+            continue
+
+        cmd = _read_proc_cmdline(pid)
+        if not cmd:
+            continue
+
+        if all(term in cmd for term in match_terms):
+            found.append(pid)
+
+    return found
+
+
+def _kill_pid_or_group(pid: int, sig: int, log: logging.Logger) -> None:
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        log.warning(f"[PROC] getpgid({pid}) failed: {e}")
+        pgid = None
+
+    try:
+        current_pgid = os.getpgrp()
+    except Exception:
+        current_pgid = None
+
+    try:
+        if pgid and pgid != current_pgid:
+            os.killpg(pgid, sig)
+        else:
+            os.kill(pid, sig)
+    except ProcessLookupError:
+        return
+    except Exception as e:
+        log.warning(f"[PROC] signal {sig} failed for pid={pid}, pgid={pgid}: {e}")
+
+
+def cleanup_stale_processes(match_terms: List[str], log: logging.Logger, term_timeout: float = 2.0) -> None:
+    pids = _iter_matching_pids(match_terms)
+    if not pids:
+        return
+
+    log.warning(f"[PROC] Cleaning stale processes for {match_terms}: {pids}")
+
+    for pid in pids:
+        _kill_pid_or_group(pid, signal.SIGTERM, log)
+
+    end = time.monotonic() + term_timeout
+    while time.monotonic() < end:
+        alive = [pid for pid in pids if os.path.exists(f"/proc/{pid}")]
+        if not alive:
+            return
+        time.sleep(0.1)
+
+    alive = [pid for pid in pids if os.path.exists(f"/proc/{pid}")]
+    if alive:
+        log.warning(f"[PROC] Force killing stale processes: {alive}")
+        for pid in alive:
+            _kill_pid_or_group(pid, signal.SIGKILL, log)
+
+
+def _pump_process_output(proc: subprocess.Popen, name: str, log: logging.Logger) -> None:
+    try:
+        assert proc.stdout is not None
+        for line in iter(proc.stdout.readline, ""):
+            if not line:
+                break
+            log.info(f"[{name}] {line.rstrip()}")
+    except Exception as e:
+        log.warning(f"[{name}] log pump stopped: {e}")
+    finally:
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+        except Exception:
+            pass
+
+
+def start_managed_process(
+    *,
+    name: str,
+    argv: List[str],
+    env: Dict[str, str],
+    log: logging.Logger,
+    stale_match_terms: Optional[List[str]] = None,
+) -> ManagedProc:
+    if stale_match_terms:
+        cleanup_stale_processes(stale_match_terms, log)
+
+    log.info(f"[PROC] Starting {name}: {' '.join(shlex.quote(x) for x in argv)}")
+
+    proc = subprocess.Popen(
+        argv,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+        close_fds=True,
+        preexec_fn=os.setsid,   # new session + new process group
+        env=env,
+    )
+
+    t = threading.Thread(
+        target=_pump_process_output,
+        args=(proc, name, log),
+        name=f"{name}_log_pump",
+        daemon=True,
+    )
+    t.start()
+
+    return ManagedProc(
+        name=name,
+        argv=argv,
+        env=env,
+        proc=proc,
+        log_thread=t,
+    )
+
+
+def stop_managed_process(mp: Optional[ManagedProc], log: logging.Logger, timeout: float = 2.0) -> None:
+    if mp is None:
+        return
+
+    proc = mp.proc
+
+    if proc.poll() is not None:
+        try:
+            proc.wait(timeout=0)
+        except Exception:
+            pass
+        return
+
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        pgid = None
+    except Exception as e:
+        log.warning(f"[PROC] {mp.name}: getpgid failed: {e}")
+        pgid = None
+
+    log.info(f"[PROC] Stopping {mp.name} pid={proc.pid} pgid={pgid}")
+
+    try:
+        if pgid:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        log.warning(f"[PROC] {mp.name}: SIGTERM failed: {e}")
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log.warning(f"[PROC] {mp.name}: TERM timeout, sending SIGKILL")
+        try:
+            if pgid:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            log.warning(f"[PROC] {mp.name}: SIGKILL failed: {e}")
+        finally:
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning(f"[PROC] {mp.name}: wait() failed: {e}")
+
+    script_name = mp.argv[-1] if mp.argv else mp.name
+    cleanup_stale_processes([script_name], log)
+
+
+WEBRTC_ARGV, WEBRTC_ENV = _build_python_cmd(cfg.PYTHON_ENV_STR, "server_webrtc.py")
+
 
 # --- CONFIG FETCHING ---
 def fetch_realtime_config(client):
@@ -166,8 +431,8 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     Gestiona el bucle de ejecución para el modo de tiempo real.
 
     Establece una conexión ZMQ con el backend de procesamiento (DSP), adquiere
-    espectros (con o sin demodulación/offset) y los sube a la API. El bucle 
-    se mantiene activo hasta que el servidor deja de enviar una configuración válida 
+    espectros (con o sin demodulación/offset) y los sube a la API. El bucle
+    se mantiene activo hasta que el servidor deja de enviar una configuración válida
     o se alcanza el tiempo de rotación.
 
     Args:
@@ -178,65 +443,81 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
         int: Código de estado (0 para fin de ciclo, 1 si el sistema está ocupado).
     """
     log.info("[REALTIME] Entering Sticky Mode (Offset & Crop enabled)...")
-    if not GlobalSys.is_idle(): return 1
-    
-    # 1. Initial Probe
+    if not GlobalSys.is_idle():
+        return 1
+
     next_config, _, delta_t_ms = fetch_realtime_config(client)
     if not next_config:
         return 0
-    
-    # 2. Lock State
+
     GlobalSys.set(SysState.REALTIME)
-    webrtc_proc = None
+    webrtc_proc: Optional[ManagedProc] = None
     DEMOD_CFG_SENT = False
     RESET_DEMOD_CFG = False
     store.add_to_persistent("delta_t_ms", delta_t_ms)
-    
+
     timer_force_rotation = ElapsedTimer()
-    timer_force_rotation.init_count(300) 
+    timer_force_rotation.init_count(300)
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
+
     try:
         async with controller as zmq_ctrl:
             acquirer = AcquireDual(controller=zmq_ctrl, log=log)
 
             log.info("[REALTIME] Connection established. Processing stream...")
-            
+
+            # limpieza preventiva de instancias viejas
+            cleanup_stale_processes(["server_webrtc.py"], log)
+            cleanup_stale_processes(["systemd-cat", "WEBRTC_SERVER"], log)
+
             while True:
                 if timer_force_rotation.time_elapsed():
                     log.info("[REALTIME] Periodic rotation triggered.")
                     break
 
-                #StateMachine Realtime
                 is_demod = bool(next_config.get("demodulation", False))
 
+                # si murió inesperadamente, limpiar handle
+                if webrtc_proc is not None and webrtc_proc.proc.poll() is not None:
+                    rc = webrtc_proc.proc.returncode
+                    log.warning(f"[REALTIME] WebRTC exited unexpectedly rc={rc}")
+                    stop_managed_process(webrtc_proc, log, timeout=0.5)
+                    webrtc_proc = None
+
                 if is_demod:
-                    if webrtc_proc is None or webrtc_proc.poll() is not None:
+                    if webrtc_proc is None:
                         log.info("[REALTIME] Starting WebRTC Server...")
-                        webrtc_proc = subprocess.Popen(WEBRTC_CMD, shell=True)
+                        webrtc_proc = start_managed_process(
+                            name="WEBRTC_SERVER",
+                            argv=WEBRTC_ARGV,
+                            env=WEBRTC_ENV,
+                            log=log,
+                            stale_match_terms=["server_webrtc.py"],
+                        )
+
                     DEMOD_CFG_SENT = True
-                    dsp_payload = await acquirer.get_corrected_data(next_config)     
+                    dsp_payload = await acquirer.get_corrected_data(next_config)
+
                 else:
                     if webrtc_proc is not None:
                         log.info("[REALTIME] Stopping WebRTC Server...")
-                        webrtc_proc.terminate()
-                        webrtc_proc.wait() # Ensure it's fully closed
-                        webrtc_proc = None # Reset the handle
-                    dsp_payload = await acquirer.get_corrected_data(next_config) 
+                        stop_managed_process(webrtc_proc, log)
+                        webrtc_proc = None
+
+                    dsp_payload = await acquirer.get_corrected_data(next_config)
+
                     if DEMOD_CFG_SENT:
                         RESET_DEMOD_CFG = True
                         DEMOD_CFG_SENT = False
 
                 if RESET_DEMOD_CFG:
-                    await zmq_ctrl.send_command({}) #Stop the audio demodulation in rf_engine just if demodulation changed
+                    await zmq_ctrl.send_command({})
                     RESET_DEMOD_CFG = False
 
-                
-                
                 if dsp_payload:
                     final_payload = format_data_for_upload(dsp_payload, log)
 
-                    #debug
                     if final_payload.get("excursion_hz", False):
                         log.info(f"Excursion: {final_payload['excursion_hz']} Hz")
                     if final_payload.get("depth", False):
@@ -248,31 +529,31 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                 else:
                     log.warning("[REALTIME] Acquisition timeout or DSP error.")
 
-                # --- STEP D: Heartbeat / Config Update ---
                 new_conf, _, dt = fetch_realtime_config(client)
                 if not new_conf:
                     log.info("[REALTIME] Stop command received. Breaking.")
-                    break 
-                
+                    break
+
                 next_config = new_conf
                 store.add_to_persistent("delta_t_ms", dt)
 
                 await asyncio.sleep(0.05)
 
     except Exception as e:
-        if webrtc_proc:
-            webrtc_proc.terminate()
-        log.error(f"[REALTIME] Critical loop error: {e}")
+        log.exception(f"[REALTIME] Critical loop error: {e}")
     finally:
         log.info("[REALTIME] Reverting to IDLE.")
-        if webrtc_proc and webrtc_proc.poll() is None:
-            webrtc_proc.terminate()
-            try:
-                webrtc_proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                webrtc_proc.kill() # Force kill if it won't stop
+
+        try:
+            stop_managed_process(webrtc_proc, log)
+        finally:
+            webrtc_proc = None
+
+        cleanup_stale_processes(["server_webrtc.py"], log)
+        cleanup_stale_processes(["systemd-cat", "WEBRTC_SERVER"], log)
+
         GlobalSys.set(SysState.IDLE)
-    
+
     return 0
 
 # --- 2. CAMPAIGN LOGIC ---
