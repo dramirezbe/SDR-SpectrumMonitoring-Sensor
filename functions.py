@@ -15,6 +15,7 @@ from utils import ShmStore
 from enum import Enum, auto
 from crontab import CronTab
 import logging
+import shlex
 import numpy as np
 import re
 import asyncio
@@ -124,7 +125,10 @@ class CronSchedulerCampaign:
     def __init__(self, poll_interval_s, python_env=None, cmd=None, logger=None):
         self.poll_interval_ms = poll_interval_s * 1000
         self.python_env = python_env if python_env else "/usr/bin/python3"
-        self.cmd = f"{self.python_env} {cmd} 2>&1 | systemd-cat -t CAMPAIGN_RUNNER"
+        self.cmd = (
+            f"systemd-cat -t CAMPAIGN_RUNNER "
+            f"{shlex.quote(self.python_env)} {shlex.quote(cmd)}"
+        )
         self._log = logger if logger else logging.getLogger(__name__)
 
         # Configuración según entorno
