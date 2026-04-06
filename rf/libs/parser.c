@@ -230,13 +230,25 @@ void print_config_summary_DEPLOY(DesiredCfg_t *des, SDR_cfg_t *hw, PsdConfig_t *
 
     // Line 1: Hardware, Gain, and FFT Resolution
     // Format: [CFG] MODE | FREQ (MHz) | SAMPLE RATE | GAIN | AMP | PSD POINTS
-    printf("[CFG] %s | %" PRIu64 "Hz (%.2fM) | FS:%.1fM | G:%d/%d | AMP:%c | PTS:%d\n",
-           m_n[des->rf_mode % 3], 
-           hw->center_freq, (double)hw->center_freq / 1e6,
-           hw->sample_rate / 1e6,
-           hw->lna_gain, hw->vga_gain,
-           des->amp_enabled ? 'Y' : 'N',
-           psd->nperseg);
+    if (fabs((double)hw->ppm_error) > 1e-6) {
+        printf("[CFG] %s | %" PRIu64 "Hz->%" PRIu64 "Hz (%.2fM) | FS:%.1fM | G:%d/%d | AMP:%c | PTS:%d\n",
+               m_n[des->rf_mode % 3],
+               hw->center_freq,
+               hw->center_freq_corrected,
+               (double)hw->center_freq / 1e6,
+               hw->sample_rate / 1e6,
+               hw->lna_gain, hw->vga_gain,
+               des->amp_enabled ? 'Y' : 'N',
+               psd->nperseg);
+    } else {
+        printf("[CFG] %s | %" PRIu64 "Hz (%.2fM) | FS:%.1fM | G:%d/%d | AMP:%c | PTS:%d\n",
+               m_n[des->rf_mode % 3],
+               hw->center_freq, (double)hw->center_freq / 1e6,
+               hw->sample_rate / 1e6,
+               hw->lna_gain, hw->vga_gain,
+               des->amp_enabled ? 'Y' : 'N',
+               psd->nperseg);
+    }
 
     // Line 2: DSP, Windowing, Buffer, and Filter Range
     // Format: Method | RBW | Overlap | Window Name | Buffer Size | Filter Range

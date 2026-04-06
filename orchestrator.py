@@ -28,7 +28,7 @@ import time
 import subprocess
 
 WEBRTC_CMD = f"{cfg.PYTHON_ENV_STR} -u server_webrtc.py 2>&1 | systemd-cat -t WEBRTC_SERVER"
-KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync_legal_FM.py 2>&1 | systemd-cat -t KAL_SYNC"
+#KAL_SYNC_CMD = f"{cfg.PYTHON_ENV_STR} -u kal_sync_legal_FM.py 2>&1 | systemd-cat -t KAL_SYNC"
 #log.info(f"WEBRTC_CMD: {WEBRTC_CMD}")
 
 # --- CONFIG FETCHING ---
@@ -73,6 +73,10 @@ def fetch_realtime_config(client):
         if json_payload.get("center_freq_hz") == 0:
             return {}, resp, delta_t_ms
         
+        ppm_err_shm = None
+        # DISABLED!!!!!! WARNNING!!!! DISABLED!!!! (FOR DEBUGGING)
+        ppm_err_shm = ShmStore().consult_persistent("ppm_error")
+
         config_obj = ServerRealtimeConfig(
                 method_psd="pfb",
                 center_freq_hz=int(json_payload.get("center_freq_hz")), 
@@ -84,8 +88,8 @@ def fetch_realtime_config(client):
                 vga_gain=int(json_payload.get("vga_gain")),
                 antenna_amp=bool(json_payload.get("antenna_amp")),
                 antenna_port=int(json_payload.get("antenna_port")), 
-                ppm_error=0,
-                cooldown_request=float(json_payload.get("cooldown_request", 1.0))
+                ppm_error=float(ppm_err_shm) if ppm_err_shm else 0.0,
+                cooldown_request=float(json_payload.get("cooldown_request", 2.0))
             )
         
         if json_payload.get("demodulation") in ["fm","am"]:
@@ -118,12 +122,31 @@ def fetch_realtime_config(client):
 async def _perform_calibration_sequence():
     log.info("--------------------------------")
     log.info("🛠️ INICIANDO CALIBRACIÓN PRE-CAMPAÑA")
+    previous_state = GlobalSys.current
     GlobalSys.set(SysState.KALIBRATING)
+    return_code = 1 #fallback
     
     try:
-        # Uso de asyncio para no bloquear el loop
-        process = await asyncio.create_subprocess_shell(KAL_SYNC_CMD)
-        return_code = await process.wait()
+        controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
+        async with controller as zmq_ctrl:
+            log.info("Enviando comando de calibración...")
+            await zmq_ctrl.send_command({"calibrate": True})
+            
+            log.info("Esperando respuesta del motor...")
+            try:
+                response = await zmq_ctrl.wait_for_data()
+                log.info(f"✓ Respuesta recibida: {response}")
+                ppm_engine = response.get("ppm_error", None)
+                if ppm_engine is None or ppm_engine == 0.0 or ppm_engine == 0:
+                    log.warning(f"⚠️ Advertencia: valor inválido de PPM valor: {ppm_engine}. No se actualizará el error de frecuencia.")
+                    return_code = 1
+                else:
+                    return_code = 0
+
+            except asyncio.TimeoutError:
+                log.warning("✗ Timeout: No se recibió respuesta del motor en 15 segundos")
+
+        
 
         if return_code == 0:
             log.info("✅ Calibración exitosa.")
@@ -131,7 +154,10 @@ async def _perform_calibration_sequence():
             log.warning(f"⚠️ Calibración falló (RC {return_code}). Continuando...")
     except Exception as e:
         log.error(f"❌ Error en secuencia de calibración: {e}")
-    
+    finally:
+        if GlobalSys.current == SysState.KALIBRATING:
+            GlobalSys.set(previous_state if previous_state != SysState.KALIBRATING else SysState.IDLE)
+
     log.info("--------------------------------")
 
 # --- 1. REALTIME LOGIC (WITH OFFSET & CROP) ---
@@ -289,7 +315,7 @@ async def run_campaigns_logic(client: RequestClient, store: ShmStore, scheduler:
         
         if is_active:
             # DISABLED!!!!!! WARNNING!!!! DISABLED!!!! (FOR DEBUGGING)
-            #await _perform_calibration_sequence()
+            await _perform_calibration_sequence()
             GlobalSys.set(SysState.CAMPAIGN)
             
             while True:

@@ -130,6 +130,20 @@ int rx_callback(hackrf_transfer* transfer);
 static inline float calibration_finish(float final_ppm) {
     printf("final_ppm = %.3f\n", final_ppm);
     printf("calibration done\n");
+    
+    // Guardar ppm_error en ShmStore solo si la calibración fue exitosa
+    if (final_ppm != 0.0f) {
+        char ppm_str[64];
+        snprintf(ppm_str, sizeof(ppm_str), "%.6f", (double)final_ppm);
+        if (shm_add_to_persistent("ppm_error", ppm_str) == 0) {
+            printf("[SHM] ppm_error guardado en ShmStore: %.6f\n", final_ppm);
+        } else {
+            printf("[SHM] Error guardando ppm_error en ShmStore\n");
+        }
+    } else {
+        printf("[SHM] Calibración falló (ppm=0.0), no se guarda en ShmStore\n");
+    }
+    
     atomic_store(&calibration_running, false);
     return final_ppm;
 }
@@ -811,7 +825,20 @@ void on_command_received(const char *payload) {
 
         if (temp_desired.calibrate) {
             float _cal_ppm = calibrate_hackrf();
-            (void)_cal_ppm;
+            
+            // Enviar respuesta de calibración
+            cJSON *response = cJSON_CreateObject();
+            cJSON_AddStringToObject(response, "status", "calibration_complete");
+            cJSON_AddNumberToObject(response, "ppm_error", (double)_cal_ppm);
+            char *response_str = cJSON_PrintUnformatted(response);
+            cJSON_Delete(response);
+            
+            if (zpair_send(zmq_channel, response_str) >= 0) {
+                printf("[RF] Respuesta de calibración enviada: ppm=%.6f\n", _cal_ppm);
+            } else {
+                printf("[RF] Error al enviar respuesta de calibración\n");
+            }
+            free(response_str);
             return;
         }
 
@@ -1322,8 +1349,12 @@ int main() {
                         audio_ctx.fm_dev.dev_ema_hz
                     );
 
-                          printf("[RF_PSD] Acquisition | PPM Error: %.3f | Fc: %" PRIu64 " Hz\n",
-                           local_hack.ppm_error, local_hack.center_freq);
+                    {
+                        uint64_t tuned_fc = local_hack.center_freq_corrected;
+                        if (tuned_fc == 0) tuned_fc = local_hack.center_freq;
+                        printf("[RF_PSD] Acquisition | PPM Error: %.3f | Fc_nom: %" PRIu64 " Hz | Fc_tuned: %" PRIu64 " Hz\n",
+                               local_hack.ppm_error, local_hack.center_freq, tuned_fc);
+                    }
 
                     clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
                 } else {

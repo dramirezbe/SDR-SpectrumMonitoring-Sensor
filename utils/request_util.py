@@ -41,7 +41,7 @@ class ServerRealtimeConfig:
     vga_gain: int
     antenna_amp: bool
     antenna_port: int
-    ppm_error: int
+    ppm_error: float
     cooldown_request: float = 1.0
     demodulation: Optional[str] = None
     filter: Optional[FilterConfig] = None
