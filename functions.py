@@ -15,6 +15,8 @@ from utils import ShmStore
 from enum import Enum, auto
 from crontab import CronTab
 import logging
+import shlex
+import os
 import numpy as np
 import re
 import asyncio
@@ -22,6 +24,40 @@ from copy import deepcopy
 import copy
 from dc_spike_removal import DCSpikeRemovalPipeline
 import pandas as pd
+
+
+def _parse_exec_env(exec_str: str):
+    """
+    Convierte una cadena de ejecución en argv + entorno.
+
+    Soporta valores como:
+      "/opt/venv/bin/python3"
+      "PYTHONUNBUFFERED=1 /opt/venv/bin/python3"
+    """
+    tokens = shlex.split(exec_str)
+    if not tokens:
+        raise ValueError("python_env is empty")
+
+    env = os.environ.copy()
+    argv = []
+
+    for tok in tokens:
+        if "=" in tok and not argv:
+            key, value = tok.split("=", 1)
+            if key and all(ch not in key for ch in " /\\"):
+                env[key] = value
+                continue
+        argv.append(tok)
+
+    if not argv:
+        raise ValueError(f"Could not parse executable from: {exec_str!r}")
+
+    return argv, env
+
+
+def _build_python_cmd(exec_str: str, script_name: str):
+    base_argv, env = _parse_exec_env(exec_str)
+    return [*base_argv, "-u", script_name], env
 
 class SysState(Enum):
     """
@@ -124,7 +160,10 @@ class CronSchedulerCampaign:
     def __init__(self, poll_interval_s, python_env=None, cmd=None, logger=None):
         self.poll_interval_ms = poll_interval_s * 1000
         self.python_env = python_env if python_env else "/usr/bin/python3"
-        self.cmd = f"{self.python_env} {cmd} 2>&1 | systemd-cat -t CAMPAIGN_RUNNER"
+        if cmd is None:
+            raise ValueError("campaign runner script path is required")
+        campaign_argv, _ = _build_python_cmd(self.python_env, cmd)
+        self.cmd = f"systemd-cat -t CAMPAIGN_RUNNER {shlex.join(campaign_argv)}"
         self._log = logger if logger else logging.getLogger(__name__)
 
         # Configuración según entorno
