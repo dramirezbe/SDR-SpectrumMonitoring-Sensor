@@ -1,7 +1,7 @@
 import numpy as np
-from libs_DSP import WindowReconstructionUtils
-from dc_spike_detection import DCSpikeDetectionUtils
-from spectral_content_analysis import SpectralContentAnalysisUtils
+from utils.libs_DSP import WindowReconstructionUtils
+from utils.dc_spike_detection import DCSpikeDetectionUtils
+from utils.spectral_content_analysis import SpectralContentAnalysisUtils
 
 
 class DCSpikeRemovalPipeline:

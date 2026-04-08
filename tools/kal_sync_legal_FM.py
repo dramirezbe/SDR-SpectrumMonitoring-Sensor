@@ -13,6 +13,9 @@ log = cfg.set_logger()
 from functions import AcquireDual
 from utils import ZmqPairController, ServerRealtimeConfig, ShmStore
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------------------
 # ESTRUCTURAS DE DATOS
 # ---------------------------------------------------------

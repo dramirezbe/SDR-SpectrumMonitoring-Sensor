@@ -22,7 +22,7 @@ import re
 import asyncio
 from copy import deepcopy
 import copy
-from dc_spike_removal import DCSpikeRemovalPipeline
+from utils.dc_spike_removal import DCSpikeRemovalPipeline
 
 def _parse_exec_env(exec_str: str):
     """

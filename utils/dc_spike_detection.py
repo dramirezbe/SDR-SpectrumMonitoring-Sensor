@@ -1,4 +1,4 @@
-from libs_DSP import SignalProcessingUtils
+from utils.libs_DSP import SignalProcessingUtils
 import numpy as np
 
 class DCSpikeDetectionUtils:

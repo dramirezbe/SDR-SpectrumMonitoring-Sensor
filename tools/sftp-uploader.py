@@ -13,12 +13,9 @@ import numpy as np
 import paramiko
 import io
 
-FIXED_ROOT = Path("/home/anepi/SDR-SpectrumMonitoring-Sensor").resolve()
-
-os.chdir(FIXED_ROOT)
-
-if str(FIXED_ROOT) not in sys.path:
-    sys.path.insert(0, str(FIXED_ROOT))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 print(f"Directorio de trabajo actual: {os.getcwd()}")
 

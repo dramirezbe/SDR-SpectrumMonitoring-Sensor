@@ -1,5 +1,5 @@
 import numpy as np
-from libs_DSP import SignalProcessingUtils
+from utils.libs_DSP import SignalProcessingUtils
 
 
 class SpectralContentAnalysisUtils:

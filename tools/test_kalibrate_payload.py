@@ -1,8 +1,12 @@
 from utils import ZmqPairController
-import time
 import asyncio
 import cfg
+import sys
+from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 async def main():
     print("Starting Kalibrate Payload Test... Esperando conexión del motor RF")

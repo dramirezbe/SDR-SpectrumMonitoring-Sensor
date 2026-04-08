@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+from pathlib import Path
+import sys
+
 from utils import ShmStore
 import cfg
 log = cfg.set_logger()
@@ -7,6 +10,11 @@ import subprocess, os
 import numpy as np
 import pandas as pd
 import scipy.signal as sig
+
+    
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 SR = 20_000_000
 FC = 98_000_000
