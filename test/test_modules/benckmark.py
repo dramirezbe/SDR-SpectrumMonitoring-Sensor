@@ -27,11 +27,19 @@ class BenchmarkCSV:
         self.duration = duration
         self.interval = interval
         self.running = True
-        self.last_disk_write = cast(Any, psutil.disk_io_counters()).write_bytes
+        self.last_disk_write = self._get_disk_bytes()
         self.last_time = time.time()
 
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+
+    def _get_disk_bytes(self):
+        try:
+            with open('/proc/diskstats', 'r') as f:
+                # Índice 9 = sectores escritos. * 512 = bytes
+                return sum(int(l.split()[9]) for l in f.readlines() if 'loop' not in l and 'ram' not in l) * 512
+        except:
+            return 0
 
     def _run_loop(self):
         end_t = time.time() + self.duration
@@ -56,7 +64,7 @@ class BenchmarkCSV:
         ram = psutil.virtual_memory().percent
         swap = psutil.swap_memory().percent
 
-        d_write = cast(Any, psutil.disk_io_counters()).write_bytes
+        d_write = self._get_disk_bytes()
         t_diff = now - self.last_time
         mbps = ((d_write - self.last_disk_write) / t_diff) / (1024 * 1024) if t_diff > 0 else 0
         self.last_disk_write, self.last_time = d_write, now
