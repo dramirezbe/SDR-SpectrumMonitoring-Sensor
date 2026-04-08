@@ -23,8 +23,6 @@ import asyncio
 from copy import deepcopy
 import copy
 from dc_spike_removal import DCSpikeRemovalPipeline
-import pandas as pd
-
 
 def _parse_exec_env(exec_str: str):
     """
