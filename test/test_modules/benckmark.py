@@ -55,7 +55,7 @@ class BenchmarkCSV:
 
     def save_data(self):
         now = time.time()
-        load = psutil.getloadavg()[0]
+        load = os.getloadavg()[0]
         
         try: freq = int(psutil.cpu_freq().current)
         except: freq = 0
