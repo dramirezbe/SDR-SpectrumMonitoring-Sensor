@@ -18,7 +18,7 @@ class BenchmarkCSV:
         self.file = open(os.path.join(folder_path, final_csv_name), 'w', newline='')
         self.writer = csv.writer(self.file)
 
-        num_cores = cast(int, psutil.cpu_count())
+        num_cores = os.cpu_count()
         headers = ["Time_Human", "Time_Unix_ms", "CPU_Load_1m", "CPU_Freq_MHz"] + [
             f"Core_{i}_%" for i in range(num_cores)
         ] + ["RAM_Used_%", "Swap_Used_%", "Disk_Write_MBps", "Temp_C", "Throttled"]
