@@ -5,7 +5,6 @@ import stat
 
 # Configuración
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('-n', type=str, help="Número de nodo (Modo Servidor)")
 parser.add_argument('-r', type=str, help="Ruta local base (Modo Servidor)")
