@@ -4,15 +4,7 @@ import os
 import stat
 
 # Configuración
-TUNNEL_HOST = "PLACEHOLDER"
-TUNNEL_PORT = 1222
-TUNNEL_USER = "root"
-TUNNEL_PASS = 'PLACEHOLDER'
 
-NODE_PORT = 21104
-NODE_USER = "anepi"
-NODE_PASS = "PLACEHOLDER" # Password proporcionada
-REMOTE_DIR = "/home/anepi/SDR-SpectrumMonitoring-Sensor/results"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-n', type=str, help="Número de nodo (Modo Servidor)")
