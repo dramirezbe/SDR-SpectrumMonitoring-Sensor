@@ -382,13 +382,15 @@ class AcquireDual:
         Determina la desviación estándar del ruido según el tamaño de FFT.
         """
         if pxx_length > 16385:
-            return 0.33
+            return 0.68
         elif pxx_length > 4096:
-            return 0.20
+            return 0.58
         elif pxx_length > 1024:
-            return 0.12
+            return 0.35
+        elif pxx_length > 512:
+            return 0.11
         else:
-            return 0.06
+            return 0.08
 
     def _classify_occupancy_from_debug_info(self, debug_info):
         """
