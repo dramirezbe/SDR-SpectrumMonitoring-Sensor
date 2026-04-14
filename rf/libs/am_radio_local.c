@@ -132,7 +132,7 @@ static inline float am_cic2_decim_push(am_radio_local_t *r, double x, int R, int
     r->cic_i2 += r->cic_i1;
 
     r->env_count++;
-    if (r->env_count < (size_t)R) {
+    if (r->env_count < R) {
         *ready = 0;
         return 0.0f;
     }

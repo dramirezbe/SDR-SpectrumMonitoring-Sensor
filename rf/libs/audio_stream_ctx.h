@@ -46,8 +46,8 @@
  * @brief Parámetros de diseño para el filtro de canal IQ.
  * El ancho de banda para WBFM se define típicamente como \f[ BW = 200 \text{ kHz} \f]
  */
-static float  IQ_FILTER_BW_FM_HZ      = 200000.0f;
-static int    IQ_FILTER_ORDER         = 6;         /**< Orden del filtro Butterworth (par). */
+#define IQ_FILTER_BW_FM_HZ      200000.0f
+#define IQ_FILTER_ORDER         6         /**< Orden del filtro Butterworth (par). */
 
 #ifdef __cplusplus
 extern "C" {

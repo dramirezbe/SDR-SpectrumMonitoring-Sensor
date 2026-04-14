@@ -70,7 +70,7 @@
  */
 static int    IQ_FILTER_ENABLE        = 1;      /**< Interruptor para habilitar/deshabilitar el filtrado IIR en datos IQ crudos. */
 static float  IQ_FILTER_BW_AM_HZ      = 20000.0f; /**< Ancho de banda en Hz para el pre-filtro de demodulación AM. */
-static int    IQ_FILTER_APPLY_TO_PSD  = 1;      /**< Si es verdadero, aplica el filtrado de canal antes del cálculo de PSD. */
+
 /** @} */
 
 /**
