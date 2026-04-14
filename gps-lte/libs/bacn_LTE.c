@@ -87,7 +87,26 @@ void Start_Read_Response(void)
 
 bool WaitForExpectedResponse(const char* ExpectedResponse)
 {   
-    while(!LTERDY);
+    uint32_t wait_count = 0;
+
+    while(!LTERDY)
+    {
+        if (!LTE_run)
+        {
+            Response_Status = LTE_RESPONSE_ERROR;
+            return false;
+        }
+
+        if (wait_count >= (DEFAULT_TIMEOUT + TimeOut))
+        {
+            Response_Status = LTE_RESPONSE_TIMEOUT;
+            return false;
+        }
+
+        usleep(1000);
+        wait_count++;
+    }
+
     LTERDY = false;
     Start_Read_Response();                      /* First read response */
 

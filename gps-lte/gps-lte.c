@@ -315,6 +315,8 @@ int main(void)
     int tryRB = 0;
     int status = 0;
     int ping_result = 0;
+    int lte_start_attempts = 0;
+    const int lte_start_max_attempts = 8;
 
     system("clear");
     system("sudo poff rnet");
@@ -334,7 +336,19 @@ int main(void)
 
     printf("LTE module ready\r\n");
 
-    while(!LTE_Start(&LTE));
+    while(!LTE_Start(&LTE)) {
+        lte_start_attempts++;
+        fprintf(stderr, "WARN: LTE did not respond to ATE0 (attempt %d/%d)\n",
+                lte_start_attempts, lte_start_max_attempts);
+
+        if (lte_start_attempts >= lte_start_max_attempts) {
+            fprintf(stderr, "ERROR: LTE startup failed after %d attempts\n", lte_start_attempts);
+            close_usart(&LTE);
+            return -1;
+        }
+
+        sleep(1);
+    }
     printf("LTE response OK\n");
 
     if(init_usart1(&GPS) != 0)
