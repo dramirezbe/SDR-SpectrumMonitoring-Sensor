@@ -1,0 +1,79 @@
+# ==========================================
+# Configuración Base y Video
+# ==========================================
+# Habilita salida de audio por hardware PWM/I2S
+dtparam=audio=on
+
+# Sondeo automático en buses I2C/DSI para inyectar DTOs de hardware oficial
+camera_auto_detect=1
+display_auto_detect=1
+
+# Carga initramfs para montaje de rootfs previo al control total del kernel
+auto_initramfs=1
+
+# Driver de video Full KMS delegando aceleración V3D al subsistema DRM
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+
+# Evita que el firmware force resolución en cmdline.txt; delega EDID al kernel
+disable_fw_kms_setup=1
+
+# Arranque estricto de procesador y kernel en aarch64
+arm_64bit=1
+
+# Anula compensación de márgenes de hardware (overscan)
+disable_overscan=1
+
+# ==========================================
+# Gestión de CPU (BCM2712)
+# ==========================================
+# Desactiva aceleración algorítmica térmica/frecuencia del firmware
+arm_boost=0
+
+# Fija multiplicador PLL del procesador a 2.0 GHz máximo estático
+arm_freq=2000
+
+# ==========================================
+# Filtros de Hardware (Compute Modules)
+# ==========================================
+[cm4]
+# Habilita controlador XHCI interno como Host
+otg_mode=1
+
+[cm5]
+# Carga controlador USB DWC2 forzado explícitamente en modo Host
+dtoverlay=dwc2,dr_mode=host
+
+[all]
+# ==========================================
+# Periféricos y GPIO
+# ==========================================
+# Habilita reloj para consola serie primaria
+dtparam=uart0=on
+
+# Configuración pines nodo ANE: Definidos como salidas, inicializados en BAJO
+gpio=4,10,22,24,27=op,dl
+
+# Pin 23: Definido como salida, inicializado en ALTO
+gpio=23=op,dh
+
+# Pines 17 y 18: Flotantes (desactiva resistencias pull-up/pull-down internas)
+gpio=17,18=pn/np
+
+# Permite downclock (voltaje/frecuencia) por el gobernador de Linux en inactividad
+force_turbo=0
+
+# Libera RAM al no cargar firmware legacy extendido de GPU (start_x.elf)
+start_x=0
+
+# Desconecta módulo Bluetooth interno para liberar bus UART y mitigar ruido RF
+dtoverlay=disable-bt
+
+# ==========================================
+# Power Management (Bypass PMIC)
+# ==========================================
+# Levanta bloqueo del PMIC, habilitando límite físico de hardware (1.6A en bus USB)
+usb_max_current_enable=1
+
+# Ignora handshake USB-PD forzando presupuesto energético global de 5 Amperios
+psu_max_current=5000
