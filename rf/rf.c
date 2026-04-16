@@ -127,6 +127,59 @@ static double g_request_cooldown_s = 1.0;
 
 int rx_callback(hackrf_transfer* transfer);
 
+typedef struct {
+    int8_t *linear_buffer;
+    size_t linear_capacity_bytes;
+    signal_iq_t sig;
+    size_t sig_capacity_samples;
+    double *freq;
+    double *psd;
+    int spectrum_capacity;
+} rf_processing_workspace_t;
+
+static void rf_workspace_release(rf_processing_workspace_t *ws) {
+    if (!ws) return;
+    free(ws->linear_buffer);
+    free(ws->sig.signal_iq);
+    free(ws->freq);
+    free(ws->psd);
+    memset(ws, 0, sizeof(*ws));
+}
+
+static int rf_workspace_ensure(rf_processing_workspace_t *ws, size_t iq_bytes, int nperseg) {
+    if (!ws || iq_bytes == 0 || nperseg <= 0) return -1;
+
+    const size_t iq_samples = iq_bytes / 2U;
+    if (ws->linear_capacity_bytes < iq_bytes) {
+        int8_t *new_linear = (int8_t*)realloc(ws->linear_buffer, iq_bytes);
+        if (!new_linear) return -1;
+        ws->linear_buffer = new_linear;
+        ws->linear_capacity_bytes = iq_bytes;
+    }
+
+    if (ws->sig_capacity_samples < iq_samples) {
+        double complex *new_sig = (double complex*)realloc(ws->sig.signal_iq, iq_samples * sizeof(double complex));
+        if (!new_sig) return -1;
+        ws->sig.signal_iq = new_sig;
+        ws->sig_capacity_samples = iq_samples;
+    }
+    ws->sig.n_signal = iq_samples;
+
+    if (ws->spectrum_capacity < nperseg) {
+        double *new_freq = (double*)realloc(ws->freq, (size_t)nperseg * sizeof(double));
+        if (!new_freq) return -1;
+        ws->freq = new_freq;
+
+        double *new_psd = (double*)realloc(ws->psd, (size_t)nperseg * sizeof(double));
+        if (!new_psd) return -1;
+        ws->psd = new_psd;
+
+        ws->spectrum_capacity = nperseg;
+    }
+
+    return 0;
+}
+
 static inline float calibration_finish(float final_ppm) {
     printf("final_ppm = %.3f\n", final_ppm);
     printf("calibration done\n");
@@ -1150,6 +1203,7 @@ int main() {
 
     bool audio_thread_created = false;
     double last_radio_sample_rate = 0.0;
+    rf_processing_workspace_t proc_ws = {0};
 
     // Audio streaming context setup
     audio_stream_ctx_t audio_ctx;
@@ -1311,65 +1365,51 @@ int main() {
             }
         }
 
-        int8_t* linear_buffer = malloc(local_rb.total_bytes);
-        if (linear_buffer) {
+        if (rf_workspace_ensure(&proc_ws, local_rb.total_bytes, local_psd.nperseg) == 0) {
             size_t buf_bytes = local_rb.total_bytes;
             size_t iq_points = buf_bytes / 2; /* interleaved I,Q each 1 byte */
             double buf_mb = (double)buf_bytes / (1024.0 * 1024.0);
             fprintf(stderr, "[RF] linear_buffer: %zu bytes (%zu IQ points), %.3f MB; PSD nperseg=%d\n",
                     buf_bytes, iq_points, buf_mb, local_psd.nperseg);
-            rb_read(&rb, linear_buffer, local_rb.total_bytes);
+            rb_read(&rb, proc_ws.linear_buffer, local_rb.total_bytes);
 
-            signal_iq_t* sig = load_iq_from_buffer(linear_buffer, local_rb.total_bytes);
-            
-            if (sig) {
-                iq_compensation(sig);
-                double* freq = malloc(local_psd.nperseg * sizeof(double));
-                double* psd = malloc(local_psd.nperseg * sizeof(double));
-
-                if (freq && psd) {
-                    if (local_desired.filter_enabled) {
-                        chan_filter_apply_inplace_abs(sig, &local_desired.filter_cfg, 
-                                                      local_hack.center_freq_corrected, local_hack.sample_rate);
-                    }
-
-                    if (local_desired.method_psd == PFB) {
-                        execute_pfb_psd(sig, &local_psd, freq, psd);
-                    } else {
-                        execute_welch_psd(sig, &local_psd, freq, psd);
-                    }
-
-                    publish_results(
-                        psd,
-                        local_psd.nperseg,
-                        &local_hack,
-                        local_desired.center_freq,
-                        (int)local_desired.rf_mode,
-                        audio_ctx.am_depth.depth_ema,
-                        audio_ctx.fm_dev.dev_ema_hz
-                    );
-
-                    {
-                        uint64_t tuned_fc = local_hack.center_freq_corrected;
-                        if (tuned_fc == 0) tuned_fc = local_hack.center_freq;
-                        printf("[RF_PSD] Acquisition | PPM Error: %.3f | Fc_nom: %" PRIu64 " Hz | Fc_tuned: %" PRIu64 " Hz\n",
-                               local_hack.ppm_error, local_hack.center_freq, tuned_fc);
-                    }
-
-                    clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
-                } else {
-                    fprintf(stderr, "[RF] Error: PSD buffer allocation failed.\n");
+            if (load_iq_into_signal(proc_ws.linear_buffer, local_rb.total_bytes, &proc_ws.sig) == 0) {
+                iq_compensation(&proc_ws.sig);
+                if (local_desired.filter_enabled) {
+                    chan_filter_apply_inplace_abs(&proc_ws.sig, &local_desired.filter_cfg,
+                                                  local_hack.center_freq_corrected, local_hack.sample_rate);
                 }
 
-                if (freq) free(freq);
-                if (psd) free(psd);
-                free_signal_iq(sig);
+                if (local_desired.method_psd == PFB) {
+                    execute_pfb_psd(&proc_ws.sig, &local_psd, proc_ws.freq, proc_ws.psd);
+                } else {
+                    execute_welch_psd(&proc_ws.sig, &local_psd, proc_ws.freq, proc_ws.psd);
+                }
+
+                publish_results(
+                    proc_ws.psd,
+                    local_psd.nperseg,
+                    &local_hack,
+                    local_desired.center_freq,
+                    (int)local_desired.rf_mode,
+                    audio_ctx.am_depth.depth_ema,
+                    audio_ctx.fm_dev.dev_ema_hz
+                );
+
+                {
+                    uint64_t tuned_fc = local_hack.center_freq_corrected;
+                    if (tuned_fc == 0) tuned_fc = local_hack.center_freq;
+                    printf("[RF_PSD] Acquisition | PPM Error: %.3f | Fc_nom: %" PRIu64 " Hz | Fc_tuned: %" PRIu64 " Hz\n",
+                           local_hack.ppm_error, local_hack.center_freq, tuned_fc);
+                }
+
+                clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
             } else {
-                fprintf(stderr, "[RF] Error: Failed to load IQ signal from buffer.\n");
+                fprintf(stderr, "[RF] Error: Failed to load IQ signal into reusable workspace.\n");
             }
-            free(linear_buffer);
         } else {
-            fprintf(stderr, "[RF] Error: Linear buffer allocation failed (%zu bytes).\n", local_rb.total_bytes);
+            fprintf(stderr, "[RF] Error: Workspace allocation failed (%zu bytes, nperseg=%d).\n",
+                    local_rb.total_bytes, local_psd.nperseg);
         }
 
         clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
@@ -1383,6 +1423,7 @@ int main() {
     zpair_close(zmq_channel);
     rb_free(&rb);
     rb_free(&audio_rb);
+    rf_workspace_release(&proc_ws);
     
     if (device) { 
         hackrf_stop_rx(device); 

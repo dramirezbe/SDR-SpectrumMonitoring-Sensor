@@ -56,3 +56,50 @@ Cualquier agente debe seguir el siguiente flujo de modificación:
 3. **Validación de la Interfaz:** Garantizar que los argumentos de entrada y la semántica de respuesta no se quiebren.
 4. **Compile Test Local:** Compilar usando `./build.sh -dev` (sin `sudo`).
 5. **Validación de Flujo Operativo:** Correr `sudo ./install-local.sh` y certificar la conectividad ZMQ o de sistema antes de avanzar.
+
+## 5. Plan de Ejecución Inmediata (Wave 1)
+
+Esta fase implementa las tres optimizaciones de mayor impacto detectadas en `rf/` y `gps-lte/`, manteniendo intactos los parámetros solicitados por el usuario vía ZMQ JSON.
+
+### Prioridad 1: Reutilización de workspace y cache en PSD de RF
+- **Objetivo:** eliminar asignaciones repetidas en caliente para `linear_buffer`, IQ convertido, `freq` y `psd`.
+- **Archivos afectados:** `rf/rf.c`, `rf/libs/psd.c`, `rf/libs/psd.h`.
+- **Cambios clave:**
+  - Reusar buffers del loop principal de RF y solo redimensionarlos cuando cambie `total_bytes` o `nperseg`.
+  - Convertir IQ interleaved dentro de un `signal_iq_t` preasignado.
+  - Cachear ventana Welch y `u_norm` por combinación de `window_type` y `nperseg`.
+  - Sustituir acumulación por atómicos bin-a-bin por acumuladores locales por hilo con reducción final.
+- **Validación:**
+  - `./build.sh -dev`
+  - Verificar que la salida PSD conserve exactamente el `nperseg` solicitado.
+  - Verificar que el rango de frecuencias publicado siga correspondiendo al `center_freq` y `sample_rate` pedidos.
+
+### Prioridad 2: Ring buffer SPSC con sincronización mínima
+- **Objetivo:** quitar contención por mutex en `rx_callback()` y en el consumidor principal.
+- **Archivos afectados:** `rf/libs/ring_buffer.c`, `rf/libs/ring_buffer.h`, `rf/rf.c`.
+- **Cambios clave:**
+  - Migrar `head` y `tail` a índices atómicos para productor único y consumidor único.
+  - Mantener `rb_write()`, `rb_read()` y `rb_available()` sin cambios de firma.
+  - Conservar la política actual de escritura parcial cuando el buffer se llena.
+  - Reservar `pthread_cond_t` solo para dormir/despertar al consumidor.
+- **Validación:**
+  - `./build.sh -dev`
+  - Verificar que no existan deadlocks entre `rx_callback()` y el hilo principal.
+  - Verificar que el buffer de audio siga comportándose igual cuando cambia `audio_enabled`.
+
+### Prioridad 3: Espera basada en eventos en `gps-lte`
+- **Objetivo:** eliminar polling con `usleep(1000)` y `sleep(1)` en la ruta serie y de telemetría.
+- **Archivos afectados:** `gps-lte/libs/bacn_LTE.c`, `gps-lte/gps-lte.c`, `gps-lte/libs/bacn_GPS.c`.
+- **Cambios clave:**
+  - Hacer que el hilo RX de LTE publique respuestas listas mediante `pthread_cond_t`.
+  - Reemplazar el retardo fijo antes de `read()` por un drenado acotado del puerto serie usando `select()`.
+  - Hacer que el loop principal GPS espere por nuevas tramas con timeout, sin polling de 1 segundo.
+  - Mantener intactas las políticas de reintento LTE, ping y recuperación PPP.
+- **Validación:**
+  - `./build.sh -dev`
+  - `sudo ./install-local.sh`
+  - Verificar que `LTE_Start()` siga detectando `OK`.
+  - Verificar que el POST GPS siga ocurriendo cada 10 actualizaciones y que la recuperación PPP siga activándose tras 6 fallos de conectividad.
+
+### Nota Inviolable
+- Bajo ninguna circunstancia se deben reducir `sample_rate`, `nperseg`, `rbw`, overlap u otra resolución solicitada por el usuario para ahorrar CPU o memoria. Toda optimización debe ocurrir alrededor de esos requisitos.

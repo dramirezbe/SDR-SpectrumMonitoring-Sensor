@@ -17,6 +17,7 @@
 #include <termios.h>
 #include <stdint.h>
 #include <sys/select.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>

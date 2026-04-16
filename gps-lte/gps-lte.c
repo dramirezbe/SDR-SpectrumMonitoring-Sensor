@@ -176,7 +176,32 @@ GPSCommand GPSInfo;
 bool LTE_open = false; /**< Indica si el puerto serie LTE está abierto. */
 bool GPS_open = false; /**< Indica si el puerto serie GPS está abierto. */
 bool GPSRDY  = false;  /**< Bandera de sincronización para nueva trama GPS. */
+pthread_mutex_t gps_ready_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t gps_ready_cond = PTHREAD_COND_INITIALIZER;
 /** @} */
+
+static bool gps_wait_for_ready(int timeout_ms) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&gps_ready_mutex);
+    while (!GPSRDY) {
+        int rc = pthread_cond_timedwait(&gps_ready_cond, &gps_ready_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            pthread_mutex_unlock(&gps_ready_mutex);
+            return false;
+        }
+    }
+    GPSRDY = false;
+    pthread_mutex_unlock(&gps_ready_mutex);
+    return true;
+}
 
 /**
  * @brief Gestiona la conexión a la red de datos mediante el demonio PPP.
@@ -374,9 +399,7 @@ int main(void)
     
     while (1)
     {
-        // Assume GPSRDY is set by an Interrupt Service Routine (ISR) or separate RX handler
-        if(GPSRDY) {
-            GPSRDY = false;
+        if (gps_wait_for_ready(1000)) {
             count++;
 
             // Trigger every 10 GPS updates
@@ -466,9 +489,6 @@ int main(void)
                 }
             } 
         }
-        
-        // Slight delay to prevent 100% CPU usage if GPSRDY is polling based
-        sleep(1); 
     }    
 
     return 0;

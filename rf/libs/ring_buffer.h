@@ -10,7 +10,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -33,9 +33,8 @@
 typedef struct {
     uint8_t *buffer;      /**< Puntero al bloque de memoria principal. */
     size_t size;          /**< Tamaño total del búfer en bytes. */
-    size_t head;          /**< Índice/Posición de escritura acumulada. */
-    size_t tail;          /**< Índice/Posición de lectura acumulada. */
-    pthread_mutex_t lock; /**< Mutex para garantizar acceso atómico. */
+    atomic_size_t head;   /**< Índice/Posición de escritura acumulada. */
+    atomic_size_t tail;   /**< Índice/Posición de lectura acumulada. */
 } ring_buffer_t;
 
 /**

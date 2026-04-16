@@ -64,6 +64,15 @@
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size);
 
 /**
+ * @brief Convierte un búfer IQ interleaved dentro de una estructura ya asignada.
+ * @param buffer Puntero a datos [I0, Q0, I1, Q1, ...].
+ * @param buffer_size Tamaño total en bytes.
+ * @param signal_data Estructura destino con capacidad suficiente en signal_iq.
+ * @return 0 en éxito, -1 si hay error o la capacidad no alcanza.
+ */
+int load_iq_into_signal(const int8_t* buffer, size_t buffer_size, signal_iq_t* signal_data);
+
+/**
  * @brief Compensación de desequilibrios IQ (IQ Imbalance Compensation).
  *
  * Esta función corrige defectos comunes introducidos por el front-end analógico

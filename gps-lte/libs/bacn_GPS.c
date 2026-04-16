@@ -19,6 +19,8 @@ const char NMEA_DELIMITERS[3] = "$,";
 extern GPSCommand GPSInfo;
 extern bool GPSRDY;
 extern bool GPS_open;
+extern pthread_mutex_t gps_ready_mutex;
+extern pthread_cond_t gps_ready_cond;
 /** @endcond */
 
 bool GPS_run = false;
@@ -125,10 +127,13 @@ void* GPSIntHandler(void *arg)
             memset(RESPONSE_BUFFER_GPS, 0, UART_BUFFER_SIZE); 
             //usleep(100000);           
             s_uart->recv_buff_cnt = read(s_uart->serial_fd, &RESPONSE_BUFFER_GPS, UART_BUFFER_SIZE); 
-            GPSRDY = true;
             if(strlen(RESPONSE_BUFFER_GPS) > 30) {
                 GPS_Track(RESPONSE_BUFFER_GPS);
             }
+            pthread_mutex_lock(&gps_ready_mutex);
+            GPSRDY = true;
+            pthread_cond_signal(&gps_ready_cond);
+            pthread_mutex_unlock(&gps_ready_mutex);
             //printf ("%s\n",RESPONSE_BUFFER_GPS);          
         }
         else

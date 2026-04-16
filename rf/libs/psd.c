@@ -9,26 +9,37 @@
  * @{
  */
 
+int load_iq_into_signal(const int8_t* buffer, size_t buffer_size, signal_iq_t* signal_data) {
+    if (!buffer || buffer_size == 0 || !signal_data || !signal_data->signal_iq) return -1;
+
+    const size_t n_samples = buffer_size / 2U;
+    if (signal_data->n_signal < n_samples) return -1;
+
+    for (size_t i = 0; i < n_samples; i++) {
+        signal_data->signal_iq[i] = (double)buffer[2 * i] + (double)buffer[2 * i + 1] * I;
+    }
+
+    signal_data->n_signal = n_samples;
+    return 0;
+}
+
 signal_iq_t* load_iq_from_buffer(const int8_t* buffer, size_t buffer_size) {
     if (!buffer || buffer_size == 0) return NULL;
 
-    size_t n_samples = buffer_size / 2;
+    const size_t n_samples = buffer_size / 2U;
     signal_iq_t* signal_data = (signal_iq_t*)malloc(sizeof(signal_iq_t));
     if (!signal_data) return NULL;
-    
-    signal_data->n_signal = n_samples;
-    // Use calloc to ensure zero-init if something fails partially
+
     signal_data->signal_iq = (double complex*)calloc(n_samples, sizeof(double complex));
-    
     if (!signal_data->signal_iq) {
         free(signal_data);
         return NULL;
     }
 
-    // Convert interleaved 8-bit I/Q to complex double
-    // Buffer format: [I0, Q0, I1, Q1, ...]
-    for (size_t i = 0; i < n_samples; i++) {
-        signal_data->signal_iq[i] = (double)buffer[2 * i] + (double)buffer[2 * i + 1] * I;
+    signal_data->n_signal = n_samples;
+    if (load_iq_into_signal(buffer, buffer_size, signal_data) != 0) {
+        free_signal_iq(signal_data);
+        return NULL;
     }
 
     return signal_data;
@@ -191,6 +202,13 @@ void free_signal_iq(signal_iq_t* signal) {
         free(signal);
     }
 }
+
+typedef struct {
+    int nperseg;
+    PsdWindowType_t window_type;
+    double *window;
+    double u_norm;
+} welch_window_cache_t;
 
 /**
  * @brief Restringe un valor de punto flotante a un rango específico [lo, hi].
@@ -430,18 +448,28 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
         k_segments = (int)((n_signal - nperseg) / step) + 1;
     }
 
-    double* window = (double*)malloc(nperseg * sizeof(double));
-    if (!window) return; 
-    
-    generate_window(config->window_type, window, nperseg);
+    static __thread welch_window_cache_t tl_window_cache = {0};
+    if (tl_window_cache.window == NULL ||
+        tl_window_cache.nperseg != nperseg ||
+        tl_window_cache.window_type != config->window_type) {
+        double *new_window = (double*)realloc(tl_window_cache.window, (size_t)nperseg * sizeof(double));
+        if (!new_window) return;
+        tl_window_cache.window = new_window;
+        tl_window_cache.nperseg = nperseg;
+        tl_window_cache.window_type = config->window_type;
 
-    // Calculate window power (S2) safely
-    double u_norm = 0.0;
-    #pragma omp parallel for reduction(+:u_norm)
-    for (int i = 0; i < nperseg; i++) {
-        u_norm += window[i] * window[i];
+        generate_window(config->window_type, tl_window_cache.window, nperseg);
+
+        double u_norm = 0.0;
+        #pragma omp parallel for reduction(+:u_norm)
+        for (int i = 0; i < nperseg; i++) {
+            u_norm += tl_window_cache.window[i] * tl_window_cache.window[i];
+        }
+        tl_window_cache.u_norm = u_norm / nperseg;
     }
-    u_norm /= nperseg;
+
+    const double *window = tl_window_cache.window;
+    const double u_norm = tl_window_cache.u_norm;
 
     // Reset Output
     memset(p_out, 0, nfft * sizeof(double));
@@ -455,6 +483,8 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
     static __thread double complex* tl_welch_in = NULL;
     static __thread double complex* tl_welch_out = NULL;
     static __thread fftw_plan tl_welch_plan = NULL;
+    static __thread double *tl_welch_accum = NULL;
+    static __thread int tl_welch_accum_nfft = 0;
 
     // Welch Averaging Loop - Parallelized
     #pragma omp parallel
@@ -501,11 +531,24 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
         double complex* local_fft_in = tl_welch_in;
         double complex* local_fft_out = tl_welch_out;
         fftw_plan local_plan = tl_welch_plan;
+        if (tl_welch_accum == NULL || tl_welch_accum_nfft != nfft) {
+            double *new_accum = (double*)realloc(tl_welch_accum, (size_t)nfft * sizeof(double));
+            if (!new_accum) {
+                local_plan = NULL;
+            } else {
+                tl_welch_accum = new_accum;
+                tl_welch_accum_nfft = nfft;
+            }
+        }
+        double *local_accum = tl_welch_accum;
+        if (local_accum) {
+            memset(local_accum, 0, (size_t)nfft * sizeof(double));
+        }
 
         // [PATCH C] Use dynamic scheduling to handle load imbalance
         #pragma omp for schedule(dynamic, 1)
         for (int k = 0; k < k_segments; k++) {
-            if (!local_plan || !local_fft_in || !local_fft_out) continue;
+            if (!local_plan || !local_fft_in || !local_fft_out || !local_accum) continue;
 
             size_t start = k * step;
             
@@ -523,9 +566,16 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
             for (int i = 0; i < nfft; i++) {
                 double mag = cabs(local_fft_out[i]);
                 double mag2 = mag * mag;
-                
-                #pragma omp atomic
-                p_out[i] += mag2;
+                local_accum[i] += mag2;
+            }
+        }
+
+        if (local_accum) {
+            #pragma omp critical(welch_accum_reduce)
+            {
+                for (int i = 0; i < nfft; i++) {
+                    p_out[i] += local_accum[i];
+                }
             }
         }
     }
@@ -553,8 +603,6 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
         f_out[i] = -fs / 2.0 + i * df;
     }
 
-    // Cleanup
-    free(window);
 }
 
 /**

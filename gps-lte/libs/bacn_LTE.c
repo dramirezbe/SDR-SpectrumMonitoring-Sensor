@@ -20,60 +20,63 @@ bool LTERDY = false;                     /**< Flag que indica que hay nuevos dat
 
 bool LTE_run = false;
 
+static pthread_mutex_t lte_response_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t lte_response_cond = PTHREAD_COND_INITIALIZER;
+
 /** @cond DOXYGEN_SHOULD_SKIP_THIS */
 extern bool LTE_open;
 /** @endcond */
 
+static void deadline_from_now_ms(struct timespec *ts, uint32_t timeout_ms)
+{
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_sec += timeout_ms / 1000U;
+    ts->tv_nsec += (long)(timeout_ms % 1000U) * 1000000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec += 1;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+static int count_crlf_sequences(const char *buffer)
+{
+    int crlf_found = 0;
+    char prev = '\0';
+
+    if (!buffer) return 0;
+
+    for (size_t i = 0; buffer[i] != '\0'; ++i) {
+        if (prev == '\r' && buffer[i] == '\n') {
+            crlf_found++;
+        }
+        prev = buffer[i];
+    }
+
+    return crlf_found;
+}
+
 void Read_Response(void)
 {
-    char CRLF_BUF[2];
-    char CRLF_FOUND;
-    uint32_t TimeCount = 0, ResponseBufferLength;
+    pthread_mutex_lock(&lte_response_mutex);
 
-    while(1)
-    {
-        if(TimeCount >= (DEFAULT_TIMEOUT+TimeOut))
-        {
-            CRLF_COUNT = 0; TimeOut = 0;
-            Response_Status = LTE_RESPONSE_TIMEOUT;
-            return;
-        }
-
-        if(Response_Status == LTE_RESPONSE_STARTING)
-        {
-            CRLF_FOUND = 0;
-            memset(CRLF_BUF, 0, 2);
-            Response_Status = LTE_RESPONSE_WAITING;
-        }
-        ResponseBufferLength = strlen(RESPONSE_BUFFER);
-        if (ResponseBufferLength)
-        {
-            usleep(1000);
-
-            TimeCount++;
-            if (ResponseBufferLength==strlen(RESPONSE_BUFFER))
-            {
-                uint16_t i;
-                for (i=0; i<ResponseBufferLength; i++)
-                {
-                    memmove(CRLF_BUF, CRLF_BUF + 1, 1);
-                    CRLF_BUF[1] = RESPONSE_BUFFER[i];
-                    if(!strncmp(CRLF_BUF, "\r\n", 2))
-                    {
-                        if(++CRLF_FOUND == (DEFAULT_CRLF_COUNT+CRLF_COUNT))
-                        {
-                            CRLF_COUNT = 0; TimeOut = 0;
-                            Response_Status = LTE_RESPONSE_FINISHED;
-                            return;
-                        }
-                    }
-                }
-                CRLF_FOUND = 0;
-            }
-        }
-        usleep(1000);
-        TimeCount++;
+    if (Response_Status == LTE_RESPONSE_STARTING) {
+        Response_Status = LTE_RESPONSE_WAITING;
     }
+
+    const size_t response_len = strnlen(RESPONSE_BUFFER, UART_BUFFER_SIZE);
+    if (response_len == 0) {
+        Response_Status = LTE_RESPONSE_TIMEOUT;
+    } else if (response_len >= (size_t)(UART_BUFFER_SIZE - 1)) {
+        Response_Status = LTE_RESPONSE_BUFFER_FULL;
+    } else if (count_crlf_sequences(RESPONSE_BUFFER) >= (DEFAULT_CRLF_COUNT + CRLF_COUNT)) {
+        Response_Status = LTE_RESPONSE_FINISHED;
+    } else {
+        Response_Status = LTE_RESPONSE_FINISHED;
+    }
+
+    CRLF_COUNT = 0;
+    TimeOut = 0;
+    pthread_mutex_unlock(&lte_response_mutex);
 }
 
 void Start_Read_Response(void)
@@ -87,30 +90,35 @@ void Start_Read_Response(void)
 
 bool WaitForExpectedResponse(const char* ExpectedResponse)
 {   
-    uint32_t wait_count = 0;
+    struct timespec deadline;
+    deadline_from_now_ms(&deadline, DEFAULT_TIMEOUT + TimeOut);
 
-    while(!LTERDY)
-    {
-        if (!LTE_run)
-        {
+    pthread_mutex_lock(&lte_response_mutex);
+    while (!LTERDY) {
+        if (!LTE_run) {
             Response_Status = LTE_RESPONSE_ERROR;
+            pthread_mutex_unlock(&lte_response_mutex);
             return false;
         }
 
-        if (wait_count >= (DEFAULT_TIMEOUT + TimeOut))
-        {
+        int rc = pthread_cond_timedwait(&lte_response_cond, &lte_response_mutex, &deadline);
+        if (rc == ETIMEDOUT) {
             Response_Status = LTE_RESPONSE_TIMEOUT;
+            pthread_mutex_unlock(&lte_response_mutex);
             return false;
         }
-
-        usleep(1000);
-        wait_count++;
     }
 
     LTERDY = false;
+    pthread_mutex_unlock(&lte_response_mutex);
     Start_Read_Response();                      /* First read response */
 
-    if((Response_Status != LTE_RESPONSE_TIMEOUT) && (strstr(RESPONSE_BUFFER, ExpectedResponse) != NULL))
+    pthread_mutex_lock(&lte_response_mutex);
+    bool matched = (Response_Status != LTE_RESPONSE_TIMEOUT) &&
+                   (strstr(RESPONSE_BUFFER, ExpectedResponse) != NULL);
+    pthread_mutex_unlock(&lte_response_mutex);
+
+    if (matched)
         return true;                            /* Return true for success */
 
     return false;                               /* Else return false */
@@ -118,6 +126,12 @@ bool WaitForExpectedResponse(const char* ExpectedResponse)
 
 bool SendATandExpectResponse(st_uart *s_uart, const char* ATCommand, const char* ExpectedResponse)
 {
+    pthread_mutex_lock(&lte_response_mutex);
+    memset(RESPONSE_BUFFER, 0, sizeof(RESPONSE_BUFFER));
+    LTERDY = false;
+    Response_Status = LTE_RESPONSE_STARTING;
+    pthread_mutex_unlock(&lte_response_mutex);
+
     LTE_SendString(s_uart, ATCommand);            /* Send AT command to LTE */
     return WaitForExpectedResponse(ExpectedResponse);
 }
@@ -183,7 +197,10 @@ int8_t init_usart(st_uart *s_uart)
 
 void close_usart(st_uart *s_uart)
 {   
+    pthread_mutex_lock(&lte_response_mutex);
     LTE_run = false;
+    pthread_cond_broadcast(&lte_response_cond);
+    pthread_mutex_unlock(&lte_response_mutex);
     close(s_uart->serial_fd);
 }
 
@@ -193,8 +210,6 @@ void* LTEIntHandler(void *arg)
     fd_set rset;
     struct timeval tv;
     int32_t count = 0;
-    uint8_t i = 0;
-
 
     while(LTE_run)
     {
@@ -206,11 +221,39 @@ void* LTEIntHandler(void *arg)
         count = select(s_uart->serial_fd + 1, &rset, NULL, NULL, &tv);
 
         if(count > 0)
-        {            
-            memset(RESPONSE_BUFFER, 0, UART_BUFFER_SIZE); 
-            usleep(800000);           
-            s_uart->recv_buff_cnt = read(s_uart->serial_fd, &RESPONSE_BUFFER, UART_BUFFER_SIZE); 
-            LTERDY = true;           
+        {
+            char local_buffer[UART_BUFFER_SIZE];
+            size_t used = 0;
+            memset(local_buffer, 0, sizeof(local_buffer));
+
+            while (LTE_run && used < (size_t)(UART_BUFFER_SIZE - 1)) {
+                ssize_t bytes = read(s_uart->serial_fd, local_buffer + used, (size_t)(UART_BUFFER_SIZE - 1) - used);
+                if (bytes > 0) {
+                    used += (size_t)bytes;
+                    s_uart->recv_buff_cnt = (int32_t)used;
+                } else {
+                    break;
+                }
+
+                FD_ZERO(&rset);
+                FD_SET(s_uart->serial_fd, &rset);
+                tv.tv_sec = 0;
+                tv.tv_usec = 200000;
+                count = select(s_uart->serial_fd + 1, &rset, NULL, NULL, &tv);
+                if (count <= 0) {
+                    break;
+                }
+            }
+
+            pthread_mutex_lock(&lte_response_mutex);
+            memset(RESPONSE_BUFFER, 0, sizeof(RESPONSE_BUFFER));
+            memcpy(RESPONSE_BUFFER, local_buffer, used);
+            if (used >= (size_t)(UART_BUFFER_SIZE - 1)) {
+                Response_Status = LTE_RESPONSE_BUFFER_FULL;
+            }
+            LTERDY = true;
+            pthread_cond_signal(&lte_response_cond);
+            pthread_mutex_unlock(&lte_response_mutex);
         }
         else
         {
