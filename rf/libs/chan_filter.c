@@ -51,6 +51,7 @@ typedef struct {
     fftw_plan fwd;          /**< Plan de FFT directa. */
     fftw_plan inv;          /**< Plan de FFT inversa. */
     double *mask_stage2;    /**< Valores precalculados de la máscara de magnitud. */
+    double *oob_mag;        /**< Scratch reusable para magnitudes OOB. */
 
     uint64_t last_fc;       /**< Última frecuencia central procesada. */
     double last_fs;         /**< Última frecuencia de muestreo procesada. */
@@ -72,6 +73,7 @@ static void cache_free(void) {
     if (g.in)  fftw_free(g.in);
     if (g.out) fftw_free(g.out);
     if (g.mask_stage2) free(g.mask_stage2);
+    if (g.oob_mag) free(g.oob_mag);
     memset(&g, 0, sizeof(g));
 }
 
@@ -179,7 +181,8 @@ static int build_mask_and_plans(int N, const filter_t *cfg, uint64_t fc_hz, doub
         g.fwd = fftw_plan_dft_1d(N, g.in, g.out, FFTW_FORWARD, FFTW_ESTIMATE);
         g.inv = fftw_plan_dft_1d(N, g.out, g.in, FFTW_BACKWARD, FFTW_ESTIMATE);
         g.mask_stage2 = (double*)malloc(sizeof(double) * (size_t)N);
-        if (!g.fwd || !g.inv || !g.mask_stage2) return -3;
+        g.oob_mag = (double*)malloc(sizeof(double) * (size_t)N);
+        if (!g.fwd || !g.inv || !g.mask_stage2 || !g.oob_mag) return -3;
     }
 
     double fc = (double)fc_hz;
@@ -259,7 +262,6 @@ int chan_filter_apply_inplace_abs(
     double ff_off = (double)cfg->end_freq_hz - (double)fc_hz;
     double df = fs_hz / (double)N;
 
-    double *oob_mag = (double*)malloc(sizeof(double) * N);
     int oob_n = 0;
 
     // Kept sequential: dynamically packing an array in parallel requires 
@@ -268,12 +270,14 @@ int chan_filter_apply_inplace_abs(
         int ks = (k <= N/2) ? k : (k - N);
         double f = (double)ks * df;
         if (f < fi_off || f > ff_off) {
-            oob_mag[oob_n++] = cabs(g.out[k]);
+            const double re = creal(g.out[k]);
+            const double im = cimag(g.out[k]);
+            g.oob_mag[oob_n++] = sqrt((re * re) + (im * im));
         }
     }
 
     if (oob_n > 16 && ((double)oob_n / N) >= MIN_OOB_FRAC) {
-        double med = median_of_array(oob_mag, oob_n);
+        double med = median_of_array(g.oob_mag, oob_n);
         if (med > 0.0) {
             double cap = med * db_to_lin_amp_chan_filt(CAP_OOB_DB);
             
@@ -282,7 +286,9 @@ int chan_filter_apply_inplace_abs(
                 int ks = (k <= N/2) ? k : (k - N);
                 double f = (double)ks * df;
                 if (f < fi_off || f > ff_off) {
-                    double mag = cabs(g.out[k]);
+                    const double re = creal(g.out[k]);
+                    const double im = cimag(g.out[k]);
+                    double mag = sqrt((re * re) + (im * im));
                     if (mag > cap) {
                         double s = cap / mag;
                         g.out[k] *= s;
@@ -291,7 +297,6 @@ int chan_filter_apply_inplace_abs(
             }
         }
     }
-    free(oob_mag);
 
     // Stage 2: Apply frequency mask
     #pragma omp parallel for

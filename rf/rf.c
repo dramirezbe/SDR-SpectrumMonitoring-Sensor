@@ -108,6 +108,8 @@ pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER; /**< Protege el acceso a 
 
 pthread_cond_t  rb_cond  = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t rb_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  audio_rb_cond  = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t audio_rb_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /** @} */
 
@@ -124,8 +126,18 @@ SDR_cfg_t    current_hw_cfg = {0};    /**< Estado actual real del hardware para 
 /** @} */
 
 static double g_request_cooldown_s = 1.0;
+#ifndef RF_DEBUG_LOGS
+#define RF_DEBUG_LOGS 0
+#endif
+
+#if RF_DEBUG_LOGS
+#define RF_TRACE(...) printf(__VA_ARGS__)
+#else
+#define RF_TRACE(...) do { if (0) printf(__VA_ARGS__); } while (0)
+#endif
 
 int rx_callback(hackrf_transfer* transfer);
+static int cmp_double_asc(const void *a, const void *b);
 
 typedef struct {
     int8_t *linear_buffer;
@@ -135,6 +147,12 @@ typedef struct {
     double *freq;
     double *psd;
     int spectrum_capacity;
+    double *scratch;
+    size_t scratch_capacity;
+    double complex *aux_sig;
+    size_t aux_sig_capacity_samples;
+    int16_t *pcm;
+    size_t pcm_capacity_samples;
 } rf_processing_workspace_t;
 
 static void rf_workspace_release(rf_processing_workspace_t *ws) {
@@ -143,6 +161,9 @@ static void rf_workspace_release(rf_processing_workspace_t *ws) {
     free(ws->sig.signal_iq);
     free(ws->freq);
     free(ws->psd);
+    free(ws->scratch);
+    free(ws->aux_sig);
+    free(ws->pcm);
     memset(ws, 0, sizeof(*ws));
 }
 
@@ -180,6 +201,47 @@ static int rf_workspace_ensure(rf_processing_workspace_t *ws, size_t iq_bytes, i
     return 0;
 }
 
+static int rf_workspace_ensure_scratch(rf_processing_workspace_t *ws, size_t count) {
+    if (!ws || count == 0) return -1;
+    if (ws->scratch_capacity < count) {
+        double *new_scratch = (double*)realloc(ws->scratch, count * sizeof(double));
+        if (!new_scratch) return -1;
+        ws->scratch = new_scratch;
+        ws->scratch_capacity = count;
+    }
+    return 0;
+}
+
+static int rf_workspace_ensure_aux_sig(rf_processing_workspace_t *ws, size_t samples) {
+    if (!ws || samples == 0) return -1;
+    if (ws->aux_sig_capacity_samples < samples) {
+        double complex *new_aux = (double complex*)realloc(ws->aux_sig, samples * sizeof(double complex));
+        if (!new_aux) return -1;
+        ws->aux_sig = new_aux;
+        ws->aux_sig_capacity_samples = samples;
+    }
+    return 0;
+}
+
+static int rf_workspace_ensure_pcm(rf_processing_workspace_t *ws, size_t samples) {
+    if (!ws || samples == 0) return -1;
+    if (ws->pcm_capacity_samples < samples) {
+        int16_t *new_pcm = (int16_t*)realloc(ws->pcm, samples * sizeof(int16_t));
+        if (!new_pcm) return -1;
+        ws->pcm = new_pcm;
+        ws->pcm_capacity_samples = samples;
+    }
+    return 0;
+}
+
+static double median_of_double_workspace(rf_processing_workspace_t *ws, const double *v, int n) {
+    if (!ws || !v || n <= 0) return 0.0;
+    if (rf_workspace_ensure_scratch(ws, (size_t)n) != 0) return 0.0;
+    memcpy(ws->scratch, v, (size_t)n * sizeof(double));
+    qsort(ws->scratch, (size_t)n, sizeof(double), cmp_double_asc);
+    return (n & 1) ? ws->scratch[n / 2] : 0.5 * (ws->scratch[n / 2 - 1] + ws->scratch[n / 2]);
+}
+
 static inline float calibration_finish(float final_ppm) {
     printf("final_ppm = %.3f\n", final_ppm);
     printf("calibration done\n");
@@ -207,17 +269,6 @@ static int cmp_double_asc(const void *a, const void *b) {
     return (x < y) ? -1 : (x > y);
 }
 
-static double median_of_double_copy(const double *v, int n) {
-    if (!v || n <= 0) return 0.0;
-    double *tmp = (double*)malloc((size_t)n * sizeof(double));
-    if (!tmp) return 0.0;
-    memcpy(tmp, v, (size_t)n * sizeof(double));
-    qsort(tmp, (size_t)n, sizeof(double), cmp_double_asc);
-    double med = (n & 1) ? tmp[n / 2] : 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
-    free(tmp);
-    return med;
-}
-
 static double interp_linear(const double *x, const double *y, int n, double xq) {
     if (!x || !y || n <= 0) return 0.0;
     if (xq <= x[0]) return y[0];
@@ -239,27 +290,28 @@ static double interp_linear(const double *x, const double *y, int n, double xq) 
 
 static float g_last_cal_ppm = 0.0f;
 static int g_has_last_cal_ppm = 0;
+static rf_processing_workspace_t g_calibration_ws = {0};
 
 
 static float calibrate_hackrf(void) {
     float final_ppm = 0.0f;
-    printf("calibrating\n");
-    printf("[CALDBG] enter calibrate_hackrf\n");
+    RF_TRACE("calibrating\n");
+    RF_TRACE("[CALDBG] enter calibrate_hackrf\n");
 
     if (atomic_exchange(&calibration_running, true)) {
-        printf("[CALDBG] calibration already running, skipping\n");
+        RF_TRACE("[CALDBG] calibration already running, skipping\n");
         return calibration_finish(final_ppm);
     }
 
     if (!stop_streaming) {
-        printf("[CALDBG] stop_streaming=false, RX busy, skipping calibration\n");
+        RF_TRACE("[CALDBG] stop_streaming=false, RX busy, skipping calibration\n");
         return calibration_finish(final_ppm);
     }
 
     if (device == NULL) {
-        printf("[CALDBG] device is NULL, opening HackRF\n");
+        RF_TRACE("[CALDBG] device is NULL, opening HackRF\n");
         if (hackrf_open(&device) != HACKRF_SUCCESS) {
-            printf("[CALDBG] hackrf_open failed\n");
+            RF_TRACE("[CALDBG] hackrf_open failed\n");
             return calibration_finish(final_ppm);
         }
 
@@ -271,7 +323,7 @@ static float calibrate_hackrf(void) {
             cfg_to_apply.vga_gain = 32;
             cfg_to_apply.amp_enabled = true;
             cfg_to_apply.ppm_error = 0.0f;
-            printf("[CALDBG] applying default cfg for calibration\n");
+            RF_TRACE("[CALDBG] applying default cfg for calibration\n");
         }
 
         hackrf_apply_cfg(device, &cfg_to_apply);
@@ -280,20 +332,20 @@ static float calibrate_hackrf(void) {
 
     const double fs = (current_hw_cfg.sample_rate > 0.0) ? current_hw_cfg.sample_rate : 20000000.0;
     const uint64_t fc = (current_hw_cfg.center_freq > 0) ? current_hw_cfg.center_freq : 98000000ULL;
-    printf("[CALDBG] using fs=%.3f Hz fc=%" PRIu64 " Hz ppm=%.6f\n", fs, fc, current_hw_cfg.ppm_error);
+    RF_TRACE("[CALDBG] using fs=%.3f Hz fc=%" PRIu64 " Hz ppm=%.6f\n", fs, fc, current_hw_cfg.ppm_error);
 
     size_t iq_samples = (size_t)(fs * 0.5); // ~0.5 s (balance entre robustez y memoria)
     if (iq_samples < 262144U) iq_samples = 262144U;
     if (iq_samples > 10000000U) iq_samples = 10000000U;
     const size_t iq_bytes = iq_samples * 2U;
-    printf("[CALDBG] capture plan: iq_samples=%zu iq_bytes=%zu\n", iq_samples, iq_bytes);
+    RF_TRACE("[CALDBG] capture plan: iq_samples=%zu iq_bytes=%zu\n", iq_samples, iq_bytes);
 
     rb_reset(&rb);
     stop_streaming = false;
-    printf("[CALDBG] starting RX for calibration\n");
+    RF_TRACE("[CALDBG] starting RX for calibration\n");
     if (hackrf_start_rx(device, rx_callback, NULL) != HACKRF_SUCCESS) {
         stop_streaming = true;
-        printf("[CALDBG] hackrf_start_rx failed\n");
+        RF_TRACE("[CALDBG] hackrf_start_rx failed\n");
         return calibration_finish(final_ppm);
     }
 
@@ -307,62 +359,54 @@ static float calibrate_hackrf(void) {
         if (rc == ETIMEDOUT) break;
     }
     pthread_mutex_unlock(&rb_mutex);
-    printf("[CALDBG] rb_available after wait=%zu\n", rb_available(&rb));
+    RF_TRACE("[CALDBG] rb_available after wait=%zu\n", rb_available(&rb));
 
     if (rb_available(&rb) < iq_bytes) {
         stop_streaming = true;
         hackrf_stop_rx(device);
-        printf("[CALDBG] insufficient IQ bytes, timeout path\n");
+        RF_TRACE("[CALDBG] insufficient IQ bytes, timeout path\n");
         return calibration_finish(final_ppm);
     }
 
-    int8_t *linear_buffer = (int8_t*)malloc(iq_bytes);
-    if (!linear_buffer) {
+    if (rf_workspace_ensure(&g_calibration_ws, iq_bytes, 65536) != 0) {
         stop_streaming = true;
         hackrf_stop_rx(device);
-        printf("[CALDBG] malloc linear_buffer failed\n");
+        RF_TRACE("[CALDBG] calibration workspace allocation failed\n");
         return calibration_finish(final_ppm);
     }
 
-    rb_read(&rb, linear_buffer, iq_bytes);
+    rb_read(&rb, g_calibration_ws.linear_buffer, iq_bytes);
     stop_streaming = true;
     hackrf_stop_rx(device);
-    printf("[CALDBG] read IQ buffer and stopped RX\n");
+    RF_TRACE("[CALDBG] read IQ buffer and stopped RX\n");
 
-    signal_iq_t *sig = load_iq_from_buffer(linear_buffer, iq_bytes);
-    free(linear_buffer);
-    if (!sig || !sig->signal_iq || sig->n_signal < 4096) {
-        printf("[CALDBG] load_iq_from_buffer failed or n_signal too small\n");
-        if (sig) free_signal_iq(sig);
+    if (load_iq_into_signal(g_calibration_ws.linear_buffer, iq_bytes, &g_calibration_ws.sig) != 0 ||
+        !g_calibration_ws.sig.signal_iq || g_calibration_ws.sig.n_signal < 4096) {
+        RF_TRACE("[CALDBG] load_iq_into_signal failed or n_signal too small\n");
         return calibration_finish(final_ppm);
     }
-    printf("[CALDBG] IQ loaded: n_signal=%zu\n", sig->n_signal);
+    RF_TRACE("[CALDBG] IQ loaded: n_signal=%zu\n", g_calibration_ws.sig.n_signal);
 
-    iq_compensation(sig);
-    printf("[CALDBG] iq_compensation done\n");
+    iq_compensation(&g_calibration_ws.sig);
+    RF_TRACE("[CALDBG] iq_compensation done\n");
 
     PsdConfig_t sweep_cfg = {0};
     int nperseg = 65536;
-    while ((size_t)nperseg > sig->n_signal && nperseg > 2048) nperseg >>= 1;
+    while ((size_t)nperseg > g_calibration_ws.sig.n_signal && nperseg > 2048) nperseg >>= 1;
     sweep_cfg.nperseg = nperseg;
     sweep_cfg.noverlap = nperseg / 2;
     sweep_cfg.sample_rate = fs;
     sweep_cfg.window_type = HAMMING_TYPE;
 
-    double *f_sweep = (double*)malloc((size_t)nperseg * sizeof(double));
-    double *p_sweep = (double*)malloc((size_t)nperseg * sizeof(double));
-    if (!f_sweep || !p_sweep) {
-        if (f_sweep) free(f_sweep);
-        if (p_sweep) free(p_sweep);
-        free_signal_iq(sig);
+    if (rf_workspace_ensure(&g_calibration_ws, iq_bytes, nperseg) != 0) {
         return calibration_finish(final_ppm);
     }
-    execute_welch_psd(sig, &sweep_cfg, f_sweep, p_sweep);
-    printf("[CALDBG] sweep welch done nperseg=%d\n", nperseg);
+    execute_welch_psd(&g_calibration_ws.sig, &sweep_cfg, g_calibration_ws.freq, g_calibration_ws.psd);
+    RF_TRACE("[CALDBG] sweep welch done nperseg=%d\n", nperseg);
 
-    double sweep_median_db = median_of_double_copy(p_sweep, nperseg);
+    double sweep_median_db = median_of_double_workspace(&g_calibration_ws, g_calibration_ws.psd, nperseg);
     double sweep_thresh_db = sweep_median_db + 5.0;
-    printf("[CALDBG] sweep median=%.3f dB threshold=%.3f dB\n", sweep_median_db, sweep_thresh_db);
+    RF_TRACE("[CALDBG] sweep median=%.3f dB threshold=%.3f dB\n", sweep_median_db, sweep_thresh_db);
 
     int top_idx[6] = {-1, -1, -1, -1, -1, -1};
     double top_pow[6] = {-1e300, -1e300, -1e300, -1e300, -1e300, -1e300};
@@ -370,8 +414,8 @@ static float calibrate_hackrf(void) {
     if (min_peak_dist < 8) min_peak_dist = 8;
 
     for (int i = 1; i < nperseg - 1; ++i) {
-        if (p_sweep[i] < sweep_thresh_db) continue;
-        if (!(p_sweep[i] > p_sweep[i - 1] && p_sweep[i] >= p_sweep[i + 1])) continue;
+        if (g_calibration_ws.psd[i] < sweep_thresh_db) continue;
+        if (!(g_calibration_ws.psd[i] > g_calibration_ws.psd[i - 1] && g_calibration_ws.psd[i] >= g_calibration_ws.psd[i + 1])) continue;
 
         int too_close = 0;
         for (int k = 0; k < 6; ++k) {
@@ -384,7 +428,7 @@ static float calibrate_hackrf(void) {
 
         int pos = -1;
         for (int k = 0; k < 6; ++k) {
-            if (p_sweep[i] > top_pow[k]) {
+            if (g_calibration_ws.psd[i] > top_pow[k]) {
                 pos = k;
                 break;
             }
@@ -394,17 +438,17 @@ static float calibrate_hackrf(void) {
                 top_pow[m] = top_pow[m - 1];
                 top_idx[m] = top_idx[m - 1];
             }
-            top_pow[pos] = p_sweep[i];
+            top_pow[pos] = g_calibration_ws.psd[i];
             top_idx[pos] = i;
         }
     }
 
     for (int c = 0; c < 6; ++c) {
         if (top_idx[c] >= 0) {
-            double cand_f = (double)fc + f_sweep[top_idx[c]];
-            printf("[CALDBG] cand[%d]: idx=%d f=%.3fHz p=%.3fdB\n", c, top_idx[c], cand_f, top_pow[c]);
+            RF_TRACE("[CALDBG] cand[%d]: idx=%d f=%.3fHz p=%.3fdB\n",
+                     c, top_idx[c], (double)fc + g_calibration_ws.freq[top_idx[c]], top_pow[c]);
         } else {
-            printf("[CALDBG] cand[%d]: none\n", c);
+            RF_TRACE("[CALDBG] cand[%d]: none\n", c);
         }
     }
 
@@ -418,24 +462,25 @@ static float calibrate_hackrf(void) {
         if (top_idx[c] >= 0 && top_pow[c] > strongest_sweep) strongest_sweep = top_pow[c];
     }
     const double sweep_gate_db = 8.0; // descarta candidatos muy débiles respecto al más fuerte
-    printf("[CALDBG] strongest_sweep=%.3f dB gate=%.3f dB\n", strongest_sweep, sweep_gate_db);
+    RF_TRACE("[CALDBG] strongest_sweep=%.3f dB gate=%.3f dB\n", strongest_sweep, sweep_gate_db);
 
     for (int c = 0; c < 6; ++c) {
         if (top_idx[c] < 0) continue;
 
-        double cand_freq = (double)fc + f_sweep[top_idx[c]];
+        double cand_freq = (double)fc + g_calibration_ws.freq[top_idx[c]];
         double offset_hz = cand_freq - (double)fc;
 
-        signal_iq_t cand_sig = {0};
-        cand_sig.n_signal = sig->n_signal;
-        cand_sig.signal_iq = (double complex*)malloc(sig->n_signal * sizeof(double complex));
-        if (!cand_sig.signal_iq) continue;
+        if (rf_workspace_ensure_aux_sig(&g_calibration_ws, g_calibration_ws.sig.n_signal) != 0) continue;
+        signal_iq_t cand_sig = {
+            .n_signal = g_calibration_ws.sig.n_signal,
+            .signal_iq = g_calibration_ws.aux_sig
+        };
 
         double phase = 0.0;
         double dphi = -2.0 * M_PI * (offset_hz / fs);
-        for (size_t n = 0; n < sig->n_signal; ++n) {
+        for (size_t n = 0; n < g_calibration_ws.sig.n_signal; ++n) {
             double complex rot = cos(phase) + I * sin(phase);
-            cand_sig.signal_iq[n] = sig->signal_iq[n] * rot;
+            cand_sig.signal_iq[n] = g_calibration_ws.sig.signal_iq[n] * rot;
             phase += dphi;
             if (phase > M_PI) phase -= 2.0 * M_PI;
             if (phase < -M_PI) phase += 2.0 * M_PI;
@@ -448,34 +493,25 @@ static float calibrate_hackrf(void) {
         fm.enable_dc_block = 0;
         fm.gain = 4000.0f;
 
-        int16_t *pcm = (int16_t*)malloc(cand_sig.n_signal * sizeof(int16_t));
-        if (!pcm) {
-            free(cand_sig.signal_iq);
-            continue;
-        }
+        if (rf_workspace_ensure_pcm(&g_calibration_ws, cand_sig.n_signal) != 0) continue;
 
-        int n_audio = fm_radio_iq_to_pcm(&fm, &cand_sig, pcm, NULL, (int)llround(fs));
-        free(cand_sig.signal_iq);
+        int n_audio = fm_radio_iq_to_pcm(&fm, &cand_sig, g_calibration_ws.pcm, NULL, (int)llround(fs));
         if (n_audio < 2048) {
-            printf("[CALDBG] cand[%d] rejected: n_audio=%d\n", c, n_audio);
-            free(pcm);
+            RF_TRACE("[CALDBG] cand[%d] rejected: n_audio=%d\n", c, n_audio);
             continue;
         }
-        printf("[CALDBG] cand[%d] demod ok: n_audio=%d fs_audio_eff_pre=%.3f\n", c, n_audio, fs * ((double)n_audio / (double)sig->n_signal));
+        RF_TRACE("[CALDBG] cand[%d] demod ok: n_audio=%d fs_audio_eff_pre=%.3f\n", c, n_audio, fs * ((double)n_audio / (double)g_calibration_ws.sig.n_signal));
 
-        signal_iq_t audio_sig = {0};
-        audio_sig.n_signal = (size_t)n_audio;
-        audio_sig.signal_iq = (double complex*)malloc((size_t)n_audio * sizeof(double complex));
-        if (!audio_sig.signal_iq) {
-            free(pcm);
-            continue;
-        }
+        if (rf_workspace_ensure_aux_sig(&g_calibration_ws, (size_t)n_audio) != 0) continue;
+        signal_iq_t audio_sig = {
+            .n_signal = (size_t)n_audio,
+            .signal_iq = g_calibration_ws.aux_sig
+        };
         for (int n = 0; n < n_audio; ++n) {
-            audio_sig.signal_iq[n] = (double)pcm[n] + I * 0.0;
+            audio_sig.signal_iq[n] = (double)g_calibration_ws.pcm[n] + I * 0.0;
         }
-        free(pcm);
 
-        double fs_audio_eff = fs * ((double)n_audio / (double)sig->n_signal);
+        double fs_audio_eff = fs * ((double)n_audio / (double)g_calibration_ws.sig.n_signal);
         if (!(fs_audio_eff > 0.0)) fs_audio_eff = (double)cal_audio_fs;
 
         PsdConfig_t aud_cfg = {0};
@@ -486,53 +522,43 @@ static float calibrate_hackrf(void) {
         aud_cfg.sample_rate = fs_audio_eff;
         aud_cfg.window_type = HAMMING_TYPE;
 
-        double *f_a = (double*)malloc((size_t)aud_nperseg * sizeof(double));
-        double *p_a = (double*)malloc((size_t)aud_nperseg * sizeof(double));
-        if (!f_a || !p_a) {
-            if (f_a) free(f_a);
-            if (p_a) free(p_a);
-            free(audio_sig.signal_iq);
+        if (rf_workspace_ensure(&g_calibration_ws, iq_bytes, aud_nperseg) != 0) {
             continue;
         }
 
-        execute_welch_psd(&audio_sig, &aud_cfg, f_a, p_a);
-        free(audio_sig.signal_iq);
+        execute_welch_psd(&audio_sig, &aud_cfg, g_calibration_ws.freq, g_calibration_ws.psd);
 
         double max_lin = 0.0;
-        int pilot_max_idx = -1;
-        double *pilot_lin = (double*)malloc((size_t)aud_nperseg * sizeof(double));
+        double pilot_freq_hz = 0.0;
+        if (rf_workspace_ensure_scratch(&g_calibration_ws, (size_t)aud_nperseg) != 0) continue;
+        double *pilot_lin = g_calibration_ws.scratch;
         int cnt_db = 0;
         for (int i = 0; i < aud_nperseg; ++i) {
-            if (f_a[i] >= 18000.0 && f_a[i] <= 20000.0) {
-                double plin = pow(10.0, p_a[i] / 10.0);
+            if (g_calibration_ws.freq[i] >= 18000.0 && g_calibration_ws.freq[i] <= 20000.0) {
+                double plin = pow(10.0, g_calibration_ws.psd[i] / 10.0);
                 pilot_lin[cnt_db] = plin;
                 if (plin > max_lin) {
                     max_lin = plin;
-                    pilot_max_idx = i;
+                    pilot_freq_hz = g_calibration_ws.freq[i];
                 }
                 cnt_db++;
             }
         }
 
-        double median_lin = median_of_double_copy(pilot_lin, cnt_db);
-        free(pilot_lin);
+        double median_lin = median_of_double_workspace(&g_calibration_ws, pilot_lin, cnt_db);
 
         double snr_db = -1e300;
         if (cnt_db > 0 && median_lin > 0.0 && max_lin > 0.0) {
             snr_db = 10.0 * log10(max_lin / median_lin);
         }
 
-         double pilot_freq_hz = (pilot_max_idx >= 0) ? f_a[pilot_max_idx] : 0.0;
-
         int stereo = (snr_db > 8.0) ? 1 : 0;
         int strong_enough = (top_pow[c] >= (strongest_sweep - sweep_gate_db)) ? 1 : 0;
-         printf("[CALDBG] cand[%d] pilot: freq=%.3fHz bins=%d max_lin=%.6e med_lin=%.6e snr=%.3fdB stereo=%d\n",
+         RF_TRACE("[CALDBG] cand[%d] pilot: freq=%.3fHz bins=%d max_lin=%.6e med_lin=%.6e snr=%.3fdB stereo=%d\n",
              c, pilot_freq_hz, cnt_db, max_lin, median_lin, snr_db, stereo);
-        printf("[CALDBG] cand[%d] sweep=%.3f strong_enough=%d\n", c, top_pow[c], strong_enough);
+        RF_TRACE("[CALDBG] cand[%d] sweep=%.3f strong_enough=%d\n", c, top_pow[c], strong_enough);
 
         if (!strong_enough) {
-            free(f_a);
-            free(p_a);
             continue;
         }
 
@@ -543,35 +569,32 @@ static float calibrate_hackrf(void) {
             best_snr = snr_db;
             best_sweep = top_pow[c];
             best_k = c;
-            printf("[CALDBG] cand[%d] is new best\n", c);
+            RF_TRACE("[CALDBG] cand[%d] is new best\n", c);
         }
-
-        free(f_a);
-        free(p_a);
     }
 
-    printf("[CALDBG] best_k=%d best_stereo=%d best_snr=%.3f best_sweep=%.3f\n", best_k, best_stereo, best_snr, best_sweep);
+    RF_TRACE("[CALDBG] best_k=%d best_stereo=%d best_snr=%.3f best_sweep=%.3f\n", best_k, best_stereo, best_snr, best_sweep);
     if (best_k >= 0 && top_idx[best_k] >= 0) {
-        double best_freq = (double)fc + f_sweep[top_idx[best_k]];
+        double best_freq = (double)fc + g_calibration_ws.freq[top_idx[best_k]];
         double best_offset = best_freq - (double)fc;
-        printf("[CALDBG] best_freq=%.3fHz best_offset=%.3fHz\n", best_freq, best_offset);
+        RF_TRACE("[CALDBG] best_freq=%.3fHz best_offset=%.3fHz\n", best_freq, best_offset);
 
         int decim = 100;
-        size_t n_dec = sig->n_signal / (size_t)decim;
+        size_t n_dec = g_calibration_ws.sig.n_signal / (size_t)decim;
         if (n_dec >= 4096) {
-            signal_iq_t bb_dec = {0};
-            bb_dec.n_signal = n_dec;
-            bb_dec.signal_iq = (double complex*)malloc(n_dec * sizeof(double complex));
-
-            if (bb_dec.signal_iq) {
+            if (rf_workspace_ensure_aux_sig(&g_calibration_ws, n_dec) == 0) {
+                signal_iq_t bb_dec = {
+                    .n_signal = n_dec,
+                    .signal_iq = g_calibration_ws.aux_sig
+                };
                 double phase = 0.0;
                 double dphi = -2.0 * M_PI * (best_offset / fs);
                 size_t out = 0;
-                for (size_t i = 0; i + (size_t)decim <= sig->n_signal; i += (size_t)decim) {
+                for (size_t i = 0; i + (size_t)decim <= g_calibration_ws.sig.n_signal; i += (size_t)decim) {
                     double complex acc = 0.0 + I * 0.0;
                     for (int m = 0; m < decim; ++m) {
                         double complex rot = cos(phase) + I * sin(phase);
-                        acc += sig->signal_iq[i + (size_t)m] * rot;
+                        acc += g_calibration_ws.sig.signal_iq[i + (size_t)m] * rot;
                         phase += dphi;
                         if (phase > M_PI) phase -= 2.0 * M_PI;
                         if (phase < -M_PI) phase += 2.0 * M_PI;
@@ -589,17 +612,16 @@ static float calibrate_hackrf(void) {
                     bb_cfg.sample_rate = fs / (double)decim;
                     bb_cfg.window_type = HAMMING_TYPE;
 
-                    double *f_bb = (double*)malloc((size_t)bb_nperseg * sizeof(double));
-                    double *p_bb_db = (double*)malloc((size_t)bb_nperseg * sizeof(double));
-                    double *p_bb_lin = (double*)malloc((size_t)bb_nperseg * sizeof(double));
-                    if (f_bb && p_bb_db && p_bb_lin) {
-                        execute_welch_psd(&bb_dec, &bb_cfg, f_bb, p_bb_db);
+                    if (rf_workspace_ensure(&g_calibration_ws, iq_bytes, bb_nperseg) == 0 &&
+                        rf_workspace_ensure_scratch(&g_calibration_ws, (size_t)bb_nperseg) == 0) {
+                        double *p_bb_lin = g_calibration_ws.scratch;
+                        execute_welch_psd(&bb_dec, &bb_cfg, g_calibration_ws.freq, g_calibration_ws.psd);
                         for (int i = 0; i < bb_nperseg; ++i) {
-                            p_bb_lin[i] = pow(10.0, p_bb_db[i] / 10.0);
+                            p_bb_lin[i] = pow(10.0, g_calibration_ws.psd[i] / 10.0);
                         }
 
-                        double f0 = f_bb[0];
-                        double f1 = f_bb[bb_nperseg - 1];
+                        double f0 = g_calibration_ws.freq[0];
+                        double f1 = g_calibration_ws.freq[bb_nperseg - 1];
                         double df = (f1 - f0) / (double)(bb_nperseg - 1);
 
                         if (df > 0.0) {
@@ -620,7 +642,7 @@ static float calibrate_hackrf(void) {
                             double delta_max = delta_center + delta_span;
                             if (delta_min < -15000.0) delta_min = -15000.0;
                             if (delta_max > 15000.0) delta_max = 15000.0;
-                            printf("[CALDBG] fine search window: center=%.3f span=%.3f -> [%.3f, %.3f]\n",
+                            RF_TRACE("[CALDBG] fine search window: center=%.3f span=%.3f -> [%.3f, %.3f]\n",
                                    delta_center, delta_span, delta_min, delta_max);
 
                             for (int id = 0; id < N_DELTA; ++id) {
@@ -635,8 +657,8 @@ static float calibrate_hackrf(void) {
 
                                     if (fl < f0 || fl > f1 || fr < f0 || fr > f1) continue;
 
-                                    double pl = interp_linear(f_bb, p_bb_lin, bb_nperseg, fl);
-                                    double pr = interp_linear(f_bb, p_bb_lin, bb_nperseg, fr);
+                                    double pl = interp_linear(g_calibration_ws.freq, p_bb_lin, bb_nperseg, fl);
+                                    double pr = interp_linear(g_calibration_ws.freq, p_bb_lin, bb_nperseg, fr);
                                     double denom = (pl + pr);
                                     if (denom < 1e-20) denom = 1e-20;
                                     double e = (pl - pr);
@@ -655,59 +677,50 @@ static float calibrate_hackrf(void) {
 
                             double ppm_suggest = -(best_delta / best_freq) * 1000000.0;
                             final_ppm = (float)ppm_suggest;
-                            printf("[CALDBG] fine: best_delta=%.3fHz ppm_suggest=%.6f\n", best_delta, ppm_suggest);
+                            RF_TRACE("[CALDBG] fine: best_delta=%.3fHz ppm_suggest=%.6f\n", best_delta, ppm_suggest);
                             if (fabs((double)final_ppm) > 80.0) {
-                                printf("[CALDBG] ppm out of guardrail, forcing 0\n");
+                                RF_TRACE("[CALDBG] ppm out of guardrail, forcing 0\n");
                                 final_ppm = 0.0f;
                             }
 
                             if (!g_has_last_cal_ppm) {
                                 g_last_cal_ppm = final_ppm;
                                 g_has_last_cal_ppm = 1;
-                                printf("[CALDBG] lock first ppm=%.6f\n", g_last_cal_ppm);
+                                RF_TRACE("[CALDBG] lock first ppm=%.6f\n", g_last_cal_ppm);
                             } else {
                                 float delta_ppm = fabsf(final_ppm - g_last_cal_ppm);
                                 if (delta_ppm > 20.0f) {
-                                    printf("[CALDBG] ppm outlier detected (delta=%.3f), keep last=%.6f\n", delta_ppm, g_last_cal_ppm);
+                                    RF_TRACE("[CALDBG] ppm outlier detected (delta=%.3f), keep last=%.6f\n", delta_ppm, g_last_cal_ppm);
                                     final_ppm = g_last_cal_ppm;
                                 } else {
                                     g_last_cal_ppm = 0.7f * g_last_cal_ppm + 0.3f * final_ppm;
                                     final_ppm = g_last_cal_ppm;
-                                    printf("[CALDBG] ppm smoothed -> %.6f\n", final_ppm);
+                                    RF_TRACE("[CALDBG] ppm smoothed -> %.6f\n", final_ppm);
                                 }
                             }
                         }
                         else {
-                            printf("[CALDBG] invalid df<=0 in fine stage\n");
+                            RF_TRACE("[CALDBG] invalid df<=0 in fine stage\n");
                         }
                     }
                     else {
-                        printf("[CALDBG] fine buffers alloc failed\n");
+                        RF_TRACE("[CALDBG] fine buffers alloc failed\n");
                     }
-
-                    if (f_bb) free(f_bb);
-                    if (p_bb_db) free(p_bb_db);
-                    if (p_bb_lin) free(p_bb_lin);
                 }
-
-                free(bb_dec.signal_iq);
             }
             else {
-                printf("[CALDBG] bb_dec allocation failed\n");
+                RF_TRACE("[CALDBG] bb_dec allocation failed\n");
             }
         }
         else {
-            printf("[CALDBG] n_dec too small for fine stage: %zu\n", n_dec);
+            RF_TRACE("[CALDBG] n_dec too small for fine stage: %zu\n", n_dec);
         }
     }
     else {
-        printf("[CALDBG] no best candidate found\n");
+        RF_TRACE("[CALDBG] no best candidate found\n");
     }
 
-    free(f_sweep);
-    free(p_sweep);
-    free_signal_iq(sig);
-    printf("[CALDBG] calibration pipeline end final_ppm=%.6f\n", final_ppm);
+    RF_TRACE("[CALDBG] calibration pipeline end final_ppm=%.6f\n", final_ppm);
     return calibration_finish(final_ppm);
 }
 
@@ -781,6 +794,9 @@ int rx_callback(hackrf_transfer* transfer) {
         rb_write(&rb, transfer->buffer, transfer->valid_length);
         if (atomic_load(&audio_enabled)) {
             rb_write(&audio_rb, transfer->buffer, transfer->valid_length);
+            pthread_mutex_lock(&audio_rb_mutex);
+            pthread_cond_signal(&audio_rb_cond);
+            pthread_mutex_unlock(&audio_rb_mutex);
         }
         // Signal the main thread that data is available
         pthread_mutex_lock(&rb_mutex);
@@ -1007,8 +1023,24 @@ void* audio_thread_fn(void* arg) {
 
         // Wait for enough IQ bytes
         if (rb_available(&audio_rb) < (size_t)(AUDIO_CHUNK_SAMPLES * 2)) {
-            msleep_int(10);
-            continue;
+            struct timespec ts_timeout;
+            clock_gettime(CLOCK_REALTIME, &ts_timeout);
+            ts_timeout.tv_nsec += 10000000L;
+            if (ts_timeout.tv_nsec >= 1000000000L) {
+                ts_timeout.tv_sec += 1;
+                ts_timeout.tv_nsec -= 1000000000L;
+            }
+
+            pthread_mutex_lock(&audio_rb_mutex);
+            while (audio_thread_running && rb_available(&audio_rb) < (size_t)(AUDIO_CHUNK_SAMPLES * 2)) {
+                int rc = pthread_cond_timedwait(&audio_rb_cond, &audio_rb_mutex, &ts_timeout);
+                if (rc == ETIMEDOUT) break;
+            }
+            pthread_mutex_unlock(&audio_rb_mutex);
+
+            if (!audio_thread_running || rb_available(&audio_rb) < (size_t)(AUDIO_CHUNK_SAMPLES * 2)) {
+                continue;
+            }
         }
 
         // Drain one chunk
@@ -1091,12 +1123,6 @@ void* audio_thread_fn(void* arg) {
         }
 
         if (samples_gen <= 0) continue;
-
-        // Ensure TCP/Opus encoder is ready
-        if (ensure_tx_with_retry(ctx, &tx, &audio_thread_running) != 0) {
-            // Se solicitó detener el hilo o el programa
-            break;
-        }
 
         // Accumulate into exact Opus frames
         int idx = 0;
@@ -1418,12 +1444,16 @@ int main() {
     // --- CLEANUP ---
     printf("[RF] Shutting down...\n");
     audio_thread_running = false; // Flag for audio thread to exit
+    pthread_mutex_lock(&audio_rb_mutex);
+    pthread_cond_broadcast(&audio_rb_cond);
+    pthread_mutex_unlock(&audio_rb_mutex);
     if (audio_thread_created) pthread_join(audio_thread, NULL);
     
     zpair_close(zmq_channel);
     rb_free(&rb);
     rb_free(&audio_rb);
     rf_workspace_release(&proc_ws);
+    rf_workspace_release(&g_calibration_ws);
     
     if (device) { 
         hackrf_stop_rx(device); 

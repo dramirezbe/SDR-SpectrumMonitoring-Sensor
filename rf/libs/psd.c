@@ -418,15 +418,20 @@ static void generate_window(PsdWindowType_t window_type, double* window_buffer, 
  */
 static void fftshift(double* data, int n) {
     int half = n / 2;
-    // Use malloc instead of alloca for large FFTs to avoid stack overflow
-    double* temp = (double*)malloc(half * sizeof(double));
+    static __thread double *tl_fftshift_tmp = NULL;
+    static __thread int tl_fftshift_half = 0;
+    if (tl_fftshift_half < half) {
+        double *new_tmp = (double*)realloc(tl_fftshift_tmp, (size_t)half * sizeof(double));
+        if (!new_tmp) return;
+        tl_fftshift_tmp = new_tmp;
+        tl_fftshift_half = half;
+    }
+    double* temp = tl_fftshift_tmp;
     if (!temp) return; // Fail silently or handle error
 
     memcpy(temp, data, half * sizeof(double));
     memcpy(data, &data[half], (n - half) * sizeof(double));
     memcpy(&data[n - half], temp, half * sizeof(double));
-    
-    free(temp);
 }
 
 void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, double* f_out, double* p_out) {
@@ -564,9 +569,9 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
 
             // Accumulate Magnitude Squared safely
             for (int i = 0; i < nfft; i++) {
-                double mag = cabs(local_fft_out[i]);
-                double mag2 = mag * mag;
-                local_accum[i] += mag2;
+                const double re = creal(local_fft_out[i]);
+                const double im = cimag(local_fft_out[i]);
+                local_accum[i] += (re * re) + (im * im);
             }
         }
 
@@ -688,6 +693,8 @@ void execute_pfb_psd(
     static __thread double complex* tl_pfb_in = NULL;
     static __thread double complex* tl_pfb_out = NULL;
     static __thread fftw_plan tl_pfb_plan = NULL;
+    static __thread double *tl_pfb_accum = NULL;
+    static __thread int tl_pfb_accum_m = 0;
 
     // -------------------------------------------------
     // Prototype filter
@@ -755,11 +762,24 @@ void execute_pfb_psd(
         double complex* local_fft_in  = tl_pfb_in;
         double complex* local_fft_out = tl_pfb_out;
         fftw_plan local_plan = tl_pfb_plan;
+        if (tl_pfb_accum == NULL || tl_pfb_accum_m != M) {
+            double *new_accum = (double*)realloc(tl_pfb_accum, (size_t)M * sizeof(double));
+            if (!new_accum) {
+                local_plan = NULL;
+            } else {
+                tl_pfb_accum = new_accum;
+                tl_pfb_accum_m = M;
+            }
+        }
+        double *local_accum = tl_pfb_accum;
+        if (local_accum) {
+            memset(local_accum, 0, (size_t)M * sizeof(double));
+        }
 
         // [PATCH C] Use dynamic scheduling to handle load imbalance
         #pragma omp for schedule(dynamic, 1)
         for (int b = 0; b < blocks; b++) {
-            if (!local_plan || !local_fft_in || !local_fft_out) continue;
+            if (!local_plan || !local_fft_in || !local_fft_out || !local_accum) continue;
 
             memset(local_fft_in, 0, M * sizeof(double complex));
 
@@ -773,12 +793,18 @@ void execute_pfb_psd(
             fftw_execute(local_plan);
 
             for (int k = 0; k < M; k++) {
-                double mag2 = creal(local_fft_out[k]) * creal(local_fft_out[k]) +
-                              cimag(local_fft_out[k]) * cimag(local_fft_out[k]);
-                
-                // Safely accumulate the power bins across threads
-                #pragma omp atomic
-                p_out[k] += mag2;
+                const double re = creal(local_fft_out[k]);
+                const double im = cimag(local_fft_out[k]);
+                local_accum[k] += (re * re) + (im * im);
+            }
+        }
+
+        if (local_accum) {
+            #pragma omp critical(pfb_accum_reduce)
+            {
+                for (int k = 0; k < M; k++) {
+                    p_out[k] += local_accum[k];
+                }
             }
         }
     }
