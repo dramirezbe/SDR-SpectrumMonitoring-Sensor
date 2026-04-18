@@ -245,6 +245,13 @@ class ZmqPairController:
                     try: os.remove(path)
                     except OSError: pass
             self.socket.bind(self.addr)
+
+            if self.addr.startswith("ipc://"):
+                path = self.addr.replace("ipc://", "")
+                try:
+                    os.chmod(path, 0o777) 
+                except OSError:
+                    pass
         else:
             self.socket.connect(self.addr)
             

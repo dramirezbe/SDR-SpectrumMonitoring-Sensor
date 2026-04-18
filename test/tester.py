@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-from test_modules.benckmark import BenchmarkCSV
+from test.test_modules.benchmark import BenchmarkCSV
 import cfg
 from utils import FilterConfig, ServerRealtimeConfig, ZmqPairController
 from functions import AcquireDual
@@ -62,10 +62,10 @@ async def _acquire_sdr_lowpower():
                 end_f = payload.get("end_freq_hz", 0)
                 
                 print("\n--- Adquisición Exitosa ---")
-                print(f"Frecuencia Inicial : {start_f / 1e6} MHz")
-                print(f"Frecuencia Final   : {end_f / 1e6} MHz")
-                print(f"Tamaño de Pxx      : {len(pxx)} bins")
-                print(f"Primeros 5 valores : {pxx[:5]}")
+                #print(f"Frecuencia Inicial : {start_f / 1e6} MHz")
+                #print(f"Frecuencia Final   : {end_f / 1e6} MHz")
+                #print(f"Tamaño de Pxx      : {len(pxx)} bins")
+                #print(f"Primeros 5 valores : {pxx[:5]}")
             else:
                 log.warning("No se recibió Pxx en el payload o el payload está vacío.")
                 return 1
@@ -121,10 +121,10 @@ async def _acquire_sdr_maxpower():
                 end_f = payload.get("end_freq_hz", 0)
                 
                 print("\n--- Adquisición Exitosa ---")
-                print(f"Frecuencia Inicial : {start_f / 1e6} MHz")
-                print(f"Frecuencia Final   : {end_f / 1e6} MHz")
-                print(f"Tamaño de Pxx      : {len(pxx)} bins")
-                print(f"Primeros 5 valores : {pxx[:5]}")
+                #print(f"Frecuencia Inicial : {start_f / 1e6} MHz")
+                #print(f"Frecuencia Final   : {end_f / 1e6} MHz")
+                #print(f"Tamaño de Pxx      : {len(pxx)} bins")
+                #print(f"Primeros 5 valores : {pxx[:5]}")
             else:
                 log.warning("No se recibió Pxx en el payload o el payload está vacío.")
                 return 1

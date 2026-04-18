@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(TEST_ROOT) not in sys.path:
     sys.path.insert(0, str(TEST_ROOT))
 
-from test_modules.benckmark import BenchmarkCSV
+from test.test_modules.benchmark import BenchmarkCSV
 import cfg
 from utils import FilterConfig, ServerRealtimeConfig, ZmqPairController
 from functions import AcquireDual

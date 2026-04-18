@@ -236,3 +236,8 @@ ltegps_app
 doc-venv/
 docs/xml
 docs/_build
+
+# Benchmarking results (local performance testing)
+benchmarks/
+*.benchmark
+*.profile
