@@ -2,7 +2,7 @@
 # Configuración Base y Video
 # ==========================================
 # Habilita salida de audio por hardware PWM/I2S
-dtparam=audio=on
+#dtparam=audio=on
 
 # Sondeo automático en buses I2C/DSI para inyectar DTOs de hardware oficial
 camera_auto_detect=1
@@ -73,7 +73,7 @@ dtoverlay=disable-bt
 # Power Management (Bypass PMIC)
 # ==========================================
 # Levanta bloqueo del PMIC, habilitando límite físico de hardware (1.6A en bus USB)
-usb_max_current_enable=1
+#usb_max_current_enable=1
 
 # Ignora handshake USB-PD forzando presupuesto energético global de 5 Amperios
-psu_max_current=5000
+#psu_max_current=5000
