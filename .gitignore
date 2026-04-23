@@ -241,3 +241,7 @@ docs/_build
 benchmarks/
 *.benchmark
 *.profile
+
+
+# AI
+.codex

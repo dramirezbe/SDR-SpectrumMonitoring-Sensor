@@ -498,7 +498,9 @@ class AcquireDual:
             rf_params["cooldown_request"] = float(rf_params["cooldown_request"])
         await self.controller.send_command(rf_params)
         self._log.debug(f"Acquiring CF: {rf_params['center_freq_hz']/1e6} MHz")
-        data = await asyncio.wait_for(self.controller.wait_for_data(), timeout=10)
+        data = await self.controller.wait_for_data()
+        if data is None:
+            return None
         # PLL/Hardware settle time
         await asyncio.sleep(0.05) 
         return data
@@ -518,6 +520,8 @@ class AcquireDual:
         Devuelve el mismo formato que _single_acquire, pero con Pxx corregido.
         """
         data1 = await self._single_acquire(rf_params)
+        if data1 is None:
+            return None
         try:
             data1 = self._apply_dc_correction_to_acquisition(data1)
             return data1

@@ -278,8 +278,8 @@ class ZmqPairController:
         await self.socket.send_string(json.dumps(payload))
         if self.verbose: print(f"[PY] >> Comando enviado")
 
-    async def wait_for_data(self) -> dict:
-        """Espera y recibe una respuesta con un timeout para evitar bloqueos."""
+    async def wait_for_data(self) -> dict | None:
+        """Espera una respuesta y retorna `None` si vence `timeout_ms`."""
         if not self.socket: raise RuntimeError("Socket no iniciado.")
         
         # Use poller to wait with a timeout

@@ -16,12 +16,11 @@ async def main():
         await zmq_ctrl.send_command({"calibrate": True})
         
         print("Esperando respuesta del motor (esto puede tomar 30-60 segundos)...")
-        try:
-            response = await zmq_ctrl.wait_for_data()
-            print(f"✓ Respuesta recibida: {response}")
-        except asyncio.TimeoutError:
+        response = await zmq_ctrl.wait_for_data()
+        if response is None:
             print("✗ Timeout: No se recibió respuesta del motor en 15 segundos")
+        else:
+            print(f"✓ Respuesta recibida: {response}")
 
 if __name__ == "__main__":
     asyncio.run(main())
-

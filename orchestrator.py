@@ -398,8 +398,10 @@ async def _perform_calibration_sequence():
             await zmq_ctrl.send_command({"calibrate": True})
             
             log.info("Esperando respuesta del motor...")
-            try:
-                response = await zmq_ctrl.wait_for_data()
+            response = await zmq_ctrl.wait_for_data()
+            if response is None:
+                log.warning("✗ Timeout: No se recibió respuesta del motor en 15 segundos")
+            else:
                 log.info(f"✓ Respuesta recibida: {response}")
                 ppm_engine = response.get("ppm_error", None)
                 if ppm_engine is None or ppm_engine == 0.0 or ppm_engine == 0:
@@ -407,9 +409,6 @@ async def _perform_calibration_sequence():
                     return_code = 1
                 else:
                     return_code = 0
-
-            except asyncio.TimeoutError:
-                log.warning("✗ Timeout: No se recibió respuesta del motor en 15 segundos")
 
         
 
