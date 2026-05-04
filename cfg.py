@@ -35,12 +35,12 @@ load_dotenv()
 
 #: URL base de la API del sensor
 API_URL = os.getenv("API_URL", "https://rsm.ane.gov.co:12443/api/sensor")
-#: Modo de depuración detallado (Controla salida a consola)
+#: Controla si los mensajes INFO se muestran en consola
 VERBOSE = os.getenv("VERBOSE", "false").lower() == "true"
 #: Entorno de desarrollo (usa DUMMY_MAC)
 DEVELOPMENT = os.getenv("DEVELOPMENT", "false").lower() == "true"
 
-#logging level to info in /Logs folder
+#: Controla si los mensajes DEBUG se habilitan en consola y archivo
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 DUMMY_MAC = os.getenv("DUMMY_MAC", "d0:65:78:9c:dd:d0")
@@ -197,10 +197,44 @@ class SimpleFormatter(logging.Formatter):
         record.levelname = f"{record.levelname:<9}"
         return super().format(record)
 
+class HandlerLevelFilter(logging.Filter):
+    """
+    Filtro explícito por severidad.
+
+    - `DEBUG` depende de `allow_debug`.
+    - `INFO` depende de `allow_info`.
+    - `WARNING`, `ERROR`, `CRITICAL` y excepciones siempre pasan.
+    """
+    def __init__(self, allow_debug: bool, allow_info: bool):
+        super().__init__()
+        self.allow_debug = allow_debug
+        self.allow_info = allow_info
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.DEBUG:
+            return self.allow_debug
+        if record.levelno == logging.INFO:
+            return self.allow_info
+        return record.levelno >= logging.WARNING
+
+def _reset_handler_filters(handler: logging.Handler, *filters: logging.Filter) -> None:
+    """Reemplaza los filtros del handler para reflejar el entorno actual."""
+    handler.filters.clear()
+    for filter_obj in filters:
+        handler.addFilter(filter_obj)
+
 def set_logger(rotator: AtomicRotator | None = None) -> logging.Logger:
     """
     Configura logger asimétrico.
-    Si DEBUG es True, ambos canales (consola y archivo) muestran nivel DEBUG.
+
+    Consola:
+    - `DEBUG` solo si DEBUG=True
+    - `INFO` solo si VERBOSE=True
+    - `WARNING`/`ERROR`/`EXCEPTION` siempre visibles
+
+    Archivo en `Logs/`:
+    - `DEBUG` solo si DEBUG=True
+    - `INFO`/`WARNING`/`ERROR`/`EXCEPTION` siempre visibles
     """
     try: name = pathlib.Path(sys.argv[0]).stem.upper()
     except: name = "SENSOR"
@@ -210,30 +244,39 @@ def set_logger(rotator: AtomicRotator | None = None) -> logging.Logger:
     
     fmt = SimpleFormatter("%(asctime)s[%(name)s]%(levelname)s %(message)s", "%d-%b-%y(%H:%M:%S)")
 
-    # --- Lógica de Niveles ---
-    if DEBUG:
-        # Si DEBUG está activo, máxima verbosidad en todo
-        console_level = logging.DEBUG
-        file_level = logging.DEBUG
-    else:
-        # Si no, usamos VERBOSE para consola y WARNING (por defecto) para archivos
-        console_level = logging.INFO if VERBOSE else logging.ERROR
-        file_level = logging.WARNING
-
     # 1. Configurar Consola
-    if not any(isinstance(h, logging.StreamHandler) and not hasattr(h, 'is_rotator') for h in logger.handlers):
+    console_handler = next(
+        (h for h in logger.handlers if isinstance(h, logging.StreamHandler) and not hasattr(h, 'is_rotator')),
+        None
+    )
+    if console_handler is None:
         c_handler = logging.StreamHandler(sys.stdout)
-        c_handler.setLevel(console_level)
-        c_handler.setFormatter(fmt)
         logger.addHandler(c_handler)
+        console_handler = c_handler
+    console_handler.setLevel(logging.DEBUG)
+    console_handler.setFormatter(fmt)
+    _reset_handler_filters(
+        console_handler,
+        HandlerLevelFilter(allow_debug=DEBUG, allow_info=VERBOSE),
+    )
 
     # 2. Configurar Archivo (Rotator)
-    if rotator and not any(hasattr(h, 'is_rotator') for h in logger.handlers):
-        f_handler = logging.StreamHandler(rotator)
-        f_handler.is_rotator = True 
-        f_handler.setLevel(file_level)
-        f_handler.setFormatter(fmt)
-        logger.addHandler(f_handler)
+    if rotator:
+        file_handler = next((h for h in logger.handlers if hasattr(h, 'is_rotator')), None)
+        if file_handler is None:
+            f_handler = logging.StreamHandler(rotator)
+            f_handler.is_rotator = True
+            logger.addHandler(f_handler)
+            file_handler = f_handler
+        else:
+            file_handler.stream = rotator
+
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(fmt)
+        _reset_handler_filters(
+            file_handler,
+            HandlerLevelFilter(allow_debug=DEBUG, allow_info=True),
+        )
 
     return logger
 
@@ -287,7 +330,7 @@ def run_and_capture(func: TargetFunc, num_files=LOG_FILES_NUM) -> int:
 if __name__ == "__main__":
     def debug_test():
         l = set_logger()
-        l.info("Info test - Visible in file if DEBUG is True")
+        l.info("Info test - Visible in file")
         l.warning("Warning test - Always visible in file")
         return 0
     sys.exit(run_and_capture(debug_test))
