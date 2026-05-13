@@ -46,9 +46,6 @@ Módulos dedicados a garantizar que los datos recolectados sean precisos tanto e
    * - ``status``
      - Monitoreo de telemetría: deriva de reloj NTP, uso de recursos y estado del hardware.
 
-.. automodule:: kal_sync
-   :members:
-
 .. automodule:: status
    :members:
 
