@@ -68,15 +68,23 @@ class CampaignRunner:
             dict: Diccionario con parámetros como frecuencia central, span, ganancias, etc.
                   Retorna un diccionario vacío si ocurre un error de lectura.
         """
-        keys = ["center_freq_hz", "sample_rate_hz", "rbw_hz", "overlap", 
-                "window", "lna_gain", "vga_gain", "antenna_amp", 
-                "antenna_port", "ppm_error", "filter", "cooldown_request"]
+        keys = ["center_freq_hz", "sample_rate_hz", "rbw_hz", "overlap",
+                "window", "lna_gain", "vga_gain", "antenna_amp",
+                "antenna_port", "ppm_error", "filter", "cooldown_request",
+                "method_psd"]
         try:
             rf_params = {k: self.store.consult_persistent(k) for k in keys}
             if rf_params.get("cooldown_request") is None:
                 rf_params["cooldown_request"] = 1.0
             else:
                 rf_params["cooldown_request"] = float(rf_params["cooldown_request"])
+
+            # Keep campaign acquisitions aligned with the scheduler/orchestrator path.
+            method_psd = rf_params.get("method_psd")
+            if method_psd not in {"pfb", "welch"}:
+                rf_params["method_psd"] = "pfb"
+            else:
+                rf_params["method_psd"] = str(method_psd).lower()
             return rf_params
         except Exception as e:
             log.error(f"Error reading rf params: {e}")
