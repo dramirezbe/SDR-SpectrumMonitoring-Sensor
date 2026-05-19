@@ -19,6 +19,28 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 log() { echo -e "\n${GREEN}[INSTALL]${NC} $1"; }
 log_sub() { echo -e "   ${CYAN}->${NC} $1"; }
 log_warn() { echo -e "   ${YELLOW}[SKIP]${NC} $1"; }
+retry_cmd() {
+    local desc="$1"
+    shift
+
+    local attempt rc
+    local max_attempts=4
+    local delay_s=5
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        if "$@"; then
+            return 0
+        fi
+
+        rc=$?
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            log_sub "$desc falló (intento $attempt/$max_attempts). Reintentando en ${delay_s}s..."
+            sleep "$delay_s"
+        fi
+    done
+
+    return "$rc"
+}
 
 # ---------------------------------------------------------
 # 1. Gestión de Servicios (Solo -ane2 | LTE Safe)
@@ -78,12 +100,30 @@ fi
 log "Step 4/7: Entorno Python y Binarios..."
 cd "$PROJECT_DIR"
 rm -rf "venv"
-python3 -m venv --system-site-packages venv 
-source venv/bin/activate
-pip install --upgrade pip certifi --quiet
-[ -f "requirements.txt" ] && pip install -r requirements.txt --quiet
-[ -f "build.sh" ] && { chmod +x build.sh; ./build.sh; }
-deactivate
+python3 -m venv --system-site-packages venv
+VENV_PY="$PROJECT_DIR/venv/bin/python3"
+
+# Fuerza el uso del bundle CA del sistema y da margen extra a errores TLS transitorios.
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT=60
+export PIP_RETRIES=5
+export PIP_NO_INPUT=1
+export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+export REQUESTS_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+
+retry_cmd "Bootstrap de pip/certifi" \
+    "$VENV_PY" -m pip install --upgrade pip certifi --quiet || \
+    log_warn "No se pudo actualizar pip/certifi. Se continuará con el pip del venv."
+
+if [ -f "requirements.txt" ]; then
+    retry_cmd "Instalación de requirements.txt" \
+        "$VENV_PY" -m pip install -r requirements.txt --quiet
+fi
+
+if [ -f "build.sh" ]; then
+    chmod +x build.sh
+    ./build.sh
+fi
 
 log "deactivate services"
 [ -f "deactivate_service.sh" ] && { chmod +x deactivate_service.sh; ./deactivate_service.sh; }
