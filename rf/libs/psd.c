@@ -465,10 +465,16 @@ void execute_welch_psd(signal_iq_t* signal_data, const PsdConfig_t* config, doub
 
         generate_window(config->window_type, tl_window_cache.window, nperseg);
 
+        /*
+         * tl_window_cache is thread-local. OpenMP worker threads must not
+         * access that TLS symbol directly here, or they will see their own
+         * uninitialized per-thread cache instead of the caller thread's window.
+         */
+        const double *window_cache = tl_window_cache.window;
         double u_norm = 0.0;
         #pragma omp parallel for reduction(+:u_norm)
         for (int i = 0; i < nperseg; i++) {
-            u_norm += tl_window_cache.window[i] * tl_window_cache.window[i];
+            u_norm += window_cache[i] * window_cache[i];
         }
         tl_window_cache.u_norm = u_norm / nperseg;
     }

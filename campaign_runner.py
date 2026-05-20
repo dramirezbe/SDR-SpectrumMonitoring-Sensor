@@ -79,6 +79,11 @@ class CampaignRunner:
             else:
                 rf_params["cooldown_request"] = float(rf_params["cooldown_request"])
 
+            if rf_params.get("ppm_error") is None:
+                rf_params["ppm_error"] = 0.0
+            else:
+                rf_params["ppm_error"] = float(rf_params["ppm_error"])
+
             # Keep campaign acquisitions aligned with the scheduler/orchestrator path.
             method_psd = rf_params.get("method_psd")
             if method_psd not in {"pfb", "welch"}:

@@ -197,3 +197,164 @@ Best rollback probe:
 - test a node on commit `8daa487` (April 14, 2026), which is before the suspected RF optimization window
 
 If campaign acquisition becomes stable there, it strongly supports the regression hypothesis around `9c95f4a` / `21d9326`.
+
+## Update on May 20, 2026: Reproduced and Narrowed Root Cause
+
+The original May 19, 2026 hypothesis was refined with direct reproduction on May 20, 2026.
+
+The segmentation fault was reproduced manually by sending the calibration command directly to a running `rf_app` over the real ZMQ IPC socket:
+
+```bash
+python3 -m tools.test_kalibrate_payload
+```
+
+This sent:
+
+```json
+{"calibrate": true}
+```
+
+Observed behavior:
+
+- the Python ZMQ client connected successfully to `ipc:///tmp/rf_engine`
+- the calibration command was sent successfully
+- the client timed out waiting for a response
+- `rf_app` crashed and produced a new core dump
+
+This is important because it proves the crash can occur from the calibration path alone, without involving:
+
+- cron scheduling
+- `campaign_runner.py` acquisition payloads
+- campaign-specific parser differences
+
+## Why Campaigns Crash but Realtime Does Not
+
+The key behavioral difference is now confirmed:
+
+- campaign mode triggers `_perform_calibration_sequence()` before entering campaign acquisition
+- realtime mode does **not** use this calibration path
+
+That means campaigns exercise a different RF-engine code path than realtime.
+
+In the RF engine:
+
+- ZMQ command reception enters `on_command_received()`
+- when `{"calibrate": true}` is received, execution goes into `calibrate_hackrf()`
+- the crash happens during the Welch PSD sweep executed inside calibration
+
+Relevant path:
+
+- `rf/rf.c:895` -> calibration branch in `on_command_received()`
+- `rf/rf.c:296` -> `calibrate_hackrf()`
+- `rf/rf.c:404` -> `execute_welch_psd()`
+
+## Core Dump Evidence
+
+`coredumpctl` for the reproduced May 20, 2026 crash showed the critical stack:
+
+- `execute_welch_psd._omp_fn.0`
+- `execute_welch_psd`
+- `calibrate_hackrf`
+- `on_command_received`
+- `listener_thread`
+
+This demonstrates that the reproduced crash is not centered in:
+
+- campaign payload parsing
+- `CronSchedulerCampaign`
+- `campaign_runner.py`
+- steady-state acquisition after campaign tuning
+
+Instead, the crash occurs inside the calibration Welch PSD computation.
+
+## Actual Root Cause
+
+The root cause is in `rf/libs/psd.c`, inside `execute_welch_psd()`.
+
+Welch used a thread-local cache:
+
+- `static __thread welch_window_cache_t tl_window_cache`
+
+When the window cache was rebuilt, the code computed `u_norm` using:
+
+- `#pragma omp parallel for reduction(+:u_norm)`
+
+but the OpenMP worker threads dereferenced `tl_window_cache.window` directly inside that loop.
+
+That is unsafe because `tl_window_cache` is thread-local storage:
+
+- the calling thread initializes its own `tl_window_cache.window`
+- OpenMP worker threads have different TLS instances
+- those worker TLS instances may still be uninitialized
+- workers can therefore read an invalid/null pointer and crash
+
+This explains why the fault lands specifically inside:
+
+- `execute_welch_psd._omp_fn.0`
+
+## Why PFB Did Not Show the Same Failure
+
+`execute_pfb_psd()` follows a safer pattern:
+
+- thread-local buffers are resolved into local pointer variables before use in the parallel work
+- worker code uses those local resolved pointers instead of repeatedly dereferencing TLS symbols that belong to another thread context
+
+The Welch correction followed that same stability pattern without changing the Welch algorithm itself.
+
+## Applied Correction
+
+The fix was applied in `rf/libs/psd.c`.
+
+Instead of reading `tl_window_cache.window` directly inside the OpenMP reduction loop, the code now first resolves:
+
+```c
+const double *window_cache = tl_window_cache.window;
+```
+
+and then uses `window_cache[i]` inside the reduction.
+
+This preserves the Welch algorithm and the cache design, while removing the invalid TLS access pattern during OpenMP execution.
+
+## Additional Hardening Applied
+
+Two additional defensive fixes were also applied during investigation:
+
+- `campaign_runner.py` now sends `ppm_error = 0.0` if that value is missing from shared memory
+- `rf/libs/sdr_HAL.c` now uses `PRIu64` for `uint64_t` frequency logging instead of `%lu`
+
+These were not the primary cause of the reproduced crash, but they remove secondary risk.
+
+## Validation After the Fix
+
+After applying the Welch correction:
+
+- `rf_app` was rebuilt with `./build.sh -dev`
+- the new binary was started
+- the same ZMQ calibration command was sent again
+
+Observed result after the fix:
+
+- calibration completed successfully
+- the engine returned a valid response with `ppm_error`
+- no timeout occurred in the Python test client
+- no new core dump was generated
+- `rf_app` remained alive after calibration
+
+Observed response example:
+
+```json
+{"status":"calibration_complete","ppm_error":-8.135040283203125}
+```
+
+## Updated Conclusion
+
+The May 19, 2026 campaign crash is now attributable to the calibration Welch PSD path, not to the campaign payload itself.
+
+More specifically:
+
+- campaigns crashed because they invoked the pre-campaign calibration sequence
+- the calibration sequence executed `execute_welch_psd()`
+- Welch contained an invalid TLS + OpenMP access pattern
+- that bug produced the observed `SIGSEGV`
+
+This finding supersedes the earlier primary hypothesis that the main cause was most likely the April 16-17 ring-buffer/runtime optimization window.

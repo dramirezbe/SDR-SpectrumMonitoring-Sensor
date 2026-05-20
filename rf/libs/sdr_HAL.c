@@ -4,6 +4,7 @@
  */
 
 #include "sdr_HAL.h"
+#include <inttypes.h>
 
 /**
  * @addtogroup sdr_module
@@ -21,7 +22,7 @@ static void tune_freq_with_ppm(hackrf_device* dev, uint64_t target_freq, float p
     double correction = 1.0 + ((double)ppm_error / 1000000.0);
     uint64_t corrected_freq = (uint64_t)((double)target_freq * correction);
     
-    printf("[HAL] Target: %lu Hz | PPM: %.3f | Tuning to: %lu Hz\n", 
+    printf("[HAL] Target: %" PRIu64 " Hz | PPM: %.3f | Tuning to: %" PRIu64 " Hz\n",
            target_freq, ppm_error, corrected_freq);
 
     hackrf_set_freq(dev, corrected_freq);
