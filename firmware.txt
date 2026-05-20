@@ -27,11 +27,9 @@ disable_overscan=1
 # ==========================================
 # Gestión de CPU (BCM2712)
 # ==========================================
-# Desactiva aceleración algorítmica térmica/frecuencia del firmware
-arm_boost=0
-
-# Fija multiplicador PLL del procesador a 2.0 GHz máximo estático
-arm_freq=2000
+# Se comentan para permitir la frecuencia stock máxima de fábrica (2.4 GHz)
+#arm_boost=0
+#arm_freq=2000
 
 # ==========================================
 # Filtros de Hardware (Compute Modules)
@@ -60,8 +58,8 @@ gpio=23=op,dh
 # Pines 17 y 18: Flotantes (desactiva resistencias pull-up/pull-down internas)
 gpio=17,18=pn/np
 
-# Permite downclock (voltaje/frecuencia) por el gobernador de Linux en inactividad
-force_turbo=0
+# Fuerza la frecuencia máxima constante (2.4 GHz) eliminando latencias por escalado del gobernador
+force_turbo=1
 
 # Libera RAM al no cargar firmware legacy extendido de GPU (start_x.elf)
 start_x=0
@@ -73,7 +71,7 @@ dtoverlay=disable-bt
 # Power Management (Bypass PMIC)
 # ==========================================
 # Levanta bloqueo del PMIC, habilitando límite físico de hardware (1.6A en bus USB)
-#usb_max_current_enable=1
+usb_max_current_enable=1
 
 # Ignora handshake USB-PD forzando presupuesto energético global de 5 Amperios
-#psu_max_current=5000
+psu_max_current=5000
