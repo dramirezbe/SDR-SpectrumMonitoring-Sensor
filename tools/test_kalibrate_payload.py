@@ -13,10 +13,9 @@ async def main():
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=True)
     async with controller as zmq_ctrl:
         print("Enviando comando de calibración...")
-        await zmq_ctrl.send_command({"calibrate": True})
+        response = await zmq_ctrl.request({"calibrate": True})
         
         print("Esperando respuesta del motor (esto puede tomar 30-60 segundos)...")
-        response = await zmq_ctrl.wait_for_data()
         if response is None:
             print("✗ Timeout: No se recibió respuesta del motor en 15 segundos")
         else:

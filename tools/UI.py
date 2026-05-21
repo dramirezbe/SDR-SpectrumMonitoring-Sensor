@@ -550,7 +550,6 @@ class PSDLiveUI(QMainWindow):
         controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
         
         DEMOD_CFG_SENT = False
-        RESET_DEMOD_CFG = False
         
         async with controller as zmq_ctrl:
             acquirer = AcquireDual(controller=zmq_ctrl, log=log)
@@ -582,14 +581,8 @@ class PSDLiveUI(QMainWindow):
                         DEMOD_CFG_SENT = True
                     else:
                         if DEMOD_CFG_SENT:
-                            RESET_DEMOD_CFG = True
+                            log.info("[UI] Demod reset handled by next 1:1 request; skipping legacy fire-and-forget reset.")
                             DEMOD_CFG_SENT = False
-
-                    # Enviar comando de detención al motor C si se apagó la demodulación
-                    if RESET_DEMOD_CFG:
-                        log.info("[UI] sending RESET_DEMOD_CFG ({})")
-                        await zmq_ctrl.send_command({})
-                        RESET_DEMOD_CFG = False
 
                     # --- Adquisición ---
                     self._dbg_acq_count += 1

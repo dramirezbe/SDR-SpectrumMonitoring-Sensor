@@ -496,10 +496,16 @@ class AcquireDual:
             rf_params["cooldown_request"] = 1.0
         else:
             rf_params["cooldown_request"] = float(rf_params["cooldown_request"])
-        await self.controller.send_command(rf_params)
         self._log.debug(f"Acquiring CF: {rf_params['center_freq_hz']/1e6} MHz")
-        data = await self.controller.wait_for_data()
+        try:
+            data = await self.controller.request(rf_params)
+        except TimeoutError as exc:
+            self._log.warning(f"ZMQ send timeout: {exc}")
+            return None
         if data is None:
+            return None
+        if data.get("status") == "error":
+            self._log.warning(f"Acquisition error from RF engine: {data.get('reason', 'unknown')}")
             return None
         # PLL/Hardware settle time
         await asyncio.sleep(0.05) 

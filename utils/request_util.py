@@ -210,11 +210,12 @@ class RequestClient:
 
 class ZmqPairController:
     """
-    Controlador asíncrono para sockets ZeroMQ del tipo PAIR.
+    Controlador asíncrono para sockets ZeroMQ con flujo estricto request/reply.
 
     Se utiliza para la comunicación Inter-Procesos (IPC) entre este código 
     Python y el motor de procesamiento RF (C++/Rust/Python). Implementa 
-    el protocolo de limpieza de archivos IPC para evitar bloqueos.
+    un canal REQ/REP 1:1 con timeout y reciclado del socket para descartar
+    cualquier reply tardío tras un timeout.
     """
     def __init__(self, addr: str, is_server: bool = True, verbose: bool = False):
         """
@@ -227,41 +228,78 @@ class ZmqPairController:
         self.is_server = is_server
         self.verbose = verbose
         self.timeout_ms = 15000
+        self.send_timeout_ms = 15000
         self.context = None
         self.socket = None
+        self._awaiting_reply = False
 
-    def start(self):
-        """Inicializa el contexto y prepara el socket."""
-        if self.socket is not None: return
+    def _apply_socket_options(self):
+        """Configura el socket para evitar backlogs y respuestas tardías."""
+        assert self.socket is not None
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.setsockopt(zmq.IMMEDIATE, 1)
+        self.socket.setsockopt(zmq.SNDHWM, 1)
+        self.socket.setsockopt(zmq.RCVHWM, 1)
 
-        self.context = zmq.asyncio.Context()
-        self.socket = self.context.socket(zmq.PAIR)
-        self.socket.setsockopt(zmq.LINGER, 0) # Cierre inmediato
-
+    def _bind_or_connect(self):
+        """Aplica la estrategia bind/connect y sanea el archivo IPC si aplica."""
+        assert self.socket is not None
         if self.is_server:
             if self.addr.startswith("ipc://"):
                 path = self.addr.replace("ipc://", "")
                 if os.path.exists(path):
-                    try: os.remove(path)
-                    except OSError: pass
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
             self.socket.bind(self.addr)
 
             if self.addr.startswith("ipc://"):
                 path = self.addr.replace("ipc://", "")
                 try:
-                    os.chmod(path, 0o777) 
+                    os.chmod(path, 0o777)
                 except OSError:
                     pass
         else:
             self.socket.connect(self.addr)
-            
-        if self.verbose: print(f"[PY] ZMQ Iniciado en {self.addr}")
+
+    def _create_socket(self):
+        """Crea un nuevo socket REQ con la configuración de seguridad de cola."""
+        if self.context is None:
+            self.context = zmq.asyncio.Context()
+        self.socket = self.context.socket(zmq.REQ)
+        self._apply_socket_options()
+        self._bind_or_connect()
+
+    def _reopen_socket(self):
+        """
+        Recrea el socket completo.
+
+        Esto resetea el estado interno REQ y descarta cualquier reply tardío
+        que haya quedado asociado al request anterior.
+        """
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+        self._awaiting_reply = False
+        self._create_socket()
+
+    def start(self):
+        """Inicializa el contexto y prepara el socket."""
+        if self.socket is not None:
+            return
+
+        self._create_socket()
+
+        if self.verbose:
+            print(f"[PY] ZMQ Iniciado en {self.addr}")
 
     def close(self):
         """Libera los recursos de ZeroMQ y limpia archivos temporales IPC."""
         if self.socket:
             self.socket.close()
             self.socket = None
+        self._awaiting_reply = False
         if self.context:
             self.context.term()
             self.context = None
@@ -274,23 +312,52 @@ class ZmqPairController:
 
     async def send_command(self, payload: dict):
         """Envía un comando JSON de forma asíncrona."""
-        if not self.socket: raise RuntimeError("Socket no iniciado.")
-        await self.socket.send_string(json.dumps(payload))
-        if self.verbose: print(f"[PY] >> Comando enviado")
+        if not self.socket:
+            raise RuntimeError("Socket no iniciado.")
+        if self._awaiting_reply:
+            raise RuntimeError("Ya existe un request en vuelo; espera su reply antes de enviar otro.")
+
+        if not await self.socket.poll(self.send_timeout_ms, zmq.POLLOUT):
+            self._reopen_socket()
+            raise TimeoutError("Timeout esperando disponibilidad de escritura en ZMQ.")
+
+        try:
+            await self.socket.send_string(json.dumps(payload))
+        except zmq.ZMQError:
+            self._reopen_socket()
+            raise
+
+        self._awaiting_reply = True
+        if self.verbose:
+            print(f"[PY] >> Comando enviado")
 
     async def wait_for_data(self) -> dict | None:
         """Espera una respuesta y retorna `None` si vence `timeout_ms`."""
-        if not self.socket: raise RuntimeError("Socket no iniciado.")
-        
-        # Use poller to wait with a timeout
-        if await self.socket.poll(self.timeout_ms, zmq.POLLIN):
-            msg = await self.socket.recv_string()
-            if self.verbose: print(f"[PY] << Datos recibidos")
-            return json.loads(msg)
-        else:
-            # Return None or raise error so run_realtime_logic can handle the silence
-            if self.verbose: print(f"[PY] !! Timeout esperando datos de C")
-            return None
+        if not self.socket:
+            raise RuntimeError("Socket no iniciado.")
+        if not self._awaiting_reply:
+            raise RuntimeError("No hay ningún request pendiente de reply.")
+
+        try:
+            if await self.socket.poll(self.timeout_ms, zmq.POLLIN):
+                msg = await self.socket.recv_string()
+                self._awaiting_reply = False
+                if self.verbose:
+                    print(f"[PY] << Datos recibidos")
+                return json.loads(msg)
+        except zmq.ZMQError:
+            self._reopen_socket()
+            raise
+
+        if self.verbose:
+            print(f"[PY] !! Timeout esperando datos de C")
+        self._reopen_socket()
+        return None
+
+    async def request(self, payload: dict) -> dict | None:
+        """Envía un request y espera su reply dentro de la misma ventana de timeout."""
+        await self.send_command(payload)
+        return await self.wait_for_data()
 
     async def __aenter__(self):
         """Soporte para gestor de contexto asíncrono (`async with`)."""

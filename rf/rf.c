@@ -99,12 +99,10 @@ ring_buffer_t audio_rb;               /**< Buffer circular para muestras de audi
 atomic_bool   audio_enabled = false;  /**< Bandera atómica que indica si el subsistema de audio está activo. */
 atomic_bool   calibration_running = false; /**< Indica calibración en curso para evitar cierre concurrente de HW. */
 volatile bool stop_streaming = true;  /**< Señal para detener la adquisición de datos del hardware. */
-volatile bool config_received = false;/**< Se activa cuando se procesa un nuevo paquete de configuración. */
 volatile bool keep_running = true;    /**< Bandera maestra de salida para el bucle principal de la aplicación. */
 
 pthread_t       audio_thread;         /**< Identificador del hilo para la tarea de red/audio Opus. */
 volatile bool   audio_thread_running = false; /**< Bandera de estado para el ciclo de vida del hilo de audio. */
-pthread_mutex_t cfg_mutex = PTHREAD_MUTEX_INITIALIZER; /**< Protege el acceso a @ref desired_config. */
 
 pthread_cond_t  rb_cond  = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t rb_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -118,10 +116,6 @@ pthread_mutex_t audio_rb_mutex = PTHREAD_MUTEX_INITIALIZER;
  * Instantáneas de los ajustes deseados, de hardware y de procesamiento.
  * @{
  */
-DesiredCfg_t desired_config = {0};    /**< Configuración objetivo solicitada por el usuario o la red. */
-PsdConfig_t  psd_cfg = {0};           /**< Parámetros para FFT y Densidad Espectral de Potencia (PSD). */
-SDR_cfg_t    hack_cfg = {0};          /**< Ajustes de bajo nivel del hardware HackRF (Ganancia, IF, etc.). */
-RB_cfg_t     rb_cfg = {0};            /**< Parámetros de configuración para el tamaño del buffer circular. */
 SDR_cfg_t    current_hw_cfg = {0};    /**< Estado actual real del hardware para comparaciones de sintonización optimizada. */
 /** @} */
 
@@ -838,6 +832,82 @@ int recover_hackrf(void) {
 }
 
 /**
+ * @brief Envía un objeto JSON ya construido como reply del request actual.
+ * @param[in] root Objeto cJSON a serializar.
+ * @return 0 si el reply fue enviado, -1 si falló.
+ */
+static int send_json_reply(cJSON *root) {
+    if (!zmq_channel || !root) return -1;
+
+    char *json_string = cJSON_PrintUnformatted(root);
+    if (!json_string) return -1;
+
+    int rc = zpair_send(zmq_channel, json_string);
+    free(json_string);
+    return (rc >= 0) ? 0 : -1;
+}
+
+/**
+ * @brief Envía un reply de estado simple.
+ * @param[in] status Estado semántico del reply.
+ * @param[in] reason Motivo opcional de error o contexto adicional.
+ * @return 0 si el reply fue enviado, -1 si falló.
+ */
+static int send_status_reply(const char *status, const char *reason) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return -1;
+
+    cJSON_AddStringToObject(root, "status", status ? status : "error");
+    if (reason && reason[0] != '\0') {
+        cJSON_AddStringToObject(root, "reason", reason);
+    }
+
+    int rc = send_json_reply(root);
+    cJSON_Delete(root);
+    return rc;
+}
+
+/**
+ * @brief Aplica al request actual la configuración DSP/HW y el estado de audio.
+ * @param[in,out] desired Configuración parseada desde el request.
+ * @param[out] out_hack Configuración de hardware derivada.
+ * @param[out] out_psd Configuración PSD derivada.
+ * @param[out] out_rb Configuración de buffer derivada.
+ */
+static void apply_runtime_request(
+    DesiredCfg_t *desired,
+    SDR_cfg_t *out_hack,
+    PsdConfig_t *out_psd,
+    RB_cfg_t *out_rb
+) {
+    if (!desired || !out_hack || !out_psd || !out_rb) return;
+
+    if (desired->rf_mode == PSD_MODE) {
+        atomic_store(&audio_enabled, false);
+    } else {
+        if (!atomic_load(&audio_enabled)) {
+            rb_reset(&audio_rb);
+        }
+        atomic_store(&audio_enabled, true);
+    }
+
+    find_params_psd(*desired, out_hack, out_psd, out_rb);
+
+    if (desired->cooldown_request_set) {
+        g_request_cooldown_s = desired->cooldown_request;
+    }
+    desired->cooldown_request = g_request_cooldown_s;
+
+    print_config_summary_DEPLOY(desired, out_hack, out_psd, out_rb);
+
+    #ifndef NO_COMMON_LIBS
+        select_ANTENNA(desired->antenna_port);
+    #else
+        printf("[GPIO] selected port: %d\n", desired->antenna_port);
+    #endif
+}
+
+/**
  * @brief Serializa los datos de PSD y metadatos de RF en JSON y los envía vía ZMQ.
  * @details Utiliza cJSON para construir una carga útil que contiene los límites de frecuencia, 
  * métricas específicas del modo (profundidad AM o excursión FM) y el arreglo de PSD crudo.
@@ -847,17 +917,20 @@ int recover_hackrf(void) {
  * @param[in] rf_mode Modo de operación actual (ej. FM_MODE, AM_MODE, PSD_MODE).
  * @param[in] am_depth Profundidad de modulación AM calculada.
  * @param[in] fm_dev Desviación de frecuencia FM calculada.
+ * @return 0 si el reply fue enviado, -1 si falló.
  */
-void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, uint64_t original_center_freq, int rf_mode, float am_depth, float fm_dev) {
-    if (!zmq_channel || !psd_array || length <= 0) return;
+int publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, uint64_t original_center_freq, int rf_mode, float am_depth, float fm_dev) {
+    if (!zmq_channel || !psd_array || length <= 0) return -1;
     
     cJSON *root = cJSON_CreateObject();
+    if (!root) return -1;
     double fs = local_hack->sample_rate;
     /* Use original center_freq (without PPM correction) for frequency labels.
        This ensures the payload reports nominal frequencies, not corrected ones. */
     double start_freq = (double)original_center_freq - (fs / 2.0);
     double end_freq   = (double)original_center_freq + (fs / 2.0);
     
+    cJSON_AddStringToObject(root, "status", "ok");
     cJSON_AddNumberToObject(root, "start_freq_hz", start_freq);
     cJSON_AddNumberToObject(root, "end_freq_hz", end_freq);
     
@@ -868,82 +941,10 @@ void publish_results(double* psd_array, int length, SDR_cfg_t *local_hack, uint6
     }
     
     cJSON_AddItemToObject(root, "Pxx", cJSON_CreateDoubleArray(psd_array, length));
-    
-    char *json_string = cJSON_PrintUnformatted(root); 
-    if (json_string) {
-        zpair_send(zmq_channel, json_string);
-        free(json_string);
-    }
+
+    int rc = send_json_reply(root);
     cJSON_Delete(root);
-}
-
-/**
- * @brief Procesa comandos de configuración entrantes de ZMQ.
- * @details Analiza la carga útil JSON, actualiza las estructuras de configuración globales 
- * utilizando @ref cfg_mutex para seguridad entre hilos y gestiona el estado de @ref audio_enabled.
- * @param[in] payload La cadena JSON cruda recibida de ZMQ.
- */
-void on_command_received(const char *payload) {
-    DesiredCfg_t temp_desired;
-    SDR_cfg_t temp_hack;
-    PsdConfig_t temp_psd;
-    RB_cfg_t temp_rb;
-
-    if (parse_config_rf(payload, &temp_desired) == 0) {
-        printf("[RF]<<<<<zmq\n");
-
-        if (temp_desired.calibrate) {
-            float _cal_ppm = calibrate_hackrf();
-            
-            // Enviar respuesta de calibración
-            cJSON *response = cJSON_CreateObject();
-            cJSON_AddStringToObject(response, "status", "calibration_complete");
-            cJSON_AddNumberToObject(response, "ppm_error", (double)_cal_ppm);
-            char *response_str = cJSON_PrintUnformatted(response);
-            cJSON_Delete(response);
-            
-            if (zpair_send(zmq_channel, response_str) >= 0) {
-                printf("[RF] Respuesta de calibración enviada: ppm=%.6f\n", _cal_ppm);
-            } else {
-                printf("[RF] Error al enviar respuesta de calibración\n");
-            }
-            free(response_str);
-            return;
-        }
-
-        //Enable or disable audio based on RF mode
-        if (temp_desired.rf_mode == PSD_MODE) {
-            atomic_store(&audio_enabled, false);
-        } else {
-            // If we were OFF and are turning ON, reset the buffer to ensure fresh audio
-            if (!atomic_load(&audio_enabled)) {
-                rb_reset(&audio_rb); 
-            }
-            atomic_store(&audio_enabled, true);
-        }
-
-        find_params_psd(temp_desired, &temp_hack, &temp_psd, &temp_rb);
-        
-        pthread_mutex_lock(&cfg_mutex);
-        if (temp_desired.cooldown_request_set) {
-            g_request_cooldown_s = temp_desired.cooldown_request;
-        }
-        temp_desired.cooldown_request = g_request_cooldown_s;
-        desired_config = temp_desired;
-        hack_cfg = temp_hack;
-        psd_cfg = temp_psd;
-        rb_cfg = temp_rb;
-        config_received = true; 
-        pthread_mutex_unlock(&cfg_mutex);
-
-        print_config_summary_DEPLOY(&desired_config, &hack_cfg, &psd_cfg, &rb_cfg);
-
-        #ifndef NO_COMMON_LIBS
-            select_ANTENNA(temp_desired.antenna_port);
-        #else
-            printf("[GPIO] selected port: %d\n", temp_desired.antenna_port);
-        #endif
-    }
+    return rc;
 }
 
 /**
@@ -1198,9 +1199,8 @@ int main() {
     
     printf("[RF] Starting Engine. IPC=%s\n", ipc_addr);
 
-    zmq_channel = zpair_init(ipc_addr, on_command_received, 0);
+    zmq_channel = zpair_init(ipc_addr, 0);
     if (!zmq_channel) return 1;
-    zpair_start(zmq_channel); 
 
     printf("[RF] Initializing HackRF Library...\n");
     while (hackrf_init() != HACKRF_SUCCESS) {
@@ -1246,48 +1246,69 @@ int main() {
     RB_cfg_t local_rb;
     PsdConfig_t local_psd;
     DesiredCfg_t local_desired;
+    static struct timespec last_psd_run = {0};
 
     while (keep_running) {
-        // --- 1. IDLE / TIMEOUT MANAGEMENT (Preserved) ---
-        if (!config_received) {
+        int req_len = zpair_recv(zmq_channel);
+        if (req_len == 0) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
-            double elapsed = (now.tv_sec - last_activity_time.tv_sec) + 
+            double elapsed = (now.tv_sec - last_activity_time.tv_sec) +
                              (now.tv_nsec - last_activity_time.tv_nsec) / 1e9;
 
             if (elapsed >= 15.0 && device != NULL && !atomic_load(&calibration_running)) {
                 printf("[RF] Idle timeout (%.1fs). Closing radio.\n", elapsed);
                 stop_streaming = true;
                 hackrf_stop_rx(device);
-                usleep(100000); 
+                usleep(100000);
                 hackrf_close(device);
                 device = NULL;
-                memset(&current_hw_cfg, 0, sizeof(SDR_cfg_t)); 
+                memset(&current_hw_cfg, 0, sizeof(SDR_cfg_t));
             }
-            usleep(10000); 
             continue;
         }
 
-        // --- 2. SNAPSHOT CONFIG ---
-        pthread_mutex_lock(&cfg_mutex);
-        memcpy(&local_hack, &hack_cfg, sizeof(SDR_cfg_t));
-        memcpy(&local_rb, &rb_cfg, sizeof(RB_cfg_t));
-        memcpy(&local_psd, &psd_cfg, sizeof(PsdConfig_t));
-        memcpy(&local_desired, &desired_config, sizeof(DesiredCfg_t));
-        
-        // Audio Logic: Update audio thread mode/fs atomics
+        if (req_len < 0) {
+            usleep(10000);
+            continue;
+        }
+
+        printf("[RF]<<<<<zmq\n");
+        if (parse_config_rf(zmq_channel->buffer, &local_desired) != 0) {
+            send_status_reply("error", "invalid_request");
+            continue;
+        }
+
+        if (local_desired.calibrate) {
+            float cal_ppm = calibrate_hackrf();
+            cJSON *response = cJSON_CreateObject();
+            if (response) {
+                cJSON_AddStringToObject(response, "status", "calibration_complete");
+                cJSON_AddNumberToObject(response, "ppm_error", (double)cal_ppm);
+                if (send_json_reply(response) == 0) {
+                    printf("[RF] Respuesta de calibración enviada: ppm=%.6f\n", cal_ppm);
+                } else {
+                    printf("[RF] Error al enviar respuesta de calibración\n");
+                }
+                cJSON_Delete(response);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
+            continue;
+        }
+
+        apply_runtime_request(&local_desired, &local_hack, &local_psd, &local_rb);
+
         atomic_store(&audio_ctx.current_mode, (int)local_desired.rf_mode);
         atomic_store(&audio_ctx.current_fs_hz, (double)local_hack.sample_rate);
-
-        config_received = false; 
-        pthread_mutex_unlock(&cfg_mutex);
         clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
 
-        // --- 3. HARDWARE PREP ---
         if (device == NULL) {
             if (hackrf_open(&device) != HACKRF_SUCCESS) {
-                recover_hackrf();
-                continue;
+                if (recover_hackrf() != 0 || device == NULL) {
+                    send_status_reply("error", "hackrf_open_failed");
+                    clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
+                    continue;
+                }
             }
         }
 
@@ -1337,38 +1358,33 @@ int main() {
             stop_streaming = false;
             if (hackrf_start_rx(device, rx_callback, NULL) != HACKRF_SUCCESS) {
                 recover_hackrf();
+                send_status_reply("error", "rx_start_failed");
+                clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
                 continue;
             }
         }
 
-        // --- 4. DATA ACQUISITION ---
-        // Calculate a 5-second safety timeout relative to now
         struct timespec ts_timeout;
         clock_gettime(CLOCK_REALTIME, &ts_timeout);
         ts_timeout.tv_sec += 5;
 
         pthread_mutex_lock(&rb_mutex);
         while (keep_running && rb_available(&rb) < local_rb.total_bytes) {
-            // Wait until signaled OR timeout (5s)
             int rc = pthread_cond_timedwait(&rb_cond, &rb_mutex, &ts_timeout);
             if (rc == ETIMEDOUT) {
-                break; // Break loop to trigger recovery logic below
+                break;
             }
         }
         pthread_mutex_unlock(&rb_mutex);
 
-        // Check if we actually got data or if we timed out
         if (rb_available(&rb) < local_rb.total_bytes && keep_running) {
             fprintf(stderr, "[RF] Error: Acquisition Timeout (buffer empty).\n");
             recover_hackrf();
+            send_status_reply("error", "acquisition_timeout");
             clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
             continue;
         }
 
-        // --- 5. PROCESSING WITH SAFETY CHECKS ---
-        // With smaller IQ chunks, this loop runs more often.
-        // Watchdog cadence: publish PSD using configurable cooldown.
-        static struct timespec last_psd_run = {0};
         struct timespec now_psd;
         clock_gettime(CLOCK_MONOTONIC, &now_psd);
 
@@ -1412,7 +1428,7 @@ int main() {
                     execute_welch_psd(&proc_ws.sig, &local_psd, proc_ws.freq, proc_ws.psd);
                 }
 
-                publish_results(
+                if (publish_results(
                     proc_ws.psd,
                     local_psd.nperseg,
                     &local_hack,
@@ -1420,7 +1436,11 @@ int main() {
                     (int)local_desired.rf_mode,
                     audio_ctx.am_depth.depth_ema,
                     audio_ctx.fm_dev.dev_ema_hz
-                );
+                ) != 0) {
+                    fprintf(stderr, "[RF] Error: Failed to send PSD reply.\n");
+                    clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
+                    continue;
+                }
 
                 {
                     uint64_t tuned_fc = local_hack.center_freq_corrected;
@@ -1432,10 +1452,12 @@ int main() {
                 clock_gettime(CLOCK_MONOTONIC, &last_psd_run);
             } else {
                 fprintf(stderr, "[RF] Error: Failed to load IQ signal into reusable workspace.\n");
+                send_status_reply("error", "signal_load_failed");
             }
         } else {
             fprintf(stderr, "[RF] Error: Workspace allocation failed (%zu bytes, nperseg=%d).\n",
                     local_rb.total_bytes, local_psd.nperseg);
+            send_status_reply("error", "workspace_allocation_failed");
         }
 
         clock_gettime(CLOCK_MONOTONIC, &last_activity_time);

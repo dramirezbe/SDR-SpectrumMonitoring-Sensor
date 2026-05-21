@@ -1,6 +1,6 @@
 /**
  * @file zmq_util.c
- * @brief Detalles de implementación para la gestión de sockets ZMQ y sondeo de hilos.
+ * @brief Detalles de implementación para la gestión síncrona de sockets ZMQ REP.
  */
 
 #define _GNU_SOURCE
@@ -13,18 +13,25 @@
 
 /**
  * @brief Ayudante interno para configurar opciones de socket y conectar.
- * Configura ZMQ_LINGER, intervalos de reconexión y RCVTIMEO para la respuesta del hilo.
+ * Configura un socket REP con timeouts cortos, HWM mínimo y reconexión automática.
  * @param pair La instancia a configurar.
  * @return Código de resultado ZMQ (0 éxito, -1 error).
  */
 static int internal_connect(zpair_t *pair) {
     if (pair->socket) zmq_close(pair->socket);
 
-    pair->socket = zmq_socket(pair->context, ZMQ_PAIR);
+    pair->socket = zmq_socket(pair->context, ZMQ_REP);
     if (!pair->socket) return -1;
 
     int linger = 0;
     zmq_setsockopt(pair->socket, ZMQ_LINGER, &linger, sizeof(linger));
+
+    int immediate = 1;
+    zmq_setsockopt(pair->socket, ZMQ_IMMEDIATE, &immediate, sizeof(immediate));
+
+    int hwm = 1;
+    zmq_setsockopt(pair->socket, ZMQ_SNDHWM, &hwm, sizeof(hwm));
+    zmq_setsockopt(pair->socket, ZMQ_RCVHWM, &hwm, sizeof(hwm));
 
     // Automatic reconnection settings
     int reconnect_ivl = 100; // Start retrying in 100ms
@@ -36,42 +43,17 @@ static int internal_connect(zpair_t *pair) {
     // Short timeout allows the thread to check the 'running' flag regularly
     int timeout = 1000; 
     zmq_setsockopt(pair->socket, ZMQ_RCVTIMEO, &timeout, sizeof(timeout));
+    zmq_setsockopt(pair->socket, ZMQ_SNDTIMEO, &timeout, sizeof(timeout));
 
     return zmq_connect(pair->socket, pair->addr);
 }
 
-/**
- * @brief Rutina del hilo de fondo para el sondeo continuo de mensajes.
- * Ejecuta un bucle while que verifica datos y ejecuta el callback del usuario.
- * @param arg Puntero a zpair_t convertido a void*.
- * @return NULL al finalizar el hilo.
- */
-static void* listener_thread(void *arg) {
-    zpair_t *pair = (zpair_t*)arg;
-    
-    while (pair->running) {
-        int len = zmq_recv(pair->socket, pair->buffer, ZBUF_SIZE - 1, 0);
-
-        if (len >= 0) {
-            pair->buffer[len] = '\0';
-            if (pair->callback) pair->callback(pair->buffer);
-        } else {
-            int err = zmq_errno();
-            if (err != EAGAIN && pair->running) {
-                if (pair->verbose) fprintf(stderr, "[ZMQ] Recv error: %s\n", zmq_strerror(err));
-            }
-        }
-    }
-    return NULL;
-}
-
-zpair_t* zpair_init(const char *ipc_addr, msg_callback_t cb, int verbose) {
+zpair_t* zpair_init(const char *ipc_addr, int verbose) {
     zpair_t *pair = calloc(1, sizeof(zpair_t));
     if (!pair) return NULL;
 
     pair->addr = strdup(ipc_addr);
     pair->context = zmq_ctx_new();
-    pair->callback = cb;
     pair->verbose = verbose;
 
     if (internal_connect(pair) != 0) {
@@ -80,25 +62,46 @@ zpair_t* zpair_init(const char *ipc_addr, msg_callback_t cb, int verbose) {
     return pair;
 }
 
-void zpair_start(zpair_t *pair) {
-    if (!pair) return;
-    pair->running = 1;
-    pthread_create(&pair->thread_id, NULL, listener_thread, pair);
+int zpair_recv(zpair_t *pair) {
+    if (!pair || !pair->socket) return -1;
+
+    int len = zmq_recv(pair->socket, pair->buffer, ZBUF_SIZE - 1, 0);
+    if (len >= 0) {
+        pair->buffer[len] = '\0';
+        return len;
+    }
+
+    int err = zmq_errno();
+    if (err == EAGAIN) return 0;
+
+    if (pair->verbose) fprintf(stderr, "[ZMQ] Recv error: %s\n", zmq_strerror(err));
+    if (err == EFSM || err == ETERM) internal_connect(pair);
+    return -1;
+}
+
+int zpair_reconnect(zpair_t *pair) {
+    if (!pair || !pair->context) return -1;
+    return internal_connect(pair);
 }
 
 int zpair_send(zpair_t *pair, const char *json_payload) {
     if (!pair || !pair->socket || !json_payload) return -1;
-    // We use ZMQ_DONTWAIT to ensure the DSP loop never stalls if the pipe is full
-    printf("[RF]>>>>>zmq\n");
-    return zmq_send(pair->socket, json_payload, strlen(json_payload), ZMQ_DONTWAIT);
+
+    int rc = zmq_send(pair->socket, json_payload, strlen(json_payload), 0);
+    if (rc >= 0) {
+        printf("[RF]>>>>>zmq\n");
+        return rc;
+    }
+
+    if (pair->verbose) fprintf(stderr, "[ZMQ] Send error: %s\n", zmq_strerror(zmq_errno()));
+    internal_connect(pair);
+    return -1;
 }
 
 void zpair_close(zpair_t *pair) {
     if (!pair) return;
-    pair->running = 0;
-    pthread_join(pair->thread_id, NULL);
-    zmq_close(pair->socket);
-    zmq_ctx_term(pair->context);
+    if (pair->socket) zmq_close(pair->socket);
+    if (pair->context) zmq_ctx_term(pair->context);
     free(pair->addr);
     free(pair);
 }

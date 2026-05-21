@@ -395,10 +395,9 @@ async def _perform_calibration_sequence():
         controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
         async with controller as zmq_ctrl:
             log.info("Enviando comando de calibración...")
-            await zmq_ctrl.send_command({"calibrate": True})
+            response = await zmq_ctrl.request({"calibrate": True})
             
             log.info("Esperando respuesta del motor...")
-            response = await zmq_ctrl.wait_for_data()
             if response is None:
                 log.warning("✗ Timeout: No se recibió respuesta del motor en 15 segundos")
             else:
@@ -452,7 +451,6 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     GlobalSys.set(SysState.REALTIME)
     webrtc_proc: Optional[ManagedProc] = None
     DEMOD_CFG_SENT = False
-    RESET_DEMOD_CFG = False
     store.add_to_persistent("delta_t_ms", delta_t_ms)
 
     timer_force_rotation = ElapsedTimer()
@@ -507,12 +505,8 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                     dsp_payload = await acquirer.get_corrected_data(next_config)
 
                     if DEMOD_CFG_SENT:
-                        RESET_DEMOD_CFG = True
+                        log.info("[REALTIME] Demod reset handled by next 1:1 request; skipping legacy fire-and-forget reset.")
                         DEMOD_CFG_SENT = False
-
-                if RESET_DEMOD_CFG:
-                    await zmq_ctrl.send_command({})
-                    RESET_DEMOD_CFG = False
 
                 if dsp_payload:
                     final_payload = format_data_for_upload(dsp_payload, log)
