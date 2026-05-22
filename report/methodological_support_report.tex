@@ -1,0 +1,623 @@
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{microtype}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\geometry{margin=1in}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0pt}
+\emergencystretch=2em
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    urlcolor=blue!50!black,
+    pdftitle={Methodological Support Report for the SDR Spectrum Monitoring Sensor Node},
+    pdfauthor={OpenAI Codex}
+}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=fullflexible,
+    frame=single,
+    framerule=0.2pt
+}
+
+\newcommand{\module}[1]{\path{#1}}
+\newcommand{\approach}[1]{\paragraph{Technical approach.} #1}
+\newcommand{\scopep}[1]{\paragraph{Scope.} #1}
+\newcommand{\realization}[1]{\paragraph{Code realization.} #1}
+
+\begin{document}
+
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+\centering
+{\Large Methodological Support Report\par}
+\vspace{0.7cm}
+{\huge SDR Spectrum Monitoring Sensor Node\par}
+\vspace{1.0cm}
+{\large Repository-grounded architectural and design analysis\par}
+\vfill
+\begin{tabular}{ll}
+Artifact type: & Technical methodological report \\
+System class: & Embedded cyber-physical SDR sensing node \\
+Primary implementation languages: & C and Python \\
+Compilation baseline: & CMake + Python virtual environment \\
+Document date: & \today \\
+\end{tabular}
+\vfill
+\begin{minipage}{0.88\textwidth}
+\small
+This document was prepared from direct inspection of the repository source code, build scripts,
+runtime entry points, documentation stubs, and verification assets. The report therefore describes
+the implemented system as it exists in the inspected codebase, rather than an idealized target
+architecture.
+\end{minipage}
+\end{titlepage}
+\hypersetup{pageanchor=true}
+
+\pagenumbering{roman}
+
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+This report provides methodological support for the SDR Spectrum Monitoring Sensor node implemented
+in the repository. The analysis frames the node as a layered measurement system that combines
+deterministic radio-frequency acquisition in C with supervisory orchestration in Python. The report
+documents the architectural foundation, allocation of responsibilities, inter-process integration
+mechanisms, resilience patterns, deployment model, and current verification evidence. Each analytical
+section explicitly states its scope, technical basis, and module-level realization so that the text
+can serve both as formal design documentation and as a starting point for future maintenance,
+auditing, and extension activities.
+
+\tableofcontents
+
+\pagenumbering{arabic}
+
+\chapter{Purpose and Methodological Basis}
+
+\section{Document Objective}
+\scopep{The purpose of this report is to formalize the engineering rationale behind the sensor node,
+with emphasis on architectural decomposition, module responsibilities, design trade-offs, and
+evidence of implementation. The report is not limited to user-facing behavior; it addresses the
+full technical chain from hardware control and signal processing to orchestration, telemetry,
+resilience, and deployment.}
+
+\approach{The document follows a systems-engineering method based on three principles:
+\begin{enumerate}
+\item requirement-oriented decomposition of the sensing problem into acquisition, processing,
+coordination, telemetry, and recoverability concerns;
+\item architectural allocation of each concern to the most appropriate runtime domain according to
+timing sensitivity, hardware coupling, and operational risk;
+\item traceability from design intent to concrete source modules and scripts.
+\end{enumerate}
+This method is appropriate for mixed embedded systems because it avoids both extremes of
+over-centralization and undocumented ad hoc growth.}
+
+\realization{The repository already exhibits a strong separation of concerns that supports this
+method: real-time RF execution is concentrated in \module{rf/rf.c} and \module{rf/libs/*},
+telecommunication and positioning are handled in \module{gps-lte/gps-lte.c} and
+\module{gps-lte/libs/*}, orchestration is centered in \module{orchestrator.py} and
+\module{functions.py}, and cross-cutting infrastructure is concentrated in \module{cfg.py},
+\module{utils/io\_util.py}, \module{utils/request\_util.py}, and \module{utils/status\_util.py}.}
+
+\section{Analytical Evidence Base}
+\scopep{This section defines the evidentiary basis used to formulate the report so that the document
+remains auditable.}
+
+\approach{The analysis uses repository-internal evidence only. Source inspection focused on runtime
+entry points, public interfaces, build scripts, deployment scripts, documentation generators, and
+available tests or operational validation scripts. This avoids introducing unsupported assumptions
+about hardware behavior or service contracts that are not visible in the repository.}
+
+\realization{The principal evidence sources are the top-level execution modules
+\module{orchestrator.py}, \module{campaign\_runner.py}, \module{status.py}, \module{retry\_queue.py},
+\module{server\_webrtc.py}, \module{rf/rf.c}, and \module{gps-lte/gps-lte.c}; the build scripts
+\module{CMakeLists.txt}, \module{build.sh}, and \module{install.sh}; the documentation scaffolding
+\module{document.sh}, \module{docs/python\_modules.rst}, and \module{docs/c\_modules.rst}; and the
+validation assets under \module{test/} and \module{examples/}.}
+
+\chapter{System Foundation}
+
+\section{Operational Problem Definition}
+\scopep{The node is designed to function as an embedded spectral-monitoring endpoint that can
+receive RF acquisition commands, calculate spectral products, optionally demodulate audio, collect
+GPS coordinates, maintain network connectivity, and publish telemetry to remote services.}
+
+\approach{From a theoretical perspective, the system belongs to the class of distributed
+instrumentation nodes. Such systems must reconcile three competing concerns: deterministic data-path
+execution, flexible supervisory logic, and survivability under intermittent connectivity or partial
+hardware failure. The adopted architecture therefore separates hard real-time or near-real-time
+operations from policy-driven orchestration.}
+
+\realization{The C subsystem implements the time-sensitive path: HackRF control, IQ ingestion,
+ring-buffer management, PSD estimation, demodulation, calibration, GPIO selection, and ZMQ reply
+generation. The Python subsystem implements policy-heavy tasks: state transitions, polling the API,
+campaign scheduling, retry storage, status reporting, and WebRTC process lifecycle management. Shared
+state is maintained through \module{/dev/shm/persistent.json}, exposed in Python through
+\module{ShmStore} and in the GPS-LTE C service through dedicated SHM helper functions.}
+
+\section{Architectural Partitioning Principle}
+\scopep{This section explains why the repository is intentionally partitioned between C and Python
+instead of converging on a single implementation language.}
+
+\approach{The partitioning strategy follows a performance-risk alignment principle. C is used where
+the software directly faces high-rate hardware streams, strict memory reuse requirements, callback
+contexts, and DSP kernels. Python is used where the dominant concerns are asynchronous orchestration,
+serialization, network communication, scheduling, and operator-facing maintainability. This is not
+merely a convenience choice; it is a methodological decision that minimizes timing jitter in the data
+plane while preserving high development velocity in the control plane.}
+
+\realization{The decision is visible in the repository layout and in the runtime call graph.
+\module{rf/rf.c}, \module{rf/libs/psd.c}, \module{rf/libs/chan\_filter.c}, and
+\module{rf/libs/sdr\_HAL.c} keep the RF path native and memory-conscious. By contrast,
+\module{orchestrator.py}, \module{campaign\_runner.py}, and \module{retry\_queue.py} rely on
+Python's dataclasses, HTTP libraries, asynchronous flow control, and OS process management to
+implement higher-level behavior.}
+
+\chapter{Architectural Decomposition}
+
+\section{RF Acquisition and DSP Subsystem}
+\scopep{This subsystem covers radio hardware control, IQ capture, spectrum estimation, demodulation,
+audio streaming preparation, calibration, and response serialization. It is the core measurement
+engine of the node.}
+
+\approach{The subsystem follows a staged streaming architecture. A high-frequency hardware callback
+performs minimal work and forwards raw IQ samples into ring buffers. Downstream processing then
+operates outside the callback context, enabling PSD estimation, demodulation, filtering, and JSON
+reply construction without risking upstream sample loss. This is a standard embedded DSP pattern for
+decoupling acquisition from computation.}
+
+\realization{The principal implementation is \module{rf/rf.c}. The function \module{rx\_callback}
+writes data into the primary ring buffer and conditionally mirrors IQ samples into an audio buffer.
+Configuration requests are parsed into \module{DesiredCfg\_t} through \module{parse\_config\_rf} in
+\module{rf/libs/parser.c}, mapped to hardware and PSD settings via \module{find\_params\_psd} in
+\module{rf/libs/psd.c}, and applied to the HackRF through \module{hackrf\_apply\_cfg} in
+\module{rf/libs/sdr\_HAL.c}. The RF engine stores reusable workspaces in dynamic buffers to avoid
+repeated allocation costs during repeated acquisitions. Results are serialized by
+\module{publish\_results}, which emits PSD arrays and mode-specific metrics such as AM depth or FM
+excursion.}
+
+\section{Configuration Integrity for RF Requests}
+\scopep{This section addresses how the node prevents malformed or physically inconsistent runtime
+requests from propagating directly into the RF pipeline.}
+
+\approach{The design applies two validation layers. The first layer is a typed Python-side request
+contract that rejects obviously invalid user or server input. The second layer is a C-side parser
+that enforces defaults and clamps filter limits to the Nyquist region derived from the requested
+center frequency and sample rate. The dual-layer strategy is methodologically sound because the
+Python layer protects normal control flow while the C layer remains authoritative for the actual
+measurement engine.}
+
+\realization{On the Python side, \module{ServerRealtimeConfig} in \module{utils/request\_util.py}
+validates frequency range, sample-rate bounds, antenna port values, PSD method names, demodulation
+mode, and non-negative cooldown intervals. On the native side, \module{rf/libs/parser.c} sets
+factory-safe defaults, parses the JSON request, and clamps the optional \module{filter} object so
+that its start and end frequencies remain inside the available capture bandwidth. This explicit
+clamping is one of the most important correctness barriers in the RF path.}
+
+\section{Calibration and Frequency Error Compensation}
+\scopep{The calibration path exists to estimate frequency error and propagate the resulting parts-per-
+million correction through subsequent acquisitions.}
+
+\approach{Calibration is treated as a closed-loop estimation problem. The system captures a spectrum,
+identifies candidate peaks, evaluates FM pilot-tone evidence, and derives a correction factor that
+can be persisted and reused. Methodologically, this is preferable to hardcoded oscillator correction
+because it adapts to unit-specific hardware drift and environmental variation.}
+
+\realization{The native calibration routine is implemented in \module{calibrate\_hackrf} inside
+\module{rf/rf.c}. Successful calibration concludes with persistence of \module{ppm\_error} into the
+shared-memory store. During normal acquisition, \module{fetch\_realtime\_config} in
+\module{orchestrator.py} retrieves the current correction from \module{ShmStore}, and
+\module{hackrf\_apply\_cfg} in \module{rf/libs/sdr\_HAL.c} computes a corrected tuning frequency using
+the standard linear PPM formula. This makes the correction operational rather than merely diagnostic.}
+
+\section{GPS and LTE Subsystem}
+\scopep{This subsystem manages modem control, PPP connectivity, GPS acquisition, coordinate
+normalization, and publication of mobility information to the external API and local shared state.}
+
+\approach{The design treats connectivity and geolocation as a separate hardware service rather than an
+auxiliary function inside the RF process. This separation is methodologically justified because LTE
+modem control and GPS parsing involve distinct peripherals, blocking I/O patterns, and failure modes
+that should not perturb the RF sampling pipeline.}
+
+\realization{The executable entry point is \module{gps-lte/gps-lte.c}. It contains strict parsing for
+numeric coordinates, NMEA-to-decimal conversion helpers, haversine-based displacement checks, and
+logic for PPP recovery through \module{connection\_LTE}. The subordinate libraries
+\module{gps-lte/libs/bacn\_GPS.c}, \module{gps-lte/libs/bacn\_LTE.c}, and
+\module{gps-lte/libs/utils.c} encapsulate GPS UART handling, AT-command transport, HTTP posting, and
+shared-memory persistence. The module also writes \module{last\_lat}, \module{last\_lng}, and
+\module{changed\_gps} so that location state becomes available to the rest of the node without direct
+process coupling.}
+
+\section{Hardware GPIO Abstraction}
+\scopep{GPIO support provides board-specific control of modem power, reset behavior, status lines, and
+antenna routing.}
+
+\approach{The design uses a minimal hardware abstraction layer around \module{libgpiod}. This is a
+sound methodological compromise: the code remains close enough to the platform to preserve exact pin
+semantics, but it avoids scattering raw GPIO requests across unrelated application modules.}
+
+\realization{The abstraction is implemented in \module{common/bacn\_gpio.c} and
+\module{common/bacn\_gpio.h}. These files centralize pin offsets, line request helpers, modem power
+control routines, reset sequencing, status inspection, and antenna selection functions. The build
+system can exclude this dependency through \module{BUILD\_STANDALONE}, which preserves local
+development on non-target hosts.}
+
+\section{Orchestration and State Management}
+\scopep{The orchestration layer determines what the node should do at any moment: remain idle, serve
+realtime acquisitions, execute campaigns, or perform calibration.}
+
+\approach{The repository adopts a supervisory finite-state approach. Mutually exclusive high-level
+modes are represented explicitly, which prevents accidental overlap between incompatible hardware
+operations such as calibration and campaign-driven acquisition. This approach is more robust than an
+implicit state model spread across timers and boolean flags.}
+
+\realization{The state machine is centered on \module{SysState} and \module{GlobalSys} in
+\module{functions.py}. \module{orchestrator.py} implements the control loop, with
+\module{run\_realtime\_logic} handling sticky realtime acquisition and
+\module{run\_campaigns\_logic} handling campaign windows. It also manages subordinate processes,
+including WebRTC publication, through \module{ManagedProc}, stale-process cleanup helpers, and
+explicit stop semantics. The implementation therefore combines logical state management with concrete
+process-lifecycle discipline.}
+
+\section{Campaign Scheduling and Deferred Execution}
+\scopep{Campaign scheduling is the mechanism by which time-bounded acquisition plans received from the
+API are translated into executable local behavior.}
+
+\approach{The design externalizes periodic execution to the operating system's scheduler instead of
+implementing its own always-awake timing loop for campaign shots. This is methodologically effective
+for embedded Linux systems because it reduces application complexity while leveraging a mature system
+scheduler.}
+
+\realization{The scheduler is implemented by \module{CronSchedulerCampaign} in \module{functions.py}.
+It synchronizes API campaign metadata, chooses the highest-priority valid campaign, mirrors its key RF
+parameters into \module{ShmStore}, and writes a crontab entry pointing to \module{campaign\_runner.py}.
+The runner then performs a single acquisition cycle, uploads the result, and applies local storage
+policies when network delivery fails.}
+
+\section{Inter-process Communication and Shared State}
+\scopep{This section covers the mechanisms by which the separate executables cooperate without being
+collapsed into a monolithic process.}
+
+\approach{Two complementary integration mechanisms are used. Request-response control and bulk spectral
+results use ZeroMQ over an IPC endpoint, which is well suited to synchronous command execution between
+the Python control plane and the C RF engine. Low-frequency persistent node state uses a JSON file in
+\module{/dev/shm}, which offers low-latency cross-process visibility while avoiding unnecessary writes
+to flash storage.}
+
+\realization{The ZMQ path is implemented by \module{ZmqPairController} in
+\module{utils/request\_util.py} and by \module{rf/libs/zmq\_util.[ch]} in the native layer. The
+controller enforces strict request-reply semantics and recreates the socket after timeouts to discard
+late replies. Shared state is implemented by \module{ShmStore} in \module{utils/io\_util.py}, which
+uses file locking and atomic update patterns. The GPS-LTE service uses analogous C helpers in
+\module{gps-lte/libs/utils.c} so that both language domains converge on the same persistence model.}
+
+\section{Data Integrity, Retry, and Offline Survivability}
+\scopep{This section examines the mechanisms that preserve measurement artifacts during transient API or
+network failures.}
+
+\approach{The design follows an eventually-deliverable telemetry model. If a measurement cannot be
+uploaded immediately, it should either remain locally recoverable or be discarded only under explicit
+resource constraints. The system therefore combines atomic file persistence, bounded queueing, and a
+dedicated retry worker.}
+
+\realization{Atomic persistence is implemented by \module{atomic\_write\_bytes} in
+\module{utils/io\_util.py}. Campaign samples are stored to \module{Queue/} when uploads fail and to
+\module{Historic/} when uploads succeed and disk conditions permit. The dedicated script
+\module{retry\_queue.py} reads queued JSON files oldest-first, distinguishes transient and permanent
+HTTP failures, deletes corrupt payloads, and preserves ordering by stopping on the first unsent file.
+This is a clear and deliberate resilience policy rather than incidental error handling.}
+
+\section{Observability and Operational Telemetry}
+\scopep{The node requires a self-reporting capability so that remote operators can assess not only
+measurement outputs but also sensor health.}
+
+\approach{Observability is treated as a first-class operational requirement. The node therefore reports
+both static identity metadata and dynamic health metrics such as CPU load, memory usage, disk use,
+temperature, ping latency, calibration timestamp, and last NTP synchronization. This is methodologically
+important because unattended field nodes cannot be managed exclusively through payload success rates.}
+
+\realization{The reporting path is implemented by \module{status.py} and \module{utils/status\_util.py}.
+\module{StatusDevice} reads Linux virtual files such as \module{/proc/stat} and \module{/proc/meminfo},
+extracts recent log fragments, and assembles a normalized status structure via \module{StatusPost}.
+The final payload is transmitted through \module{RequestClient}. Logging itself is hardened by
+\module{cfg.py}, which defines \module{AtomicRotator} and environment-sensitive logging filters.}
+
+\section{Audio Streaming and Remote Listening}
+\scopep{The system includes an optional audio-monitoring path for demodulated signals, distinct from
+the spectral data path.}
+
+\approach{The design uses a split streaming path: native code performs demodulation and Opus-oriented
+audio preparation, while a dedicated Python process bridges the encoded audio into a WebRTC session.
+This separation is methodologically strong because WebRTC negotiation and GStreamer lifecycle handling
+are complex control-plane concerns that should not burden the RF executable.}
+
+\realization{In the native layer, \module{audio\_thread\_fn} in \module{rf/rf.c} drains IQ samples
+from a dedicated audio ring buffer, optionally filters them, demodulates AM or FM, and hands frames to
+the TCP/Opus transmission support libraries \module{rf/libs/opus\_tx.h} and
+\module{rf/libs/net\_audio\_retry.h}. In Python, \module{server\_webrtc.py} accepts the TCP stream,
+builds a GStreamer pipeline around \module{webrtcbin}, and maintains signaling with the remote server.
+The orchestrator starts and stops this process according to demodulation mode.}
+
+\chapter{Design Rationale and Quality Attributes}
+
+\section{Determinism and Timing Discipline}
+\scopep{This section evaluates how the repository preserves timing predictability in the portions of
+the node that interact directly with RF hardware and streaming buffers.}
+
+\approach{Determinism is promoted by reducing callback work, using preallocated or reusable buffers,
+separating audio and PSD paths, and keeping high-level orchestration out of the RF process. Timing
+discipline in SDR systems is less about hard real-time certification than about avoiding systematic
+sample loss, reconfiguration races, and unbounded latency spikes.}
+
+\realization{Evidence includes the minimal \module{rx\_callback}, ring-buffer usage in
+\module{rf/libs/ring\_buffer.c}, RF processing workspaces in \module{rf/rf.c}, and the request
+cooldown mechanism propagated from \module{ServerRealtimeConfig} through \module{parse\_config\_rf}
+into the RF engine's runtime state.}
+
+\section{Fault Containment and Recoverability}
+\scopep{The system must continue operating or degrade safely when hardware, network, or subordinate
+processes fail.}
+
+\approach{Fault containment is achieved through process separation, explicit health checks, bounded
+retries, and staged recovery. The methodological aim is not absolute fault elimination, but controlled
+failure domains and recoverable degradation.}
+
+\realization{The RF engine includes health checks such as \module{ensure\_hackrf\_session\_is\_healthy}
+and \module{recover\_hackrf}. The orchestrator uses stale-process cleanup and managed subprocess
+wrappers. Upload failures are handled by queue persistence and retry workers. The GPS-LTE service
+contains PPP reconnection logic. These mechanisms collectively show that operational failure was
+anticipated as a normal design condition.}
+
+\section{Maintainability and Extension Potential}
+\scopep{This section addresses how easily the codebase can be modified for new campaigns, additional RF
+modes, or deployment changes.}
+
+\approach{Maintainability in embedded monitoring systems depends on module boundaries more than on
+language uniformity. The repository favors explicit modules, small service entry points, configuration
+objects, and domain-specific helper libraries. This supports local reasoning and selective replacement.}
+
+\realization{Examples include the typed Python configuration dataclasses, the dedicated DSP libraries
+under \module{rf/libs/}, the explicit GPS/LTE helper libraries, and the build-time separation between
+standard and standalone modes in \module{CMakeLists.txt} and \module{build.sh}. A future maintainer can
+replace a telemetry endpoint, add a new demodulation branch, or alter campaign scheduling with limited
+impact on unrelated layers.}
+
+\section{Resource Stewardship in an Embedded Context}
+\scopep{The node is intended for resource-constrained deployment, so persistence, logging, and storage
+policies must avoid unnecessary wear or uncontrolled growth.}
+
+\approach{The repository consistently adopts flash-aware operational patterns: RAM-backed shared state,
+atomic file replacement, rotating logs, bounded retry queues, and selective historical retention. These
+choices align with embedded reliability practice, where write amplification and partial-file corruption
+are recurring failure sources.}
+
+\realization{The strongest evidence is the use of \module{/dev/shm/persistent.json}, the
+\module{AtomicRotator} log manager in \module{cfg.py}, the queue and historic directories managed by
+\module{campaign\_runner.py}, and the immediate \module{fsync}-based writes in
+\module{utils/io\_util.py}.}
+
+\chapter{Build, Deployment, and Documentation Method}
+
+\section{Compilation Strategy}
+\scopep{This section documents how the node is built and how the build structure reflects architectural
+intent.}
+
+\approach{The build method distinguishes target deployment from host-side development. This is a
+critical methodological feature because hardware-bound projects often stall if local development
+requires the full peripheral stack.}
+
+\realization{The top-level \module{CMakeLists.txt} defines a standard build, which produces both
+\module{rf\_app} and \module{ltegps\_app}, and a standalone build activated with
+\module{BUILD\_STANDALONE}, which removes the GPIO dependency and compiles only the RF application.
+\module{build.sh} exposes this distinction through its default mode and its \module{-dev} mode.}
+
+\section{Deployment and Service Registration}
+\scopep{The deployment method must provision dependencies, artifacts, shared state, and operating
+system services in a reproducible way.}
+
+\approach{The repository uses a scripted installation workflow that approximates infrastructure as
+code. Although implemented as shell rather than a configuration-management framework, the script is
+methodologically explicit about service shutdown, dependency installation, compilation, permission
+repair, shared-memory initialization, and systemd enablement.}
+
+\realization{These responsibilities are captured in \module{install.sh}. The script installs system
+packages, optionally compiles \module{libgpiod} and \module{kalibrate-hackrf}, creates the Python
+virtual environment, compiles native binaries, initializes \module{/dev/shm/persistent.json},
+registers systemd services through \module{init\_sys.py} and \module{daemons/*.service}, and reboots
+the system at the end.}
+
+\section{Documentation Pipeline}
+\scopep{A mature engineering repository should document not only runtime behavior but also how
+documentation artifacts are generated and refreshed.}
+
+\approach{The repository uses a mixed documentation method aligned with its mixed-language
+implementation: Doxygen for C-level structural documentation and Sphinx for higher-level rendered
+documentation. This is methodologically consistent with the source organization and avoids forcing one
+toolchain to understand both language domains equally well.}
+
+\realization{The automation scripts \module{document.sh} and \module{build\_docs.sh} create the
+documentation environment, run Doxygen, and build Sphinx outputs. The files
+\module{docs/python\_modules.rst} and \module{docs/c\_modules.rst} already define the intended
+documentation entry points for the Python and C layers respectively.}
+
+\chapter{Verification Status and Methodological Gaps}
+
+\section{Current Verification Evidence}
+\scopep{This section documents what forms of validation are currently present in the repository.}
+
+\approach{Verification evidence is evaluated conservatively. The existence of scripts or examples is
+not treated as equivalent to a comprehensive automated test suite; rather, each artifact is classified
+according to the level of assurance it can reasonably provide.}
+
+\realization{The repository contains build verification assets, documentation builds, benchmarking
+tools, and operational test scripts. Examples include \module{test/test\_benchmarking.py},
+\module{test/tester.py}, \module{test/hackrf-max-5min.py}, and the benchmarking support under
+\module{utils/benchmarking.py} and \module{examples/benchmark\_rf\_example.py}. These artifacts provide
+useful performance and manual-operational evidence, but they do not yet constitute broad unit or
+integration-test coverage across the full control plane and native DSP path.}
+
+\section{Limitations Identified During Inspection}
+\scopep{A methodological report should record not only strengths but also explicit limitations that
+affect future assurance work.}
+
+\approach{The principal limitation is that verification is weighted toward operational scripts and
+benchmarking rather than systematic automated assertions over module contracts, failure injection, and
+cross-process integration scenarios. This does not invalidate the architecture, but it constrains the
+level of confidence that can be claimed from repository-local evidence alone.}
+
+\realization{The most visible gaps are the absence of a broad automated test harness for the RF request
+contract, shared-memory concurrency semantics, and orchestrator state transitions under exceptional
+conditions. Additional value would come from deterministic tests around \module{ServerRealtimeConfig},
+\module{ShmStore}, retry semantics in \module{retry\_queue.py}, and parser boundary handling in
+\module{rf/libs/parser.c}.}
+
+\section{Recommended Verification Priorities}
+\scopep{This subsection records technically grounded next steps that follow directly from the inspected
+architecture.}
+
+\approach{Recommended actions are prioritized by architectural leverage: protect interfaces first,
+then validate fault paths, then measure performance regressions. Such sequencing yields faster quality
+improvement than beginning with broad end-to-end hardware tests.}
+
+\realization{
+\begin{enumerate}
+\item add pure-software tests for configuration validation and Nyquist clamping;
+\item add concurrency-oriented tests for \module{ShmStore} update semantics;
+\item add orchestrator tests that simulate API responses and verify correct state transitions;
+\item add contract tests for retry queue behavior under 2xx, 4xx, 5xx, and timeout conditions;
+\item preserve the existing benchmarking scripts as regression monitors for throughput and thermal
+behavior on target hardware.
+\end{enumerate}}
+
+\chapter{Traceability Matrix}
+
+\section{Requirement-to-Module Allocation}
+\scopep{The following matrix maps architectural responsibilities to the modules that currently realize
+them. It is intended to support maintenance, review, and change-impact analysis.}
+
+\approach{Traceability is organized by engineering concern rather than by folder alone. This improves
+its usefulness during audits because reviewers typically reason from required behavior toward source
+artifacts, not in the reverse direction.}
+
+\realization{
+\begin{longtable}{p{0.22\textwidth}p{0.28\textwidth}p{0.42\textwidth}}
+\toprule
+\textbf{Engineering concern} & \textbf{Primary modules} & \textbf{Methodological contribution} \\
+\midrule
+\endhead
+RF acquisition and PSD &
+\module{rf/rf.c}, \module{rf/libs/psd.c}, \module{rf/libs/ring\_buffer.c} &
+Implements the deterministic data path, workspace reuse, ring-buffer decoupling, and PSD generation. \\
+
+Runtime request validation &
+\module{utils/request\_util.py}, \module{rf/libs/parser.c} &
+Applies typed validation, defaults, and Nyquist-safe clamping before hardware reconfiguration. \\
+
+Frequency calibration &
+\module{orchestrator.py}, \module{rf/rf.c}, \module{rf/libs/sdr\_HAL.c} &
+Estimates and persists \module{ppm\_error}, then applies corrected tuning frequencies during operation. \\
+
+GPS and LTE telemetry &
+\module{gps-lte/gps-lte.c}, \module{gps-lte/libs/bacn\_GPS.c}, \module{gps-lte/libs/bacn\_LTE.c} &
+Maintains geolocation and network connectivity in an isolated service domain. \\
+
+GPIO and antenna routing &
+\module{common/bacn\_gpio.c}, \module{common/bacn\_gpio.h} &
+Centralizes board-level control signals and preserves portability through build-time exclusion. \\
+
+Orchestration and system modes &
+\module{orchestrator.py}, \module{functions.py} &
+Defines the global state machine, realtime loop, calibration trigger path, and campaign supervision. \\
+
+Campaign execution &
+\module{functions.py}, \module{campaign\_runner.py} &
+Translates server campaign windows into scheduled local acquisitions and controlled uploads. \\
+
+IPC and shared persistence &
+\module{utils/request\_util.py}, \module{rf/libs/zmq\_util.h}, \module{utils/io\_util.py} &
+Provides synchronous command exchange and low-wear cross-process state sharing. \\
+
+Offline survivability &
+\module{campaign\_runner.py}, \module{retry\_queue.py}, \module{utils/io\_util.py} &
+Ensures measurements remain recoverable across network outages and partial API failures. \\
+
+Status and observability &
+\module{status.py}, \module{utils/status\_util.py}, \module{cfg.py} &
+Collects health metrics, log context, timing metadata, and environment-sensitive diagnostics. \\
+
+Audio publication &
+\module{rf/rf.c}, \module{rf/libs/opus\_tx.h}, \module{server\_webrtc.py} &
+Supports remote listening while isolating signaling complexity from the RF executable. \\
+
+Build and deployment &
+\module{CMakeLists.txt}, \module{build.sh}, \module{install.sh} &
+Encodes reproducible compilation and target provisioning with explicit dev/target separation. \\
+\bottomrule
+\end{longtable}}
+
+\chapter{Conclusion}
+
+\section{Synthesis}
+\scopep{This concluding section consolidates the methodological interpretation of the repository as a
+whole.}
+
+\approach{The node should be understood as a deliberately layered sensing platform rather than as a
+single application. Its architecture reflects an embedded-systems design method in which hardware-
+proximate, timing-sensitive, and buffer-heavy responsibilities remain in C, while coordination,
+policy, networking, and operator-facing workflows remain in Python. The integration strategy relies on
+simple, inspectable mechanisms: synchronous IPC over ZeroMQ and RAM-backed JSON persistence.}
+
+\realization{The repository expresses this method consistently across its implementation and tooling:
+the RF engine, GPS-LTE service, orchestration loop, campaign runner, retry worker, status reporter,
+and documentation pipeline are distinct but interoperable artifacts. The strongest architectural
+qualities evidenced by the code are separation of concerns, resilience to intermittent failures,
+flash-aware persistence discipline, and a clear path for incremental enhancement. The main outstanding
+engineering need is broader automated verification around contract boundaries and failure scenarios.}
+
+\appendix
+
+\chapter{Key Source Inventory}
+
+\begin{tabularx}{\textwidth}{p{0.28\textwidth}Y}
+\toprule
+\textbf{Path} & \textbf{Primary role} \\
+\midrule
+\module{rf/rf.c} & Main RF executable, acquisition loop, calibration, audio thread, JSON reply generation. \\
+\module{rf/libs/parser.c} & JSON parsing, defaults, and boundary enforcement for RF requests. \\
+\module{rf/libs/psd.c} & Spectral estimation algorithms and parameter derivation. \\
+\module{rf/libs/sdr\_HAL.c} & HackRF hardware configuration with PPM-aware tuning. \\
+\module{gps-lte/gps-lte.c} & GPS acquisition, LTE connectivity management, and coordinate reporting. \\
+\module{common/bacn\_gpio.c} & GPIO control for modem power/reset and antenna selection. \\
+\module{orchestrator.py} & Global supervisor for realtime and campaign modes. \\
+\module{functions.py} & Shared orchestration helpers, state model, scheduler, acquisition wrapper. \\
+\module{campaign\_runner.py} & One-shot campaign acquisition and upload worker. \\
+\module{retry\_queue.py} & Deferred upload recovery worker. \\
+\module{status.py} & Status payload generation and publication entry point. \\
+\module{server\_webrtc.py} & WebRTC/GStreamer bridge for remote audio monitoring. \\
+\module{utils/io\_util.py} & Atomic writes, shared-memory persistence, timers. \\
+\module{utils/request\_util.py} & HTTP client, ZMQ controller, configuration dataclasses. \\
+\module{utils/status\_util.py} & Host-health telemetry collection and shaping. \\
+\module{cfg.py} & Environment loading, paths, identity helpers, and logging infrastructure. \\
+\module{CMakeLists.txt}, \module{build.sh}, \module{install.sh} & Build and deployment baseline. \\
+\bottomrule
+\end{tabularx}
+
+\end{document}
