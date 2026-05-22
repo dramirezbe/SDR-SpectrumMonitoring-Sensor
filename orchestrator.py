@@ -457,6 +457,12 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
     timer_force_rotation.init_count(300)
 
     controller = ZmqPairController(addr=cfg.IPC_ADDR, is_server=True, verbose=False)
+    hackrf_backoff_s = 5.0
+    hackrf_unavailable_reasons = {
+        "hackrf_open_failed",
+        "hackrf_unavailable",
+        "rx_start_failed",
+    }
 
     try:
         async with controller as zmq_ctrl:
@@ -520,7 +526,14 @@ async def run_realtime_logic(client: RequestClient, store: ShmStore) -> int:
                     if rc != 0:
                         log.warning(f"[REALTIME] Upload failed (RC {rc}).")
                 else:
-                    log.warning("[REALTIME] Acquisition timeout or DSP error.")
+                    last_error_reason = acquirer.last_error_reason
+                    if last_error_reason in hackrf_unavailable_reasons:
+                        log.warning(
+                            f"[REALTIME] HackRF unavailable ({last_error_reason}); delaying next GET {hackrf_backoff_s:.1f}s."
+                        )
+                        await asyncio.sleep(hackrf_backoff_s)
+                    else:
+                        log.warning("[REALTIME] Acquisition timeout or DSP error.")
 
                 new_conf, _, dt = fetch_realtime_config(client)
                 if not new_conf:

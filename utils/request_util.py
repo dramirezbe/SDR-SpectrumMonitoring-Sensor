@@ -62,10 +62,10 @@ class ServerRealtimeConfig:
             raise ValueError(f"Frecuencia central {self.center_freq_hz} Hz fuera de rango. Volviendo a límites permitidos {self.center_freq_hz/1e6} MHz.")
         
         if not (2_000_000 <= self.sample_rate_hz <= 20_000_000):
-            if self.center_freq_hz < 2_000_000:
-                self.center_freq_hz = 2_000_000
-            if self.center_freq_hz > 20_000_000_000:
-                self.center_freq_hz = 20_000_000_000
+            if self.sample_rate_hz < 2_000_000:
+                self.sample_rate_hz = 2_000_000
+            if self.sample_rate_hz > 20_000_000:
+                self.sample_rate_hz = 20_000_000
             raise ValueError(f"Sample rate {self.sample_rate_hz} Hz fuera de rango.")
         
         # Validación de puertos de antena

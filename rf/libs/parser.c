@@ -83,9 +83,8 @@ int parse_config_rf(const char *json_string, DesiredCfg_t *target) {
     
     cJSON *root = cJSON_Parse(json_string);
     if (root == NULL) {
-        // Log error but keep defaults
-        printf("[PARSER] Warning: JSON is NULL or invalid. Using defaults.\n");
-        return 0; 
+        printf("[PARSER] Error: JSON is NULL or invalid.\n");
+        return -1;
     } 
 
     cJSON *calib = cJSON_GetObjectItemCaseSensitive(root, "calibrate");

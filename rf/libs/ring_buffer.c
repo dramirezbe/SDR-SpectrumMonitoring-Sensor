@@ -42,6 +42,11 @@ void rb_reset(ring_buffer_t *rb) {
     atomic_store_explicit(&rb->head, 0, memory_order_release);
 }
 
+void rb_discard_all(ring_buffer_t *rb) {
+    const size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    atomic_store_explicit(&rb->tail, head, memory_order_release);
+}
+
 /**
  * @internal
  * La función calcula el espacio disponible basándose en la diferencia

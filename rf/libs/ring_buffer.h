@@ -82,6 +82,14 @@ size_t rb_available(ring_buffer_t *rb);
  */
 void rb_reset(ring_buffer_t *rb);
 
+/**
+ * @brief Descarta de forma atómica todos los bytes pendientes de lectura.
+ * @details No toca el contenido físico del búfer, solo adelanta el cursor de
+ * lectura para que futuras lecturas usen únicamente datos nuevos.
+ * @param rb Puntero al búfer.
+ */
+void rb_discard_all(ring_buffer_t *rb);
+
 /** @} */
 
 #endif

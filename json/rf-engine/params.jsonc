@@ -1,22 +1,30 @@
 {
-  //can be pfb or welch
+  // Optional calibration-only request.
+  // When true, the engine performs calibration and ignores the normal PSD fields.
+  "calibrate": false,
+
+  // Can be "pfb" or "welch".
   "method_psd": "pfb",
-  "center_freq_hz": 2400000000,
+
+  "center_freq_hz": 98000000,
   "sample_rate_hz": 20000000,
-  "rbw_hz": 1000,
+  "rbw_hz": 100000,
   "overlap": 0.5,
   "window": "hann",
-  "lna_gain": 32,
-  "vga_gain": 20,
-  "antenna_amp": true,
+  "lna_gain": 0,
+  "vga_gain": 0,
+  "antenna_amp": false,
   "antenna_port": 1,
   "cooldown_request": 1.0,
   "ppm_error": 0.0,
-  //Can be None of not demod (fm, am)
-  "demodulation": "fm",
-  //can be None of not filter
+
+  // Can be "fm", "am", or null for plain PSD mode.
+  "demodulation": null,
+
+  // Optional absolute RF filter limits in Hz.
+  // Use null when no filtering is required.
   "filter": {
-    "start_freq_hz": 2500,
-    "end_freq_hz": 2600
+    "start_freq_hz": 97500000,
+    "end_freq_hz": 98500000
   }
 }

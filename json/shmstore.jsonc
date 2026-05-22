@@ -32,9 +32,10 @@
   "ppm_error": 0.0,
   "method_psd": "pfb",
 
+  // Optional absolute RF filter limits in Hz; may be null.
   "filter": {
-    "start_freq_hz": 87500000,
-    "end_freq_hz": 107500000
+    "start_freq_hz": 97500000,
+    "end_freq_hz": 98500000
   },
 
   //Last ms between https shaking with server 

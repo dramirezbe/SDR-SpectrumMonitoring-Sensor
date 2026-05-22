@@ -246,3 +246,8 @@ benchmarks/
 # AI
 .codex
 .agents/
+
+#Project Cache
+Historic/
+Logs/
+Queue/

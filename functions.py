@@ -277,6 +277,7 @@ class AcquireDual:
     def __init__(self, controller, log):
         self.controller = controller
         self._log = log
+        self.last_error_reason = None
         # These are initialized as defaults but updated dynamically
         self.OFFSET_HZ = 2e6  
         self.PATCH_BW_HZ = 1e6 
@@ -491,6 +492,7 @@ class AcquireDual:
 
     async def _single_acquire(self, rf_params):
         """Low-level acquisition with PLL cooling time."""
+        self.last_error_reason = None
         rf_params = dict(rf_params)
         if rf_params.get("cooldown_request") is None:
             rf_params["cooldown_request"] = 1.0
@@ -500,12 +502,15 @@ class AcquireDual:
         try:
             data = await self.controller.request(rf_params)
         except TimeoutError as exc:
+            self.last_error_reason = "zmq_send_timeout"
             self._log.warning(f"ZMQ send timeout: {exc}")
             return None
         if data is None:
+            self.last_error_reason = "zmq_reply_timeout"
             return None
         if data.get("status") == "error":
-            self._log.warning(f"Acquisition error from RF engine: {data.get('reason', 'unknown')}")
+            self.last_error_reason = data.get("reason", "unknown")
+            self._log.warning(f"Acquisition error from RF engine: {self.last_error_reason}")
             return None
         # PLL/Hardware settle time
         await asyncio.sleep(0.05) 

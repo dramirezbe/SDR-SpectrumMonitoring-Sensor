@@ -286,6 +286,53 @@ static float g_last_cal_ppm = 0.0f;
 static int g_has_last_cal_ppm = 0;
 static rf_processing_workspace_t g_calibration_ws = {0};
 
+static void invalidate_hackrf_state(const char *reason) {
+    if (reason && reason[0] != '\0') {
+        fprintf(stderr, "[RF] Invalidating HackRF state: %s\n", reason);
+    }
+
+    stop_streaming = true;
+
+    if (device != NULL) {
+        int stream_state = hackrf_is_streaming(device);
+        if (stream_state == HACKRF_TRUE) {
+            (void)hackrf_stop_rx(device);
+            usleep(100000);
+        }
+        (void)hackrf_close(device);
+        device = NULL;
+    }
+
+    memset(&current_hw_cfg, 0, sizeof(SDR_cfg_t));
+    rb_reset(&rb);
+    rb_reset(&audio_rb);
+}
+
+static int ensure_hackrf_session_is_healthy(void) {
+    if (device == NULL) return 0;
+
+    uint8_t board_id = BOARD_ID_UNDETECTED;
+    int rc = hackrf_board_id_read(device, &board_id);
+    if (rc != HACKRF_SUCCESS) {
+        fprintf(stderr, "[RF] HackRF health check failed: %s\n",
+                hackrf_error_name((enum hackrf_error)rc));
+        invalidate_hackrf_state("board_id_read_failed");
+        return -1;
+    }
+
+    if (!stop_streaming) {
+        int stream_state = hackrf_is_streaming(device);
+        if (stream_state != HACKRF_TRUE) {
+            fprintf(stderr, "[RF] HackRF streaming lost: %s\n",
+                    hackrf_error_name((enum hackrf_error)stream_state));
+            invalidate_hackrf_state("streaming_stopped");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 
 static float calibrate_hackrf(void) {
     float final_ppm = 0.0f;
@@ -809,13 +856,7 @@ int rx_callback(hackrf_transfer* transfer) {
  */
 int recover_hackrf(void) {
     printf("\n[RECOVERY] Initiating Hardware Reset sequence...\n");
-    if (device != NULL) {
-        stop_streaming = true;
-        hackrf_stop_rx(device);
-        usleep(200000); 
-        hackrf_close(device);
-        device = NULL;
-    }
+    invalidate_hackrf_state("recover_hackrf");
 
     int attempts = 0;
     while (attempts < 3 && keep_running) {
@@ -1258,12 +1299,7 @@ int main() {
 
             if (elapsed >= 15.0 && device != NULL && !atomic_load(&calibration_running)) {
                 printf("[RF] Idle timeout (%.1fs). Closing radio.\n", elapsed);
-                stop_streaming = true;
-                hackrf_stop_rx(device);
-                usleep(100000);
-                hackrf_close(device);
-                device = NULL;
-                memset(&current_hw_cfg, 0, sizeof(SDR_cfg_t));
+                invalidate_hackrf_state("idle_timeout");
             }
             continue;
         }
@@ -1302,13 +1338,18 @@ int main() {
         atomic_store(&audio_ctx.current_fs_hz, (double)local_hack.sample_rate);
         clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
 
+        if (ensure_hackrf_session_is_healthy() != 0) {
+            send_status_reply("error", "hackrf_unavailable");
+            clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
+            continue;
+        }
+
         if (device == NULL) {
-            if (hackrf_open(&device) != HACKRF_SUCCESS) {
-                if (recover_hackrf() != 0 || device == NULL) {
-                    send_status_reply("error", "hackrf_open_failed");
-                    clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
-                    continue;
-                }
+            if (hackrf_open(&device) != HACKRF_SUCCESS || ensure_hackrf_session_is_healthy() != 0 || device == NULL) {
+                invalidate_hackrf_state("hackrf_open_failed");
+                send_status_reply("error", "hackrf_open_failed");
+                clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
+                continue;
             }
         }
 
@@ -1357,12 +1398,19 @@ int main() {
             rb_reset(&audio_rb);
             stop_streaming = false;
             if (hackrf_start_rx(device, rx_callback, NULL) != HACKRF_SUCCESS) {
-                recover_hackrf();
+                invalidate_hackrf_state("rx_start_failed");
                 send_status_reply("error", "rx_start_failed");
                 clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
                 continue;
             }
         }
+
+        /*
+         * Enforce request-scoped capture semantics:
+         * discard any unread IQ accumulated before this request so the reply can
+         * only be built from samples captured after the request arrived.
+         */
+        rb_discard_all(&rb);
 
         struct timespec ts_timeout;
         clock_gettime(CLOCK_REALTIME, &ts_timeout);
@@ -1379,7 +1427,7 @@ int main() {
 
         if (rb_available(&rb) < local_rb.total_bytes && keep_running) {
             fprintf(stderr, "[RF] Error: Acquisition Timeout (buffer empty).\n");
-            recover_hackrf();
+            invalidate_hackrf_state("acquisition_timeout");
             send_status_reply("error", "acquisition_timeout");
             clock_gettime(CLOCK_MONOTONIC, &last_activity_time);
             continue;
