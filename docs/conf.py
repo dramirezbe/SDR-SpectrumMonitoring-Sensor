@@ -27,6 +27,14 @@ latex_elements = {
         \usepackage{amsmath}
         \usepackage{amsfonts}
         \usepackage{amssymb}
+        \usepackage{textcomp}
+        \DeclareUnicodeCharacter{00AB}{\guillemotleft}
+        \DeclareUnicodeCharacter{00BB}{\guillemotright}
+        \DeclareUnicodeCharacter{03A9}{\textohm}
+        \DeclareUnicodeCharacter{2019}{'}
+        \DeclareUnicodeCharacter{201C}{``}
+        \DeclareUnicodeCharacter{201D}{''}
+        \DeclareUnicodeCharacter{2026}{\dots}
     ''',
 }
 
@@ -65,6 +73,8 @@ c_extra_keywords = ['complex', '_Complex', 'double complex']
 
 c_macro_replacement_table = {
     "_Atomic": "",
+    "double complex": "double _Complex",
+    "float complex": "float _Complex",
 }
 
 language = 'es'

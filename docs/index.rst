@@ -22,14 +22,14 @@ Tabla de Contenidos Principal
 
 .. toctree::
    :maxdepth: 2
-   :caption: 🛠️ Capa de Hardware (C)
+   :caption: Capa de Hardware (C)
    :numbered:
 
    c_modules
 
 .. toctree::
    :maxdepth: 2
-   :caption: 🐍 Orquestación (Python)
+   :caption: Orquestación (Python)
    :numbered:
 
    python_modules
