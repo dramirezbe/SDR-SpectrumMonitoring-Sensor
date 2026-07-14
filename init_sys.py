@@ -10,6 +10,8 @@ los archivos de configuración para systemd.
 """
 
 import sys
+import argparse
+import getpass
 import cfg
 from functions import CronSchedulerCampaign, ShmStore
 
@@ -24,7 +26,7 @@ Description=RF service ANE2
 After=network.target
 
 [Service]
-User=anepi
+User=__USER__
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
 # flock asegura instancia única usando un archivo lock temporal
 ExecStart=/usr/bin/flock -n /tmp/rf_app.lock {str(cfg.PROJECT_ROOT)}/rf_app
@@ -44,7 +46,7 @@ Description=LTE/GPS Service
 After=network.target
 
 [Service]
-User=anepi
+User=__USER__
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
 ExecStart=/usr/bin/flock -n /tmp/ltegps_app.lock {str(cfg.PROJECT_ROOT)}/ltegps_app
 Restart=always
@@ -64,7 +66,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=anepi
+User=__USER__
 Restart=always
 RestartSec=5
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
@@ -85,7 +87,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=anepi
+User=__USER__
 Type=oneshot
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
 ExecStartPre=/usr/bin/ping -c 1 -w 5 google.com
@@ -118,7 +120,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-User=anepi
+User=__USER__
 Type=oneshot
 WorkingDirectory={str(cfg.PROJECT_ROOT)}
 ExecStartPre=/usr/bin/ping -c 1 -w 5 google.com
@@ -144,15 +146,17 @@ AccuracySec=1s
 WantedBy=timers.target
 """
 
-def save_daemon_file(filename: str, content: str):
+def save_daemon_file(filename: str, content: str, daemon_user: str = "anepi"):
     """
     Escribe el contenido de un archivo de unidad systemd en el directorio de daemons.
 
     Args:
         filename (str): Nombre del archivo (ej. 'rf-ane2.service').
         content (str): Texto plano con la configuración del servicio.
+        daemon_user (str): Usuario del sistema para los servicios.
     """
     file_path = DAEMONS_DIR / filename
+    content = content.replace("__USER__", daemon_user)
     try:
         with open(file_path, "w") as f:
             f.write(content.strip() + "\n")
@@ -173,7 +177,13 @@ def main() -> int:
     Returns:
         int: 0 si la inicialización fue exitosa, 1 si ocurrió un error crítico.
     """
-    log.info("Starting System Initialization...")
+    parser = argparse.ArgumentParser(description="Systemd init for SDR Sensor")
+    parser.add_argument("--user", default=getpass.getuser(),
+                        help="System user for daemon services (default: current user)")
+    args = parser.parse_args()
+    daemon_user = args.user
+
+    log.info(f"Starting System Initialization (daemon user: {daemon_user})...")
 
     for p in [cfg.QUEUE_DIR, cfg.LOGS_DIR, cfg.HISTORIC_DIR, DAEMONS_DIR]:
         p.mkdir(parents=True, exist_ok=True)
@@ -198,13 +208,13 @@ def main() -> int:
     except Exception as e:
         log.error(f"Error clearing Shared Memory: {e}")
 
-    save_daemon_file("rf-ane2.service", RF_APP_DAEMON)
-    save_daemon_file("ltegps-ane2.service", LTEGPS_DAEMON)
-    save_daemon_file("orchestrator-ane2.service", ORCHESTRATOR_DAEMON)
-    save_daemon_file("retry-queue-ane2.service", QUEUE_DAEMON)
-    save_daemon_file("retry-queue-ane2.timer", QUEUE_DAEMON_TIMER)
-    save_daemon_file("status-ane2.service", STATUS_DAEMON)
-    save_daemon_file("status-ane2.timer", STATUS_DAEMON_TIMER)
+    save_daemon_file("rf-ane2.service", RF_APP_DAEMON, daemon_user)
+    save_daemon_file("ltegps-ane2.service", LTEGPS_DAEMON, daemon_user)
+    save_daemon_file("orchestrator-ane2.service", ORCHESTRATOR_DAEMON, daemon_user)
+    save_daemon_file("retry-queue-ane2.service", QUEUE_DAEMON, daemon_user)
+    save_daemon_file("retry-queue-ane2.timer", QUEUE_DAEMON_TIMER, daemon_user)
+    save_daemon_file("status-ane2.service", STATUS_DAEMON, daemon_user)
+    save_daemon_file("status-ane2.timer", STATUS_DAEMON_TIMER, daemon_user)
 
     log.info("System Initialization Complete.")
     return 0

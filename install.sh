@@ -6,7 +6,7 @@ set -e
 
 # Colores y Configuración
 GREEN='\033[1;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
-TARGET_USER="anepi"; TARGET_GROUP="anepi"
+TARGET_USER="${USER}"; TARGET_GROUP="${USER}"
 
 if [ "$EUID" -ne 0 ]; then
   echo -e "${RED}Error: Ejecutar como root.${NC}"; exit 1
@@ -152,7 +152,7 @@ chmod 666 "$SHM_FILE"
 # 6. Inicialización y Systemd
 # ---------------------------------------------------------
 log "Step 6/7: Registrando servicios..."
-[ -f "init_sys.py" ] && sudo -u "$TARGET_USER" "$PROJECT_DIR/venv/bin/python3" "$PROJECT_DIR/init_sys.py"
+[ -f "init_sys.py" ] && sudo -u "$TARGET_USER" "$PROJECT_DIR/venv/bin/python3" "$PROJECT_DIR/init_sys.py" --user "$TARGET_USER"
 
 DAEMONS_DIR="$PROJECT_DIR/daemons"
 if [ -d "$DAEMONS_DIR" ]; then
