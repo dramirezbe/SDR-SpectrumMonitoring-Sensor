@@ -3,7 +3,7 @@ charset-normalizer==3.4.4
 dotenv==0.9.9
 idna==3.11
 ntplib==0.4.0
-numpy==2.2.0
+numpy==1.19.5
 pandas==3.0.2
 python-crontab==3.3.0
 python-dateutil==2.9.0.post0
