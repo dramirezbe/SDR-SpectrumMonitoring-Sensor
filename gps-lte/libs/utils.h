@@ -49,17 +49,24 @@ int get_wlan0_mac(char *mac_out);
 /**
  * @brief Converts coordinates to JSON and POSTs them via HTTP.
  * @note Automatically retrieves the wlan0 MAC address to include in the JSON.
+ * @note NMEA coordinate fields are unsigned; the hemisphere sign is applied
+ * from the direction indicators (S/W -> negative). If lon_dir_str is missing,
+ * a Western-hemisphere (Colombia) fallback is kept for longitude.
  * * @param base_api_url The server URL (e.g., "http://myserver.com").
  * @param altitude_str Altitude as string.
- * @param latitude_str Latitude as string.
- * @param longitude_str Longitude as string.
+ * @param latitude_str Latitude as string (NMEA ddmm.mmmm, unsigned).
+ * @param lat_dir_str Latitude hemisphere indicator ("N" or "S"), may be NULL/empty.
+ * @param longitude_str Longitude as string (NMEA dddmm.mmmm, unsigned).
+ * @param lon_dir_str Longitude hemisphere indicator ("E" or "W"), may be NULL/empty.
  * @return int 0 on success, non-zero on failure.
  */
 int post_gps_data(
     const char *base_api_url,
     const char *altitude_str,
     const char *latitude_str,
-    const char *longitude_str
+    const char *lat_dir_str,
+    const char *longitude_str,
+    const char *lon_dir_str
 );
 
 /**

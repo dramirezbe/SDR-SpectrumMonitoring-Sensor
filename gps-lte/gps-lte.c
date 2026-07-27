@@ -412,7 +412,9 @@ int main(void)
                     GPSInfo.Longitude != NULL &&
                     has_nonzero_coordinate_rounded(GPSInfo.Latitude) &&
                     has_nonzero_coordinate_rounded(GPSInfo.Longitude)) {
-                    status = post_gps_data(api_url, GPSInfo.Altitude, GPSInfo.Latitude, GPSInfo.Longitude);
+                    status = post_gps_data(api_url, GPSInfo.Altitude,
+                                           GPSInfo.Latitude, GPSInfo.LatDir,
+                                           GPSInfo.Longitude, GPSInfo.LonDir);
                 } else {
                     fprintf(stderr, "Skipping GPS POST: invalid/null coordinates\n");
                 }

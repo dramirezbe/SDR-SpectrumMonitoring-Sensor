@@ -5,6 +5,7 @@
 
 #include "utils.h"
 
+#include <ctype.h>
 #include <cjson/cJSON.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -161,11 +162,13 @@ int post_gps_data(
     const char *base_api_url,
     const char *altitude_str,
     const char *latitude_str,
-    const char *longitude_str)
+    const char *lat_dir_str,
+    const char *longitude_str,
+    const char *lon_dir_str)
 {
     // --- 1. VALIDACIÓN DE SEGURIDAD (Evita el Segmentation Fault) ---
     // Si cualquiera de estos punteros es NULL o el string está vacío, salimos de la función.
-    if (base_api_url == NULL || altitude_str == NULL || 
+    if (base_api_url == NULL || altitude_str == NULL ||
         latitude_str == NULL || longitude_str == NULL) {
         fprintf(stderr, "[UTILS] Error: Datos NULL recibidos. Saltando envío...\n");
         return -1;
@@ -194,12 +197,21 @@ int post_gps_data(
     double raw_lng = atof(longitude_str);
     double alt = atof(altitude_str);
 
-    double final_lat = nmea_to_decimal(raw_lat);
-    double final_lng = nmea_to_decimal(raw_lng);
+    double final_lat = nmea_to_decimal(fabs(raw_lat));
+    double final_lng = nmea_to_decimal(fabs(raw_lng));
 
-    // --- 3. Corrección de Hemisferio (Oeste para Colombia) ---
-    if (final_lng > 0) {
-        final_lng = -final_lng; 
+    // --- 3. Corrección de Hemisferio (según indicador N/S/E/W de la trama NMEA) ---
+    // Los campos NMEA son siempre positivos; el signo lo define la letra de dirección.
+    if (lat_dir_str != NULL && lat_dir_str[0] != '\0') {
+        char dir = (char)toupper((unsigned char)lat_dir_str[0]);
+        final_lat = (dir == 'S') ? -fabs(final_lat) : fabs(final_lat);
+    }
+    if (lon_dir_str != NULL && lon_dir_str[0] != '\0') {
+        char dir = (char)toupper((unsigned char)lon_dir_str[0]);
+        final_lng = (dir == 'W') ? -fabs(final_lng) : fabs(final_lng);
+    } else if (final_lng > 0) {
+        // Fallback sin indicador de dirección: Colombia está en el hemisferio occidental.
+        final_lng = -final_lng;
     }
 
     // --- 4. Formatear JSON ---

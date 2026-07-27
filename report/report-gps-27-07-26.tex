@@ -1,0 +1,320 @@
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{microtype}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\geometry{margin=1in}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{0.45em}
+\setlength{\parindent}{0pt}
+\emergencystretch=2em
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    urlcolor=blue!50!black,
+    pdftitle={Informe tecnico: correccion del signo de latitud GPS (27-07-2026)},
+    pdfauthor={GCPDS}
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=fullflexible,
+    frame=single,
+    framerule=0.2pt
+}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+{\Large Informe Técnico de Incidente\par}
+\vspace{0.7cm}
+{\huge Signo de latitud GPS perdido en el envío al servidor\par}
+\vspace{1.0cm}
+{\large Sensor de monitoreo de espectro SDR --- nodo \texttt{ane7-pi} (Leticia, Amazonas)\par}
+\vfill
+\begin{tabular}{ll}
+Tipo de artefacto: & Informe de diagnóstico y corrección \\
+Severidad: & Alta (ubicación reportada $\sim$900 km al norte) \\
+Componentes afectados: & \path{gps-lte/libs/utils.c}, \path{gps-lte/gps-lte.c} \\
+Componentes descartados: & Backend, base de datos, frontend (mapa) \\
+Fecha del documento: & 27 de julio de 2026 \\
+\end{tabular}
+\vfill
+\begin{minipage}{0.88\textwidth}
+\small
+Este informe documenta el diagnóstico, la causa raíz, la corrección y la verificación del
+defecto por el cual la plataforma web ubicaba el sensor en el hemisferio norte
+(Vichada/Cumaribo, 4.1964~N) cuando el dispositivo se encuentra en Leticia, Amazonas
+($-4.1963$, $-69.9410$). El análisis se basa en inspección directa del código fuente del
+repositorio y en evidencia capturada en el dispositivo en producción.
+\end{minipage}
+\end{titlepage}
+
+\pagenumbering{arabic}
+
+\chapter{Resumen ejecutivo}
+
+La plataforma mostraba el sensor $\sim$900~km al norte de su posición real porque el
+\textbf{propio sensor transmitía la latitud sin signo}. El binario \texttt{ltegps\_app}
+enviaba \texttt{"lat": 4.196348} (positivo) en el POST HTTP al endpoint \path{/gps},
+mientras que internamente sí calculaba el valor correcto ($-4.1963464$) para su memoria
+compartida. La causa raíz está en la función \lstinline|post_gps_data()|
+(\path{gps-lte/libs/utils.c}), que convertía las coordenadas NMEA a grados decimales sin
+recibir ni aplicar el indicador de hemisferio (N/S/E/W). Backend, base de datos y frontend
+quedan \textbf{descartados} como causa: el servidor respondía
+\texttt{\{"success":true\}} almacenando fielmente el valor (incorrecto) recibido.
+
+La corrección ya está implementada y verificada: se extiende \lstinline|post_gps_data()|
+para recibir los indicadores de dirección NMEA y aplicar el signo correspondiente
+(S/W $\rightarrow$ negativo). Tres archivos modificados, compilación y enlace verificados,
+y prueba unitaria de la conversión superada con los valores reales del log del dispositivo.
+
+\chapter{Diagnóstico}
+
+\section{Síntoma reportado}
+
+\begin{itemize}
+\item Posición real del dispositivo: Leticia, Amazonas ($-4.1963$, $-69.9410$).
+\item Posición mostrada en la plataforma: Vichada/Cumaribo ($+4.1964$, $-69.9410$).
+\item La longitud era correcta; solo la latitud perdía el signo negativo.
+\end{itemize}
+
+\section{Las dos rutas de la coordenada dentro del sensor}
+
+La trama NMEA cruda del módulo GPS transporta campos \emph{sin signo}; el hemisferio se
+indica únicamente con una letra (N/S para latitud, E/W para longitud):
+
+\begin{lstlisting}
+Jul 27 12:38:39 ane7-pi ltegps-ane2[827]: Latitude: 0411.780345, Longitude: 06956.463437, Altitude: 124.5
+\end{lstlisting}
+
+Es decir, \texttt{0411.780345} = $4^\circ\,11.780345'$ = $4.1963^\circ$, y la letra
+\texttt{S} (parseada en \lstinline|GPSInfo.LatDir|) es la única portadora del signo.
+A partir de ese dato crudo, el código tenía dos rutas divergentes:
+
+\begin{center}
+\begin{tabular}{@{}p{0.46\textwidth}p{0.46\textwidth}@{}}
+\toprule
+\textbf{Ruta A: memoria compartida (correcta)} & \textbf{Ruta B: POST HTTP (defectuosa)} \\
+\midrule
+\lstinline|gps_to_decimal()| (\path{gps-lte.c:73}) recibe \lstinline|GPSInfo.LatDir| y aplica \texttt{S $\rightarrow$ -fabs(val)}. &
+\lstinline|post_gps_data()| (\path{utils.c:160}) recibía solo las cadenas NMEA crudas, \textbf{sin} el indicador de dirección. \\
+Escribe \path{/dev/shm/persistent.json}: \texttt{"last\_lat":-4.1963464} (formato \texttt{\%.7f}). &
+Transmitía \texttt{"lat": 4.196346} (formato \texttt{\%.6f}) al endpoint \path{/gps}. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Causa raíz}
+
+En \path{gps-lte/gps-lte.c:415} el sitio de llamada no pasaba los campos de dirección
+(\lstinline|GPSInfo.LatDir|, \lstinline|GPSInfo.LonDir|), que sí existen y ya estaban
+parseados. Dentro de \lstinline|post_gps_data()|:
+
+\begin{lstlisting}[language=C]
+double final_lat = nmea_to_decimal(raw_lat);   // ddmm.mmmm -> dd.dddd, SIN signo
+double final_lng = nmea_to_decimal(raw_lng);
+
+// Correccion de Hemisferio (Oeste para Colombia)
+if (final_lng > 0) {
+    final_lng = -final_lng;   // hack fijo: solo longitud
+}
+// Latitud: NUNCA se corregia
+\end{lstlisting}
+
+La longitud se salvaba por un hack codificado a mano (``Colombia está al oeste''), pero la
+latitud quedaba positiva para cualquier ubicación del hemisferio sur. La aritmética
+confirma el síntoma con exactitud: \texttt{atof("0411.7808")} $= 411.7808$;
+$\texttt{nmea\_to\_decimal} = 4 + 11.7808/60 = \mathbf{+4.1964}$, el valor erróneo
+observado en la plataforma.
+
+\section{Por qué la evidencia de \texttt{strace} parecía exonerar al sensor}
+
+Se capturó en el dispositivo:
+
+\begin{lstlisting}
+sudo strace -e trace=read -e read=N -s 256 -p 827
+read(4, "{\"last_lat\":-4.1963464,\"last_lng\":-69.9410436,\"delta_t_ms\":849,\"campaign_id\":315,...,\"window\":\"hamming\",\"lna_gain\":40,...", 4095) = 450
+read(4, "", 3645) = 0
+\end{lstlisting}
+
+Esto \textbf{no} es tráfico de red. Es la lectura del archivo local
+\path{/dev/shm/persistent.json} (tmpfs), por tres razones independientes:
+
+\begin{enumerate}
+\item \textbf{Los flags}: se trazaron solo llamadas \texttt{read()} sobre un descriptor de
+archivo; nunca \texttt{sendto()}/\texttt{write()} del socket.
+\item \textbf{El contenido}: el JSON incluye claves de campaña y RF
+(\texttt{center\_freq\_hz}, \texttt{lna\_gain}, \texttt{window}, \texttt{overlap}) que
+escribe el orquestador Python vía \lstinline|ShmStore|. Ningún payload HTTP del sensor
+contiene parámetros de RF; el POST a \path{/gps} solo lleva \texttt{mac}, \texttt{lat},
+\texttt{lng}, \texttt{alt}.
+\item \textbf{El patrón de lectura}: \texttt{read(..., 4095) = 450} seguido de
+\texttt{read(...) = 0} (EOF) corresponde a \lstinline|read_all_from_fd_gps()|
+(\path{utils.c:16}), invocado por \lstinline|shm_consult_persistent_gps()| en el bloque
+de histéresis (\path{gps-lte.c:433--434}) en cada ciclo.
+\end{enumerate}
+
+Además, la URL de la API es HTTPS (\path{https://rsm.ane.gov.co:12443}): aun trazando el
+socket, TLS cifra el cuerpo antes del \emph{syscall}; el payload real jamás es visible en
+\texttt{strace}. El único JSON en claro visible en los \emph{syscalls} de este proceso es
+el del archivo de memoria compartida.
+
+\section{Evidencia definitiva en el dispositivo}
+
+\lstinline|post_gps_data()| imprime exactamente lo que transmite (\path{utils.c:247}).
+El journal del servicio mostró:
+
+\begin{lstlisting}
+Jul 27 12:47:05 ane7-pi ltegps-ane2[827]: {"success":true,"message":"GPS data received"}[UTILS] Datos GPS (4.196348, -69.941085, 124.3)enviados con exito.
+\end{lstlisting}
+
+Y simultáneamente, el archivo de memoria compartida:
+
+\begin{lstlisting}
+$ cat /dev/shm/persistent.json
+{"last_lat":-4.1963464,"last_lng":-69.9410436,...,"changed_gps":false}
+\end{lstlisting}
+
+Mismo dispositivo, mismo instante: \textbf{transmitido} $+4.196348$ (erróneo),
+\textbf{almacenado localmente} $-4.1963464$ (correcto). Las dos rutas, capturadas en vivo.
+La respuesta \texttt{success:true} del servidor confirma que el backend almacena
+fielmente lo recibido: la pérdida del signo ocurre en el sensor.
+
+\chapter{Corrección implementada}
+
+Cambio quirúrgico en tres archivos (rama de trabajo, sin efectos colaterales):
+
+\begin{itemize}
+\item \path{gps-lte/libs/utils.h} --- declaración de \lstinline|post_gps_data()| extendida
+con \texttt{lat\_dir\_str} y \texttt{lon\_dir\_str}, documentación actualizada.
+\item \path{gps-lte/libs/utils.c} --- el signo se deriva del indicador NMEA
+(S/W $\rightarrow$ \texttt{-fabs()}, N/E $\rightarrow$ \texttt{fabs()}), con
+\lstinline|toupper()| para robustez. Se añadió \texttt{fabs()} defensivo sobre el valor
+crudo y se conserva el fallback ``Colombia al oeste'' \emph{únicamente} cuando el
+indicador de longitud está ausente, para no regresionar el caso sin dirección.
+\item \path{gps-lte/gps-lte.c:415} --- el sitio de llamada ahora pasa
+\lstinline|GPSInfo.LatDir| y \lstinline|GPSInfo.LonDir|.
+\end{itemize}
+
+\begin{lstlisting}[language=C]
+double final_lat = nmea_to_decimal(fabs(raw_lat));
+double final_lng = nmea_to_decimal(fabs(raw_lng));
+
+// Correccion de hemisferio segun indicador N/S/E/W de la trama NMEA
+if (lat_dir_str != NULL && lat_dir_str[0] != '\0') {
+    char dir = (char)toupper((unsigned char)lat_dir_str[0]);
+    final_lat = (dir == 'S') ? -fabs(final_lat) : fabs(final_lat);
+}
+if (lon_dir_str != NULL && lon_dir_str[0] != '\0') {
+    char dir = (char)toupper((unsigned char)lon_dir_str[0]);
+    final_lng = (dir == 'W') ? -fabs(final_lng) : fabs(final_lng);
+} else if (final_lng > 0) {
+    final_lng = -final_lng;  // fallback sin indicador: hemisferio occidental
+}
+\end{lstlisting}
+
+\chapter{Verificación}
+
+\section{Compilación}
+
+Nota de entorno: \texttt{./build.sh -dev} compila \emph{únicamente} \texttt{rf\_app}
+(el modo \texttt{BUILD\_STANDALONE} de CMake no define el objetivo \texttt{ltegps\_app}),
+por lo que no sirve para verificar cambios de GPS. El binario \texttt{ltegps\_app}
+requiere gpiod (solo disponible en la Raspberry Pi). Se verificó compilación y enlace
+completos en escritorio compilando manualmente con cabeceras \emph{stub} para
+gpiod/curl/cJSON:
+
+\begin{center}
+\begin{tabular}{@{}p{0.34\textwidth}p{0.58\textwidth}@{}}
+\toprule
+\textbf{Resultado} & \textbf{Detalle} \\
+\midrule
+\texttt{utils.c}, \texttt{gps-lte.c} & Compilación limpia con \texttt{-Wall -Wextra}, 0 advertencias. \\
+Enlace \texttt{ltegps\_app} completo & Exitoso (\texttt{-lcurl -lcjson -lm -lpthread}). \\
+Advertencias restantes & Preexistentes en \path{bacn_GPS.c}, \path{bacn_LTE.c}, \path{bacn_gpio.c} (no modificados). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Prueba unitaria de la conversión}
+
+Se ejercitó la lógica corregida con los valores reales del log del dispositivo y los
+cuatro cuadrantes de hemisferio:
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Caso} & \textbf{Entrada NMEA} & \textbf{Resultado} & \textbf{OK} \\
+\midrule
+Leticia (S/W, dato real) & \texttt{0411.781722,S 06956.463968,W} & $-4.1963620$, $-69.9410661$ & \checkmark \\
+Vichada (N/W) & \texttt{0606.000000,N 06955.000000,W} & $+6.1000000$, $-69.9166667$ & \checkmark \\
+Bogotá (N/W) & \texttt{0436.000000,N 07405.000000,W} & $+4.6000000$, $-74.0833333$ & \checkmark \\
+Sin dirección (fallback) & \texttt{0411.781722 06956.463968} & lng $-69.9410661$ & \checkmark \\
+Minúsculas (\texttt{s}/\texttt{w}) & \texttt{0411.781722,s} & $-4.1963620$ & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Despliegue y verificación final (en la Raspberry Pi)}
+
+\begin{lstlisting}[language=bash]
+sudo ./build.sh                              # modo estandar (incluye gpiod y ltegps_app)
+sudo systemctl restart ltegps-ane2.service
+journalctl -u ltegps-ane2.service -f | grep "Datos GPS"
+\end{lstlisting}
+
+Criterio de aceptación: la línea debe mostrar latitud negativa en el primer ciclo de envío
+posterior al reinicio.
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Binario} & \textbf{Salida esperada en journal} \\
+\midrule
+Actual (defectuoso) & \texttt{Datos GPS (4.196348, -69.941085, 124.3)} \\
+Corregido & \texttt{Datos GPS (-4.196348, -69.941085, 124.3)} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+La plataforma corregirá la posición del marcador con el primer POST aceptado tras el
+reinicio; no se requieren cambios en backend, base de datos ni frontend. Los registros
+históricos erróneos permanecen, pero la posición en vivo se autocorrige.
+
+\chapter{Recomendaciones}
+
+\begin{enumerate}
+\item \textbf{Eliminar la duplicación de conversores NMEA.} Coexisten
+\lstinline|nmea_to_decimal()| (\path{utils.c}) y \lstinline|gps_to_decimal()|
+(\path{gps-lte.c}) con semántica divergente; esa divergencia es el origen de esta clase de
+error. Consolidar en una única función compartida.
+\item \textbf{Eliminar hacks geográficos codificados a mano.} La regla fija ``longitud
+positiva $\rightarrow$ negar'' asume Colombia al oeste; la fuente de verdad debe ser
+siempre el indicador N/S/E/W de la trama.
+\item \textbf{Validación en servidor (defensa en profundidad).} Aunque no fue la causa,
+el backend podría registrar advertencia cuando un sensor reporte una coordenada fuera del
+ámbito nacional esperado, como detección temprana de anomalías de ingesta.
+\item \textbf{Método de verificación de payload.} Para auditar lo que el sensor transmite,
+usar el \lstinline|printf| de \lstinline|post_gps_data()| vía
+\texttt{journalctl -u ltegps-ane2.service | grep "Datos GPS"}; \texttt{strace} no es
+apto porque el tráfico es TLS y el único JSON en claro visible es el de
+\path{/dev/shm/persistent.json}.
+\end{enumerate}
+
+\end{document}
