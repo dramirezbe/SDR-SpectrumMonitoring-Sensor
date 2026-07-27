@@ -16,9 +16,14 @@ Hybrid **C (data plane) + Python 3.11+ (control plane)** sensor for a HackRF One
 # Dev integration flow (venv, no systemd, no reboot)
 sudo ./install-local.sh
 
-# Production deployment (systemd, reboot)
+# Production deployment (builds first, stops services late, restarts them, then reboots)
 sudo ./install.sh
+
+# Same but skip the final reboot (ltegps keeps old binary until manual restart)
+sudo ./install.sh --no-reboot
 ```
+
+`install.sh` logs every run to `Logs/install_YYYYMMDD_HHMMSS.log` and, on failure, restarts any service it stopped before aborting. Python deps reuse the venv when `requirements.txt` is unchanged (stamp: `venv/.requirements.sha256`).
 
 **No lint, typecheck, or CI commands exist** in this repo. Do not try to run `ruff`, `flake8`, `mypy`, `clang-tidy`, `mypy`, or `pytest` — they are not configured.
 
